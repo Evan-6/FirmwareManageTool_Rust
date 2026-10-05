@@ -1,0 +1,27 @@
+name: Windows build and portable package
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Build, test and package
+        shell: pwsh
+        run: ./scripts/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FirmwareManageTool_Rust-windows-x64
+          path: dist/*.zip
+  pure-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --no-default-features
