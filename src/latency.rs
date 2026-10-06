@@ -277,13 +277,22 @@ pub fn measure<T: HidTransport>(
                             config.mode == Mode::HighPrecision,
                         )?;
                         let start = counter.ticks();
-                        session.queue("d:a", "ok:down|ok:already_down", cancel)?;
+                        session.key(
+                            input_protocol::KeyId::from_token("a").unwrap(),
+                            true,
+                            cancel,
+                        )?;
                         wait_key(true, &counter, config.mode, cancel)?;
                         let end = counter.ticks();
                         duration = counter.millis(end - start);
                     }
                     session.finish(cancel)?;
-                    session.command("u:a", "ok:up|ok:already_up", cancel)?;
+                    session.key(
+                        input_protocol::KeyId::from_token("a").unwrap(),
+                        false,
+                        cancel,
+                    )?;
+                    session.finish(cancel)?;
                     wait_key(false, &counter, config.mode, cancel)?;
                     let after = session.status(cancel)?;
                     ensure!(

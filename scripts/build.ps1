@@ -8,9 +8,9 @@ try {
     if (-not $SkipChecks) {
         & cargo fmt --all -- --check
         if ($LASTEXITCODE -ne 0) { throw 'Formatting check failed.' }
-        & cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+        & cargo clippy --locked --workspace --target x86_64-pc-windows-msvc --all-targets -- -D warnings
         if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
-        & cargo test --locked --target x86_64-pc-windows-msvc --all-targets
+        & cargo test --locked --workspace --target x86_64-pc-windows-msvc --all-targets
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
     }
     & cargo build --locked --release --target x86_64-pc-windows-msvc

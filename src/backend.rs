@@ -327,8 +327,13 @@ fn worker(
                 let result = (|| -> Result<()> {
                     if let Some(active) = session.as_mut() {
                         active.poll()?;
-                        if held && heartbeat.elapsed() >= Duration::from_secs(5) {
-                            active.command("ping", "pong", &Cancellation::default())?;
+                        if active.needs_heartbeat(held)
+                            && heartbeat.elapsed() >= active.heartbeat_interval()
+                        {
+                            active.input(
+                                input_protocol::v3::Command::Heartbeat,
+                                &Cancellation::default(),
+                            )?;
                             heartbeat = Instant::now();
                         }
                     }

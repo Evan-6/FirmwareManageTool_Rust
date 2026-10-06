@@ -10,6 +10,7 @@ default = ["gui"]
 gui = ["dep:eframe"]
 
 [dependencies]
+input-protocol = { path = "shared/input-protocol" }
 anyhow = "1"
 crossbeam-channel = "0.5"
 eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }
@@ -27,3 +28,9 @@ libc = "0.2"
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
+
+[workspace]
+members = ["shared/input-protocol"]
+
+[dev-dependencies]
+input-protocol = { path = "shared/input-protocol", features = ["test-support"] }

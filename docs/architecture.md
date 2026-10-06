@@ -4,11 +4,16 @@ GUI 只保存顯示狀態，透過型別化 AppCommand／AppEvent 與背景工�
 同時只執行一項裝置工作，HID handle 由工作端獨占。cancel 使用原子旗標，
 bootloader 選擇使用獨立 channel，長工作不阻塞 GUI。
 
-HidTransport／ProcessRunner 可替換為假裝置／假子程序。Session 使用持久 handle、
-64-byte report、ASCII 行分段／合併解析，最多 4 個 outstanding 命令。
-沒有 sequence id，因此按發送順序匹配 ACK；錯誤／timeout／failsafe 令 session 失效，
-丟棄並重新開啟、清理舊回應、reset／status、hello，不能把舊 ACK 視為新操作成功。
-滑鼠工作最後等待全部 ACK、查詢 status，並檢查 TX／HID／failsafe 計數未增加。
+HidTransport／ProcessRunner 可替換為假裝置／假子程序。裝置傳輸在 `src/hid/transport.rs`，
+v2 文字編解碼在 `src/protocol/v2.rs`，v3 I/O 在 `src/hid/v3.rs`，共用編解碼與
+session 序號在 `shared/input-protocol`。業務端使用型別化輸入，不自行組合二進位封包。
+
+Session 先查詢 Feature 14。v3 使用 64-byte 完整封包、session／sequence，
+一般輸入無 ACK；OPEN／STATUS／BARRIER／RELEASE_ALL／BOOTLOADER 有對應回覆。
+屏障等待先前 USB report 傳送完成，不代表 Windows 應用程式已處理。
+v2 沒有 sequence id，以發送順序匹配 ACK，最多 4 個 outstanding 命令。
+兩者的短寫入、錯誤、timeout 或 failsafe 都使 session 失效，重連丟棄舊回應並清空輸入。
+滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID／failsafe 計數未增加。
 
 | 階段 | 期限 |
 | --- | --- |
@@ -43,11 +48,12 @@ bootloader，避免自動選到另一台板子。GUI 直接呼叫 arduino-cli，
 上傳腳本，也不依賴 runtime CDC touch。AVR 以 upload --verify 傳輸；RP2040
 複製確切 sketch 的 UF2，任何 OS 複製錯誤保留為失敗。兩者都再驗證 runtime hello。
 驗證排除傳輸前已存在的 runtime 裝置，避免別台板子的 hello 被當成此次燒錄成功。
-兩款板子的 USB 身分及 fw=2.0 相同，握手只確認 protocol=2 可用，無映像 hash
-或 MCU 身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
+AVR 以 v2 hello 驗證；新版 RP2040 以 v3 能力查詢與 OPEN 驗證，並檢查 Pico／XIAO 板型。
+RP2040 使用 MCU unique ID 作為 USB 序號與能力識別，未提供映像 hash 或密碼學身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
 
 擬人化軌跡以主螢幕實體像素計算 minimum-jerk／Bézier，保留低振幅偏移、
 重複像素省略及精確最後目標。排程遲到跳過過期節點，不補送所有舊點。
-原始相對移動及滾輪以 ±1024 拆指令，8-bit USB report 拆分仍由原韌體執行。
-點擊／拖曳有釋放 guard，手動按住每 5 秒 ping。斷線不能保證 USB 已釋放，
-只能回報未知並在重新連線後 reset；30 秒 failsafe 最終由韌體處理。
+原始相對移動及滾輪以 ±1024 拆指令，8-bit USB report 拆分由韌體排程執行。
+點擊／拖曳有釋放 guard。v3 閒置時也每 500ms 續租；v2 按住時每 5 秒 ping。
+斷線回報釋放狀態未知，重新連線先清空。RP2040 v3 租約 2 秒，v2 租約 30 秒。
+RP2040 的 32 項輸出佇列保留按鍵／按鈕順序；滿載或等待超過 50ms 時停止 session 並優先釋放。

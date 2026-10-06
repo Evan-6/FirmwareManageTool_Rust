@@ -1,0 +1,951 @@
+{
+  "version": 3,
+  "keys": [
+    {
+      "page": 7,
+      "usage": 4,
+      "token": "a",
+      "aliases": [],
+      "code": "KeyA"
+    },
+    {
+      "page": 7,
+      "usage": 5,
+      "token": "b",
+      "aliases": [],
+      "code": "KeyB"
+    },
+    {
+      "page": 7,
+      "usage": 6,
+      "token": "c",
+      "aliases": [],
+      "code": "KeyC"
+    },
+    {
+      "page": 7,
+      "usage": 7,
+      "token": "d",
+      "aliases": [],
+      "code": "KeyD"
+    },
+    {
+      "page": 7,
+      "usage": 8,
+      "token": "e",
+      "aliases": [],
+      "code": "KeyE"
+    },
+    {
+      "page": 7,
+      "usage": 9,
+      "token": "f",
+      "aliases": [],
+      "code": "KeyF"
+    },
+    {
+      "page": 7,
+      "usage": 10,
+      "token": "g",
+      "aliases": [],
+      "code": "KeyG"
+    },
+    {
+      "page": 7,
+      "usage": 11,
+      "token": "h",
+      "aliases": [],
+      "code": "KeyH"
+    },
+    {
+      "page": 7,
+      "usage": 12,
+      "token": "i",
+      "aliases": [],
+      "code": "KeyI"
+    },
+    {
+      "page": 7,
+      "usage": 13,
+      "token": "j",
+      "aliases": [],
+      "code": "KeyJ"
+    },
+    {
+      "page": 7,
+      "usage": 14,
+      "token": "k",
+      "aliases": [],
+      "code": "KeyK"
+    },
+    {
+      "page": 7,
+      "usage": 15,
+      "token": "l",
+      "aliases": [],
+      "code": "KeyL"
+    },
+    {
+      "page": 7,
+      "usage": 16,
+      "token": "m",
+      "aliases": [],
+      "code": "KeyM"
+    },
+    {
+      "page": 7,
+      "usage": 17,
+      "token": "n",
+      "aliases": [],
+      "code": "KeyN"
+    },
+    {
+      "page": 7,
+      "usage": 18,
+      "token": "o",
+      "aliases": [],
+      "code": "KeyO"
+    },
+    {
+      "page": 7,
+      "usage": 19,
+      "token": "p",
+      "aliases": [],
+      "code": "KeyP"
+    },
+    {
+      "page": 7,
+      "usage": 20,
+      "token": "q",
+      "aliases": [],
+      "code": "KeyQ"
+    },
+    {
+      "page": 7,
+      "usage": 21,
+      "token": "r",
+      "aliases": [],
+      "code": "KeyR"
+    },
+    {
+      "page": 7,
+      "usage": 22,
+      "token": "s",
+      "aliases": [],
+      "code": "KeyS"
+    },
+    {
+      "page": 7,
+      "usage": 23,
+      "token": "t",
+      "aliases": [],
+      "code": "KeyT"
+    },
+    {
+      "page": 7,
+      "usage": 24,
+      "token": "u",
+      "aliases": [],
+      "code": "KeyU"
+    },
+    {
+      "page": 7,
+      "usage": 25,
+      "token": "v",
+      "aliases": [],
+      "code": "KeyV"
+    },
+    {
+      "page": 7,
+      "usage": 26,
+      "token": "w",
+      "aliases": [],
+      "code": "KeyW"
+    },
+    {
+      "page": 7,
+      "usage": 27,
+      "token": "x",
+      "aliases": [],
+      "code": "KeyX"
+    },
+    {
+      "page": 7,
+      "usage": 28,
+      "token": "y",
+      "aliases": [],
+      "code": "KeyY"
+    },
+    {
+      "page": 7,
+      "usage": 29,
+      "token": "z",
+      "aliases": [],
+      "code": "KeyZ"
+    },
+    {
+      "page": 7,
+      "usage": 30,
+      "token": "1",
+      "aliases": [],
+      "code": "Digit1"
+    },
+    {
+      "page": 7,
+      "usage": 31,
+      "token": "2",
+      "aliases": [],
+      "code": "Digit2"
+    },
+    {
+      "page": 7,
+      "usage": 32,
+      "token": "3",
+      "aliases": [],
+      "code": "Digit3"
+    },
+    {
+      "page": 7,
+      "usage": 33,
+      "token": "4",
+      "aliases": [],
+      "code": "Digit4"
+    },
+    {
+      "page": 7,
+      "usage": 34,
+      "token": "5",
+      "aliases": [],
+      "code": "Digit5"
+    },
+    {
+      "page": 7,
+      "usage": 35,
+      "token": "6",
+      "aliases": [],
+      "code": "Digit6"
+    },
+    {
+      "page": 7,
+      "usage": 36,
+      "token": "7",
+      "aliases": [],
+      "code": "Digit7"
+    },
+    {
+      "page": 7,
+      "usage": 37,
+      "token": "8",
+      "aliases": [],
+      "code": "Digit8"
+    },
+    {
+      "page": 7,
+      "usage": 38,
+      "token": "9",
+      "aliases": [],
+      "code": "Digit9"
+    },
+    {
+      "page": 7,
+      "usage": 39,
+      "token": "0",
+      "aliases": [],
+      "code": "Digit0"
+    },
+    {
+      "page": 7,
+      "usage": 58,
+      "token": "f1",
+      "aliases": [],
+      "code": "F1"
+    },
+    {
+      "page": 7,
+      "usage": 59,
+      "token": "f2",
+      "aliases": [],
+      "code": "F2"
+    },
+    {
+      "page": 7,
+      "usage": 60,
+      "token": "f3",
+      "aliases": [],
+      "code": "F3"
+    },
+    {
+      "page": 7,
+      "usage": 61,
+      "token": "f4",
+      "aliases": [],
+      "code": "F4"
+    },
+    {
+      "page": 7,
+      "usage": 62,
+      "token": "f5",
+      "aliases": [],
+      "code": "F5"
+    },
+    {
+      "page": 7,
+      "usage": 63,
+      "token": "f6",
+      "aliases": [],
+      "code": "F6"
+    },
+    {
+      "page": 7,
+      "usage": 64,
+      "token": "f7",
+      "aliases": [],
+      "code": "F7"
+    },
+    {
+      "page": 7,
+      "usage": 65,
+      "token": "f8",
+      "aliases": [],
+      "code": "F8"
+    },
+    {
+      "page": 7,
+      "usage": 66,
+      "token": "f9",
+      "aliases": [],
+      "code": "F9"
+    },
+    {
+      "page": 7,
+      "usage": 67,
+      "token": "f10",
+      "aliases": [],
+      "code": "F10"
+    },
+    {
+      "page": 7,
+      "usage": 68,
+      "token": "f11",
+      "aliases": [],
+      "code": "F11"
+    },
+    {
+      "page": 7,
+      "usage": 69,
+      "token": "f12",
+      "aliases": [],
+      "code": "F12"
+    },
+    {
+      "page": 7,
+      "usage": 104,
+      "token": "f13",
+      "aliases": [],
+      "code": "F13"
+    },
+    {
+      "page": 7,
+      "usage": 105,
+      "token": "f14",
+      "aliases": [],
+      "code": "F14"
+    },
+    {
+      "page": 7,
+      "usage": 106,
+      "token": "f15",
+      "aliases": [],
+      "code": "F15"
+    },
+    {
+      "page": 7,
+      "usage": 107,
+      "token": "f16",
+      "aliases": [],
+      "code": "F16"
+    },
+    {
+      "page": 7,
+      "usage": 108,
+      "token": "f17",
+      "aliases": [],
+      "code": "F17"
+    },
+    {
+      "page": 7,
+      "usage": 109,
+      "token": "f18",
+      "aliases": [],
+      "code": "F18"
+    },
+    {
+      "page": 7,
+      "usage": 110,
+      "token": "f19",
+      "aliases": [],
+      "code": "F19"
+    },
+    {
+      "page": 7,
+      "usage": 111,
+      "token": "f20",
+      "aliases": [],
+      "code": "F20"
+    },
+    {
+      "page": 7,
+      "usage": 112,
+      "token": "f21",
+      "aliases": [],
+      "code": "F21"
+    },
+    {
+      "page": 7,
+      "usage": 113,
+      "token": "f22",
+      "aliases": [],
+      "code": "F22"
+    },
+    {
+      "page": 7,
+      "usage": 114,
+      "token": "f23",
+      "aliases": [],
+      "code": "F23"
+    },
+    {
+      "page": 7,
+      "usage": 115,
+      "token": "f24",
+      "aliases": [],
+      "code": "F24"
+    },
+    {
+      "page": 7,
+      "usage": 80,
+      "token": "left",
+      "aliases": [],
+      "code": "ArrowLeft"
+    },
+    {
+      "page": 7,
+      "usage": 79,
+      "token": "right",
+      "aliases": [],
+      "code": "ArrowRight"
+    },
+    {
+      "page": 7,
+      "usage": 82,
+      "token": "up",
+      "aliases": [],
+      "code": "ArrowUp"
+    },
+    {
+      "page": 7,
+      "usage": 81,
+      "token": "down",
+      "aliases": [],
+      "code": "ArrowDown"
+    },
+    {
+      "page": 7,
+      "usage": 226,
+      "token": "left_alt",
+      "aliases": [
+        "alt"
+      ],
+      "code": "AltLeft"
+    },
+    {
+      "page": 7,
+      "usage": 230,
+      "token": "right_alt",
+      "aliases": [],
+      "code": "AltRight"
+    },
+    {
+      "page": 7,
+      "usage": 224,
+      "token": "left_ctrl",
+      "aliases": [
+        "ctrl",
+        "control"
+      ],
+      "code": "ControlLeft"
+    },
+    {
+      "page": 7,
+      "usage": 228,
+      "token": "right_ctrl",
+      "aliases": [],
+      "code": "ControlRight"
+    },
+    {
+      "page": 7,
+      "usage": 225,
+      "token": "left_shift",
+      "aliases": [
+        "shift"
+      ],
+      "code": "ShiftLeft"
+    },
+    {
+      "page": 7,
+      "usage": 229,
+      "token": "right_shift",
+      "aliases": [],
+      "code": "ShiftRight"
+    },
+    {
+      "page": 7,
+      "usage": 227,
+      "token": "left_gui",
+      "aliases": [
+        "win",
+        "gui"
+      ],
+      "code": "MetaLeft"
+    },
+    {
+      "page": 7,
+      "usage": 231,
+      "token": "right_gui",
+      "aliases": [],
+      "code": "MetaRight"
+    },
+    {
+      "page": 7,
+      "usage": 40,
+      "token": "enter",
+      "aliases": [
+        "return"
+      ],
+      "code": "Enter"
+    },
+    {
+      "page": 7,
+      "usage": 41,
+      "token": "esc",
+      "aliases": [
+        "escape"
+      ],
+      "code": "Escape"
+    },
+    {
+      "page": 7,
+      "usage": 42,
+      "token": "backspace",
+      "aliases": [],
+      "code": "Backspace"
+    },
+    {
+      "page": 7,
+      "usage": 43,
+      "token": "tab",
+      "aliases": [],
+      "code": "Tab"
+    },
+    {
+      "page": 7,
+      "usage": 44,
+      "token": "space",
+      "aliases": [],
+      "code": "Space"
+    },
+    {
+      "page": 7,
+      "usage": 57,
+      "token": "caps_lock",
+      "aliases": [
+        "capslock"
+      ],
+      "code": "CapsLock"
+    },
+    {
+      "page": 7,
+      "usage": 70,
+      "token": "print_screen",
+      "aliases": [
+        "printscreen"
+      ],
+      "code": "PrintScreen"
+    },
+    {
+      "page": 7,
+      "usage": 71,
+      "token": "scroll_lock",
+      "aliases": [
+        "scrolllock"
+      ],
+      "code": "ScrollLock"
+    },
+    {
+      "page": 7,
+      "usage": 72,
+      "token": "pause",
+      "aliases": [],
+      "code": "Pause"
+    },
+    {
+      "page": 7,
+      "usage": 73,
+      "token": "insert",
+      "aliases": [],
+      "code": "Insert"
+    },
+    {
+      "page": 7,
+      "usage": 74,
+      "token": "home",
+      "aliases": [],
+      "code": "Home"
+    },
+    {
+      "page": 7,
+      "usage": 75,
+      "token": "page_up",
+      "aliases": [
+        "pageup"
+      ],
+      "code": "PageUp"
+    },
+    {
+      "page": 7,
+      "usage": 76,
+      "token": "delete",
+      "aliases": [],
+      "code": "Delete"
+    },
+    {
+      "page": 7,
+      "usage": 77,
+      "token": "end",
+      "aliases": [],
+      "code": "End"
+    },
+    {
+      "page": 7,
+      "usage": 78,
+      "token": "page_down",
+      "aliases": [
+        "pagedown"
+      ],
+      "code": "PageDown"
+    },
+    {
+      "page": 7,
+      "usage": 101,
+      "token": "menu",
+      "aliases": [
+        "application"
+      ],
+      "code": "ContextMenu"
+    },
+    {
+      "page": 7,
+      "usage": 45,
+      "token": "minus",
+      "aliases": [],
+      "code": "Minus"
+    },
+    {
+      "page": 7,
+      "usage": 46,
+      "token": "equal",
+      "aliases": [],
+      "code": "Equal"
+    },
+    {
+      "page": 7,
+      "usage": 47,
+      "token": "left_bracket",
+      "aliases": [],
+      "code": "BracketLeft"
+    },
+    {
+      "page": 7,
+      "usage": 48,
+      "token": "right_bracket",
+      "aliases": [],
+      "code": "BracketRight"
+    },
+    {
+      "page": 7,
+      "usage": 49,
+      "token": "backslash",
+      "aliases": [],
+      "code": "Backslash"
+    },
+    {
+      "page": 7,
+      "usage": 51,
+      "token": "semicolon",
+      "aliases": [],
+      "code": "Semicolon"
+    },
+    {
+      "page": 7,
+      "usage": 52,
+      "token": "quote",
+      "aliases": [
+        "apostrophe"
+      ],
+      "code": "Quote"
+    },
+    {
+      "page": 7,
+      "usage": 53,
+      "token": "grave",
+      "aliases": [
+        "backtick"
+      ],
+      "code": "Backquote"
+    },
+    {
+      "page": 7,
+      "usage": 54,
+      "token": "comma",
+      "aliases": [],
+      "code": "Comma"
+    },
+    {
+      "page": 7,
+      "usage": 55,
+      "token": "dot",
+      "aliases": [
+        "period"
+      ],
+      "code": "Period"
+    },
+    {
+      "page": 7,
+      "usage": 56,
+      "token": "slash",
+      "aliases": [],
+      "code": "Slash"
+    },
+    {
+      "page": 7,
+      "usage": 83,
+      "token": "num_lock",
+      "aliases": [
+        "numlock"
+      ],
+      "code": "NumLock"
+    },
+    {
+      "page": 7,
+      "usage": 84,
+      "token": "kp_slash",
+      "aliases": [],
+      "code": "NumpadDivide"
+    },
+    {
+      "page": 7,
+      "usage": 85,
+      "token": "kp_asterisk",
+      "aliases": [],
+      "code": "NumpadMultiply"
+    },
+    {
+      "page": 7,
+      "usage": 86,
+      "token": "kp_minus",
+      "aliases": [],
+      "code": "NumpadSubtract"
+    },
+    {
+      "page": 7,
+      "usage": 87,
+      "token": "kp_plus",
+      "aliases": [],
+      "code": "NumpadAdd"
+    },
+    {
+      "page": 7,
+      "usage": 88,
+      "token": "kp_enter",
+      "aliases": [],
+      "code": "NumpadEnter"
+    },
+    {
+      "page": 7,
+      "usage": 89,
+      "token": "kp_1",
+      "aliases": [],
+      "code": "Numpad1"
+    },
+    {
+      "page": 7,
+      "usage": 90,
+      "token": "kp_2",
+      "aliases": [],
+      "code": "Numpad2"
+    },
+    {
+      "page": 7,
+      "usage": 91,
+      "token": "kp_3",
+      "aliases": [],
+      "code": "Numpad3"
+    },
+    {
+      "page": 7,
+      "usage": 92,
+      "token": "kp_4",
+      "aliases": [],
+      "code": "Numpad4"
+    },
+    {
+      "page": 7,
+      "usage": 93,
+      "token": "kp_5",
+      "aliases": [],
+      "code": "Numpad5"
+    },
+    {
+      "page": 7,
+      "usage": 94,
+      "token": "kp_6",
+      "aliases": [],
+      "code": "Numpad6"
+    },
+    {
+      "page": 7,
+      "usage": 95,
+      "token": "kp_7",
+      "aliases": [],
+      "code": "Numpad7"
+    },
+    {
+      "page": 7,
+      "usage": 96,
+      "token": "kp_8",
+      "aliases": [],
+      "code": "Numpad8"
+    },
+    {
+      "page": 7,
+      "usage": 97,
+      "token": "kp_9",
+      "aliases": [],
+      "code": "Numpad9"
+    },
+    {
+      "page": 7,
+      "usage": 98,
+      "token": "kp_0",
+      "aliases": [],
+      "code": "Numpad0"
+    },
+    {
+      "page": 7,
+      "usage": 99,
+      "token": "kp_dot",
+      "aliases": [],
+      "code": "NumpadDecimal"
+    },
+    {
+      "page": 7,
+      "usage": 100,
+      "token": "intl_backslash",
+      "aliases": [],
+      "code": "IntlBackslash"
+    },
+    {
+      "page": 7,
+      "usage": 135,
+      "token": "intl_ro",
+      "aliases": [],
+      "code": "IntlRo"
+    },
+    {
+      "page": 7,
+      "usage": 137,
+      "token": "intl_yen",
+      "aliases": [],
+      "code": "IntlYen"
+    },
+    {
+      "page": 7,
+      "usage": 136,
+      "token": "kana_mode",
+      "aliases": [],
+      "code": "KanaMode"
+    },
+    {
+      "page": 7,
+      "usage": 138,
+      "token": "convert",
+      "aliases": [],
+      "code": "Convert"
+    },
+    {
+      "page": 7,
+      "usage": 139,
+      "token": "non_convert",
+      "aliases": [],
+      "code": "NonConvert"
+    },
+    {
+      "page": 12,
+      "usage": 226,
+      "token": "volume_mute",
+      "aliases": [],
+      "code": "AudioVolumeMute"
+    },
+    {
+      "page": 12,
+      "usage": 233,
+      "token": "volume_up",
+      "aliases": [],
+      "code": "AudioVolumeUp"
+    },
+    {
+      "page": 12,
+      "usage": 234,
+      "token": "volume_down",
+      "aliases": [],
+      "code": "AudioVolumeDown"
+    },
+    {
+      "page": 12,
+      "usage": 205,
+      "token": "media_play_pause",
+      "aliases": [],
+      "code": "MediaPlayPause"
+    },
+    {
+      "page": 12,
+      "usage": 181,
+      "token": "media_next",
+      "aliases": [],
+      "code": "MediaTrackNext"
+    },
+    {
+      "page": 12,
+      "usage": 182,
+      "token": "media_previous",
+      "aliases": [],
+      "code": "MediaTrackPrevious"
+    },
+    {
+      "page": 12,
+      "usage": 183,
+      "token": "media_stop",
+      "aliases": [],
+      "code": "MediaStop"
+    }
+  ],
+  "consumer_usages": [
+    226,
+    233,
+    234,
+    205,
+    181,
+    182,
+    183
+  ]
+}

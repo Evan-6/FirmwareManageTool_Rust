@@ -24,4 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --locked --no-default-features
+        with:
+          components: rustfmt
+      - run: cargo test --locked --workspace --no-default-features
+      - run: python3 scripts/sync-input-protocol.py --check
+      - run: bash scripts/test-rp2040.sh
+
+  rp2040:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install the pinned core and library
+        run: |
+          arduino-cli core update-index --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          arduino-cli core install rp2040:rp2040@6.2.0 --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          arduino-cli lib install "Adafruit NeoPixel@1.15.5"
+      - run: arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb firmware/boards/rp2040
+      - run: arduino-cli compile --fqbn rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb firmware/boards/rp2040

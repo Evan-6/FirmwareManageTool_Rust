@@ -1035,6 +1035,7 @@ dependencies = [
  "crossbeam-channel",
  "eframe",
  "hidapi",
+ "input-protocol",
  "libc",
  "rand",
  "serde",
@@ -1402,6 +1403,15 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "input-protocol"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

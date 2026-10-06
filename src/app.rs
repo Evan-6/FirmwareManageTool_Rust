@@ -280,10 +280,13 @@ impl App {
         if let Some((device, hello)) = &self.connected {
             ui.label(RichText::new(device.label()).strong());
             ui.label(format!(
-                "韌體 {} • 租約 {} ms • 滑鼠 {}",
+                "韌體 {} • 租約 {} ms • 滑鼠 {} • protocol={} • NKRO={} • 多媒體={}",
                 hello.firmware,
                 hello.lease_ms,
-                if hello.mouse { "支援" } else { "不支援" }
+                if hello.mouse { "支援" } else { "不支援" },
+                hello.protocol,
+                hello.nkro,
+                hello.media
             ));
             ui.monospace(&hello.raw);
         } else {

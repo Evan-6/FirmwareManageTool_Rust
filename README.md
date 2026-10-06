@@ -2,7 +2,8 @@
 
 以 Rust 2024、egui／eframe 0.36.2 與 Wgpu 重寫的 Windows 11 x64 GUI 工具。
 支援 Leonardo AVR、Seeed XIAO RP2040、Pico 及其他 arduino-pico 板型。
-原專案保持不變，隨附 C++ 韌體沿用 Vendor HID `protocol=2`。
+RP2040 使用 Vendor HID v3 二進位協定、實體 HID usage、NKRO 與七種多媒體鍵；
+保留 v2 相容層。AVR 韌體與 MSCV 保持不變。
 
 ## Windows 使用
 
@@ -22,8 +23,9 @@
    擬人化絕對座標控制主顯示器實體像素，請先將游標放在主顯示器內。
 
 「全部放開／停止」在工作中會取消操作並清理；閒置時直接 reset。
-釋放必須收到 ACK 並由 status 確認；拔線後顯示未知，重新連線先 reset。
-原韌體的 30 秒 failsafe 租約仍保留。
+連線先查詢 Feature 14，自動選用 v3 或回退 v2。v3 釋放／屏障等待 USB 傳送完成，
+再由 status 確認；拔線後顯示未知，重新連線建立空狀態。
+v3 每 500ms 續租、租約 2 秒；v2 保留 30 秒租約與原有 ACK 語意。
 
 設定、Arduino CLI 設定／依賴、sketch 工作副本及建置產物儲存在
 `%LOCALAPPDATA%\FirmwareManageTool_Rust`。設定會於開始工作、保存設定及離開時保存。
@@ -49,10 +51,12 @@ GitHub Actions workflow 已提供，但目前不代表已在遠端執行。
 ## Linux 開發檢查
 
 ```bash
-cargo test --locked --no-default-features
-cargo test --locked --all-targets
-cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --workspace --no-default-features
+cargo test --locked --workspace --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+python3 scripts/sync-input-protocol.py --check
+bash scripts/test-rp2040.sh
 ```
 
 Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。

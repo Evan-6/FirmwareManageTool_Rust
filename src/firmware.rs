@@ -224,7 +224,13 @@ pub fn upload<R: ProcessRunner>(
         Err(e) => UploadOutcome::TransferFailed(format!("{e:#}")),
         Ok(existing_paths) => {
             observer.progress(5, "等待 runtime HID 重新列舉與 hello 驗證");
-            match verify_runtime(selected, cancel, Duration::from_secs(15), &existing_paths) {
+            match verify_runtime(
+                config.board,
+                selected,
+                cancel,
+                Duration::from_secs(15),
+                &existing_paths,
+            ) {
                 Ok(message) => UploadOutcome::Verified(message),
                 Err(e) => UploadOutcome::TransferredUnverified(format!("{e:#}")),
             }
@@ -302,7 +308,7 @@ fn transfer_at<R: ProcessRunner>(
                 if config.board.is_avr() {
                     "arduino:avr"
                 } else {
-                    "rp2040:rp2040"
+                    "rp2040:rp2040@6.2.0"
                 },
             ]),
             install_limit,
@@ -361,7 +367,7 @@ fn transfer_at<R: ProcessRunner>(
             let mut session = hid::open(device)?;
             session.synchronize(cancel)?;
             session.hello(cancel)?;
-            match session.command("enter_bootloader", "ok:enter_bootloader", cancel) {
+            match session.input(input_protocol::v3::Command::Bootloader, cancel) {
                 Ok(_) => observer.log("已確認 enter_bootloader；等待裝置重啟".into()),
                 Err(e) => {
                     cancel.check()?;
@@ -589,6 +595,7 @@ fn wait_drives(
     bail!("15 秒內未偵測到 RP2040 UF2 磁碟；請 BOOTSEL 上電後重試")
 }
 fn verify_runtime(
+    board: Board,
     selected: Option<&Device>,
     cancel: &Cancellation,
     timeout: Duration,
@@ -603,10 +610,25 @@ fn verify_runtime(
         |device, token| {
             let mut session = hid::open(device)?;
             session.synchronize(token)?;
+            if let Some(caps) = session.capabilities() {
+                verify_board_capability(board, caps.board)?;
+            }
             let hello = session.hello(token)?;
             Ok(hello.raw)
         },
     )
+}
+fn verify_board_capability(board: Board, reported: u8) -> Result<()> {
+    let expected = match board {
+        Board::XiaoRp2040 => Some(2),
+        Board::Pico => Some(1),
+        _ => None,
+    };
+    ensure!(
+        expected.is_none_or(|id| id == reported),
+        "重新列舉的板型不符：{reported}"
+    );
+    Ok(())
 }
 fn runtime_candidates(devices: Vec<Device>, existing_paths: &[String]) -> Vec<Device> {
     devices
@@ -659,6 +681,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flashed_capability_must_match_board() {
+        assert!(verify_board_capability(Board::XiaoRp2040, 2).is_ok());
+        assert!(verify_board_capability(Board::Pico, 2).is_err());
+        assert!(verify_board_capability(Board::CustomRp2040, 2).is_ok());
+    }
     #[test]
     fn board_variants() {
         let mut config = UploadConfig::default();

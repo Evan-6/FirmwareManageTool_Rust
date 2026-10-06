@@ -168,12 +168,7 @@ fn set_button<T: HidTransport>(
     cancel: &Cancellation,
 ) -> Result<()> {
     ensure!((1..=5).contains(&button), "按鍵編號須為 1–5");
-    session.command(
-        &format!("mouse_button:{button},{}", if down { "down" } else { "up" }),
-        "ok:mouse_button",
-        cancel,
-    )?;
-    Ok(())
+    session.set_button(button, down, cancel)
 }
 struct ReleaseGuard<'a, T: HidTransport> {
     session: &'a mut Session<T>,
@@ -204,14 +199,12 @@ fn move_to<T: HidTransport>(
         cancel.check()?;
         index = current_node(&nodes, index, started.elapsed().as_millis() as u64);
         let node = nodes[index];
-        platform::wait_until(started + Duration::from_millis(node.at_ms), cancel)?;
-        session.queue(
-            &format!(
-                "mouse_abs:{},{}",
+        session.wait_until(started + Duration::from_millis(node.at_ms), cancel)?;
+        session.input(
+            input_protocol::v3::Command::MouseAbs(
                 to_hid(node.x, screen.width)?,
-                to_hid(node.y, screen.height)?
+                to_hid(node.y, screen.height)?,
             ),
-            "ok:mouse_abs",
             cancel,
         )?;
         index += 1;
@@ -273,7 +266,11 @@ pub fn execute<T: HidTransport>(
                 "單次位移限 ±100000"
             );
             for (dx, dy) in split_delta(x, y) {
-                session.queue(&format!("mouse_move:{dx},{dy}"), "ok:mouse_move", cancel)?;
+                session.input(
+                    input_protocol::v3::Command::MouseMove(dx as i16, dy as i16),
+                    cancel,
+                )?;
+                session.finish(cancel)?;
             }
             session.finish(cancel)?;
         }
@@ -287,7 +284,15 @@ pub fn execute<T: HidTransport>(
             );
             for (name, amount) in [("mouse_wheel", vertical), ("mouse_hwheel", horizontal)] {
                 for (chunk, _) in split_delta(amount, 0) {
-                    session.queue(&format!("{name}:{chunk}"), &format!("ok:{name}"), cancel)?;
+                    session.input(
+                        if name == "mouse_wheel" {
+                            input_protocol::v3::Command::Wheel(chunk as i16, 0)
+                        } else {
+                            input_protocol::v3::Command::Wheel(0, chunk as i16)
+                        },
+                        cancel,
+                    )?;
+                    session.finish(cancel)?;
                 }
             }
             session.finish(cancel)?;

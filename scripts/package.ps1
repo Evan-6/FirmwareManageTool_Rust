@@ -15,7 +15,7 @@ try {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $stage 'FirmwareManageTool.exe')
-    foreach ($name in @('firmware', 'docs', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
+    foreach ($name in @('firmware', 'shared', 'docs', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $stage -Recurse
     }
     $licenses = Join-Path $stage 'ThirdPartyLicenses'

@@ -19,7 +19,7 @@ if ($PSVersionTable.PSVersion.Major -ge 7) { $PSStyle.OutputRendering = "PlainTe
 # drive), reached automatically by sending "enter_bootloader" over Vendor HID.
 $Fqbn = "rp2040:rp2040:rpipico:usbstack=tinyusb"
 $SketchName = "rp2040.ino"
-$CoreId = "rp2040:rp2040"
+$CoreId = "rp2040:rp2040@6.2.0"
 $CoreIndexUrl = "https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json"
 $BuildPath = Join-Path $env:TEMP "mscv-rp2040-keyboard-build"
 $ConfigPath = Join-Path $env:TEMP "mscv-rp2040-keyboard-arduino-cli.yaml"
