@@ -15,6 +15,7 @@ pub const BOOTLOADER: u8 = 6;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOUSE_MOVE: u8 = 32;
+/// Reserved legacy opcode; relative-only firmware rejects it.
 pub const MOUSE_ABS: u8 = 33;
 pub const MOUSE_BUTTONS: u8 = 34;
 pub const WHEEL: u8 = 35;
@@ -213,7 +214,6 @@ pub enum Command {
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
-    MouseAbs(u16, u16),
     MouseButtons(u8),
     Wheel(i16, i16),
 }
@@ -246,7 +246,6 @@ impl Command {
                 );
                 (MOUSE_MOVE, pair(x.to_le_bytes(), y.to_le_bytes()))
             }
-            Self::MouseAbs(x, y) => (MOUSE_ABS, pair(x.to_le_bytes(), y.to_le_bytes())),
             Self::MouseButtons(b) => {
                 ensure!(b & !31 == 0, "無效的滑鼠按鈕");
                 (MOUSE_BUTTONS, vec![*b])

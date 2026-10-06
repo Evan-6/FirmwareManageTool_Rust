@@ -27,7 +27,6 @@ Adafruit_NeoPixel pixels(1, NeoPixelDataPin, NEO_GRB + NEO_KHZ800);
 constexpr uint8_t KeyboardReportId = 2;
 constexpr uint8_t ConsumerReportId = 5;
 constexpr uint8_t MouseReportId = 3;
-constexpr uint8_t AbsMouseReportId = 4;
 constexpr uint8_t MaxNonModifierKeys = 6;
 constexpr uint8_t VendorCommandReportId = 10;  // OUT: host -> device
 constexpr uint8_t VendorResponseReportId = 11; // IN:  device -> host

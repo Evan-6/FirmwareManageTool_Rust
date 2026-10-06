@@ -60,10 +60,10 @@ fn final_error_and_failsafe_are_preserved() {
 }
 #[test]
 fn ordered_ack_and_last_drain() {
-    let mut s = Session::new(Fake::lines(&["ok:mouse_abs", "ok:mouse_abs"]));
+    let mut s = Session::new(Fake::lines(&["ok:mouse_move", "ok:mouse_move"]));
     let c = Cancellation::default();
-    s.queue("mouse_abs:1,1", "ok:mouse_abs", &c).unwrap();
-    s.queue("mouse_abs:2,2", "ok:mouse_abs", &c).unwrap();
+    s.queue("mouse_move:1,1", "ok:mouse_move", &c).unwrap();
+    s.queue("mouse_move:2,2", "ok:mouse_move", &c).unwrap();
     s.finish(&c).unwrap();
     assert_eq!(s.take_events().len(), 2);
 }
@@ -95,7 +95,7 @@ impl HidTransport for Fragmented {
             b"\x0bok:mo"
         } else if self.writes == 2 && self.reads == 1 {
             self.reads += 1;
-            b"\x0buse_abs\r\nok:mouse_abs\n"
+            b"\x0buse_move\r\nok:mouse_move\n"
         } else {
             return Ok(0);
         };
@@ -110,15 +110,15 @@ fn session_handles_split_and_combined_delayed_ack() {
         reads: 0,
     });
     let token = Cancellation::default();
-    s.queue("mouse_abs:1,1", "ok:mouse_abs", &token).unwrap();
-    s.queue("mouse_abs:2,2", "ok:mouse_abs", &token).unwrap();
+    s.queue("mouse_move:1,1", "ok:mouse_move", &token).unwrap();
+    s.queue("mouse_move:2,2", "ok:mouse_move", &token).unwrap();
     s.finish(&token).unwrap();
     assert_eq!(
         s.take_events()
             .iter()
             .map(|e| e.line.as_str())
             .collect::<Vec<_>>(),
-        ["ok:mouse_abs", "ok:mouse_abs"]
+        ["ok:mouse_move", "ok:mouse_move"]
     );
 }
 struct Disconnected;
@@ -149,7 +149,7 @@ struct Startup {
 impl HidTransport for Startup {
     fn write(&mut self, report: &[u8]) -> Result<usize> {
         let line = if report[1..].starts_with(b"reset") {
-            b"\x0bok:mouse_abs\nok:release_all\n".as_slice()
+            b"\x0bok:mouse_move\nok:release_all\n".as_slice()
         } else {
             b"\x0bok:status,p=0,tx=0,hid=0,fs=0,mb=00\n".as_slice()
         };
@@ -173,7 +173,7 @@ fn reconnect_discards_old_fragments_and_does_not_mistake_move_ack_for_reset() {
     session.synchronize(&Cancellation::default()).unwrap();
     assert!(session.is_valid());
     let events = session.take_events();
-    assert!(events.iter().any(|e| e.line == "ok:mouse_abs"));
+    assert!(events.iter().any(|e| e.line == "ok:mouse_move"));
     assert!(events.iter().any(|e| e.line == "ok:release_all"));
 }
 

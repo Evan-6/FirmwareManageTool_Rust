@@ -107,7 +107,7 @@ unsigned long leaseRemaining(unsigned long now) {
 
 void queueHello() {
     TextBuilder output;
-    output.append("ok:hello,protocol=2,fw=3.0.1,lease_ms=");
+    output.append("ok:hello,protocol=2,fw=3.0.2,lease_ms=");
     output.appendUnsigned(FailsafeReleaseMs);
     output.append(",max_nonmod=6,mouse=1\n");
     queueRam(output.data(), output.length());
@@ -312,9 +312,6 @@ bool handleMouseCommand(char *line) {
             QUEUE_ERROR("err:hid_send_failed\n");
             return true;
         }
-        // Invalidate the legacy absolute-position cache after relative motion.
-        // Button updates no longer resend coordinates in either collection.
-        abs_mouse_known = false;
         renewLease();
         if (EnableKeyCommandAcks) {
             QUEUE_TEXT("ok:mouse_move\n");
@@ -322,20 +319,9 @@ bool handleMouseCommand(char *line) {
         return true;
     }
 
+    // Never reinterpret an old absolute command as a relative delta.
     if (strncmp(line, "mouse_abs:", 10) == 0) {
-        if (!parseSignedPair(line + 10, first, second) || first < 0 || first > 65535 ||
-            second < 0 || second > 65535) {
-            QUEUE_ERROR("err:bad_mouse\n");
-            return true;
-        }
-        if (!sendAbsMouse(static_cast<uint16_t>(first), static_cast<uint16_t>(second))) {
-            QUEUE_ERROR("err:hid_send_failed\n");
-            return true;
-        }
-        renewLease();
-        if (EnableKeyCommandAcks) {
-            QUEUE_TEXT("ok:mouse_abs\n");
-        }
+        QUEUE_ERROR("err:unsupported_mouse_abs\n");
         return true;
     }
 

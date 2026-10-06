@@ -70,11 +70,11 @@ uint16_t feature(uint8_t id, hid_report_type_t type, uint8_t *buffer, uint16_t n
     buffer[5] = 1;
 #endif
     buffer[6] = 3;
-    buffer[8] = 1; // Firmware 3.0.1: single collection owns mouse buttons.
+    buffer[8] = 2; // Firmware 3.0.2: relative mouse only.
     write16(buffer + 9, 2000);
     write16(buffer + 11, 30000);
     buffer[13] = 1;
-    write32(buffer + 14, 15);
+    write32(buffer + 14, 7); // NKRO, Consumer, relative mouse; no absolute HID.
     for (uint16_t u = 4; u < 224; ++u)
         if (key_catalog::keyboardSupported(u))
             buffer[18 + u / 8] |= 1u << (u % 8);
@@ -228,9 +228,11 @@ void handle(const Report &report) {
         state.buttons = data[0];
         ok = output.state(state, seq);
         mouse_report.buttons = data[0];
-    } else if (op == Absolute)
-        ok = output.absolute(read16(data), read16(data + 2), seq);
-    else {
+    } else if (op == Absolute) {
+        // Opcode 33 is reserved for old firmware. New hardware is relative-only.
+        protocolFault(3);
+        return;
+    } else {
         const int16_t a = read16(data), b = read16(data + 2);
         if (a < -1024 || a > 1024 || b < -1024 || b > 1024) {
             protocolFault(3);

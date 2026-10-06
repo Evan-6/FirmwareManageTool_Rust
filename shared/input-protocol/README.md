@@ -6,6 +6,8 @@ Keyboard page 0x07 與 Consumer page 0x0C 依 [USB HID Usage Tables](https://www
 名稱／別名只供顯示與 v2 轉換；傳輸與 ownership 使用 `KeyId`。
 
 本 crate 包含按鍵識別、v3 編解碼、能力／狀態解析與 session；不依賴 hidapi 或 OS。
+`pointer` 是主機共用的相對游標回授控制器；畫面目標換算為相對位移，沒有絕對 HID Command。
+v3 opcode 33 保留編號但不再提供發送 API，RP2040 3.0.2 能力 flags=7。
 `test-support` 提供有界錯誤注入的 USB 測試替身，只供主機測試使用。
 生成的 C++／Rust／JavaScript 表與兩個 repo 的本地 crate 均納入版本控制，各自可獨立建置。
 

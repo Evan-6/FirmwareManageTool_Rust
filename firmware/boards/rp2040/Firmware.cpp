@@ -58,7 +58,7 @@ void setup() {
         TinyUSBDevice.begin(0);
     Serial.end();
     TinyUSBDevice.setID(UsbVid, UsbPid);
-    TinyUSBDevice.setDeviceVersion(0x0301);
+    TinyUSBDevice.setDeviceVersion(0x0302);
     static char serial[17];
     pico_get_unique_board_id_string(serial, sizeof(serial));
     TinyUSBDevice.setSerialDescriptor(serial);

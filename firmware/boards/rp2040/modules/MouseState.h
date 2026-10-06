@@ -10,19 +10,6 @@ struct MouseReport {
 MouseReport mouse_report{};
 uint16_t mouse_send_failures = 0;
 
-// Absolute pointer report (report id AbsMouseReportId). The button byte stays
-// zero: all button transitions belong to the relative mouse collection, so
-// absolute motion during a drag cannot generate an extra press/release.
-struct __attribute__((packed)) AbsMouseReport {
-    uint8_t buttons;
-    uint16_t x;
-    uint16_t y;
-};
-
-uint16_t abs_mouse_x = 0;
-uint16_t abs_mouse_y = 0;
-bool abs_mouse_known = false;
-
 // Per-command delta bound: keeps the chunked send loop below to a handful of
 // reports so a hostile/buggy host cannot stall core 0's protocol loop.
 constexpr int32_t MaxMouseDeltaPerCommand = 1024;
@@ -34,12 +21,6 @@ bool sendMouseDelta(int32_t x, int32_t y, int32_t wheel, int32_t hwheel) {
     if (next.buttons != output.desired.buttons && !output.state(next))
         return false;
     return output.motion(x, y, wheel, hwheel);
-}
-bool sendAbsMouse(uint16_t x, uint16_t y) {
-    abs_mouse_x = x;
-    abs_mouse_y = y;
-    abs_mouse_known = true;
-    return output.absolute(x, y);
 }
 bool updateMouseButtons(uint16_t flags, uint32_t data) {
     if (flags & 0x0002)

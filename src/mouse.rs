@@ -5,6 +5,7 @@ use crate::{
     protocol::Status,
 };
 use anyhow::{Result, ensure};
+use input_protocol::pointer::{RelativeTracker, Step, TICK};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -56,13 +57,6 @@ fn jerk(t: f64) -> f64 {
 fn bezier(a: f64, b: f64, c: f64, d: f64, t: f64) -> f64 {
     let u = 1.0 - t;
     u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d
-}
-pub fn to_hid(pixel: i32, size: i32) -> Result<u16> {
-    ensure!(size > 1, "顯示器尺寸無效");
-    Ok(
-        ((pixel.clamp(0, size - 1) as i64 * 65535 + (size - 1) as i64 / 2) / (size - 1) as i64)
-            as u16,
-    )
 }
 pub fn split_delta(mut x: i32, mut y: i32) -> Vec<(i32, i32)> {
     let mut parts = Vec::new();
@@ -193,24 +187,54 @@ fn move_to<T: HidTransport>(
         "擬人化移動前，請將游標放在主顯示器內"
     );
     let nodes = trajectory(start, target, screen, duration, &mut rand::rng())?;
-    let started = Instant::now();
-    let mut index = 0;
-    while index < nodes.len() {
-        cancel.check()?;
-        index = current_node(&nodes, index, started.elapsed().as_millis() as u64);
-        let node = nodes[index];
-        session.wait_until(started + Duration::from_millis(node.at_ms), cancel)?;
-        session.input(
-            input_protocol::v3::Command::MouseAbs(
-                to_hid(node.x, screen.width)?,
-                to_hid(node.y, screen.height)?,
-            ),
-            cancel,
-        )?;
-        index += 1;
-    }
-    session.finish(cancel)
+    move_along_trajectory(session, &nodes, screen, cancel, platform::screen_and_cursor)
 }
+
+// Trajectory nodes are host targets. Only relative deltas cross the USB channel.
+// Feedback compensates for Windows sensitivity/acceleration and delayed delivery.
+fn move_along_trajectory<T: HidTransport>(
+    session: &mut Session<T>,
+    nodes: &[Node],
+    screen: Screen,
+    cancel: &Cancellation,
+    mut read_position: impl FnMut() -> Result<(Screen, (i32, i32))>,
+) -> Result<()> {
+    ensure!(!nodes.is_empty(), "移動路徑不得為空");
+    let started = Instant::now();
+    let deadline =
+        started + Duration::from_millis(nodes.last().unwrap().at_ms) + Duration::from_millis(300);
+    let mut tracker = RelativeTracker::default();
+    let mut index = 0;
+    while Instant::now() < deadline {
+        cancel.check()?;
+        index = current_node(nodes, index, started.elapsed().as_millis() as u64);
+        let node = &nodes[index];
+        session.wait_until(started + Duration::from_millis(node.at_ms), cancel)?;
+        let (actual_screen, position) = read_position()?;
+        ensure!(
+            actual_screen.width == screen.width && actual_screen.height == screen.height,
+            "移動期間顯示器尺寸改變，請重新定位"
+        );
+        match tracker.step(position, (node.x, node.y), Instant::now()) {
+            Step::Move(dx, dy) => {
+                session.input(
+                    input_protocol::v3::Command::MouseMove(dx as i16, dy as i16),
+                    cancel,
+                )?;
+                session.finish(cancel)?;
+            }
+            Step::Wait => session.wait_until(Instant::now() + TICK, cancel)?,
+            Step::Arrived => {
+                if index + 1 == nodes.len() {
+                    return session.finish(cancel);
+                }
+                index += 1;
+            }
+        }
+    }
+    anyhow::bail!("相對滑鼠未在期限內抵達目標")
+}
+
 pub fn execute<T: HidTransport>(
     session: &mut Session<T>,
     action: &MouseAction,
@@ -311,13 +335,121 @@ pub fn execute<T: HidTransport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use input_protocol::{testing::UsbModel, v3};
     use rand::SeedableRng;
+    use std::sync::{Arc, Mutex};
+
+    struct RelativeFake {
+        model: Arc<Mutex<UsbModel>>,
+        position: Arc<Mutex<(i32, i32)>>,
+        gain: i32,
+    }
+    impl HidTransport for RelativeFake {
+        fn feature(&mut self) -> Result<Option<[u8; 64]>> {
+            Ok(Some(UsbModel::feature()))
+        }
+        fn write(&mut self, report: &[u8]) -> Result<usize> {
+            let packet = v3::Packet::decode(report, v3::OUT_ID)?;
+            assert_ne!(packet.opcode, v3::MOUSE_ABS);
+            if packet.opcode == v3::MOUSE_MOVE {
+                let dx = i16::from_le_bytes(packet.payload[..2].try_into()?);
+                let dy = i16::from_le_bytes(packet.payload[2..].try_into()?);
+                let mut position = self.position.lock().unwrap();
+                position.0 += i32::from(dx) * self.gain;
+                position.1 += i32::from(dy) * self.gain;
+            }
+            self.model.lock().unwrap().write(report)
+        }
+        fn read_timeout(&mut self, buffer: &mut [u8], _: i32) -> Result<usize> {
+            Ok(self.model.lock().unwrap().read(buffer))
+        }
+    }
     #[test]
-    fn pixel_endpoints() {
-        assert_eq!(to_hid(0, 1920).unwrap(), 0);
-        assert_eq!(to_hid(1919, 1920).unwrap(), 65535);
-        assert_eq!(to_hid(-1, 1920).unwrap(), 0);
-        assert!(to_hid(1, 1).is_err());
+    fn host_trajectory_uses_relative_feedback_and_preserves_drag_buttons() {
+        let cancel = Cancellation::default();
+        let model = Arc::new(Mutex::new(UsbModel::default()));
+        let position = Arc::new(Mutex::new((10, 10)));
+        let mut session = Session::new(RelativeFake {
+            model: model.clone(),
+            position: position.clone(),
+            gain: 4,
+        });
+        session.synchronize(&cancel).unwrap();
+        session.set_button(1, true, &cancel).unwrap();
+        let nodes = [
+            Node {
+                at_ms: 0,
+                x: 70,
+                y: 30,
+            },
+            Node {
+                at_ms: 16,
+                x: 802,
+                y: 302,
+            },
+        ];
+        let screen = Screen {
+            width: 1920,
+            height: 1080,
+        };
+        move_along_trajectory(&mut session, &nodes, screen, &cancel, || {
+            Ok((screen, *position.lock().unwrap()))
+        })
+        .unwrap();
+        session.set_button(1, false, &cancel).unwrap();
+        let position = *position.lock().unwrap();
+        assert!((position.0 - 802).abs() <= 1 && (position.1 - 302).abs() <= 1);
+        let model = model.lock().unwrap();
+        assert!(model.writes.iter().any(|p| p.opcode == v3::MOUSE_MOVE));
+        let buttons: Vec<_> = model
+            .writes
+            .iter()
+            .filter(|p| p.opcode == v3::MOUSE_BUTTONS)
+            .map(|p| p.payload[0])
+            .collect();
+        assert_eq!(buttons, [1, 0]);
+    }
+    #[test]
+    fn display_change_aborts_relative_trajectory_before_sending_motion() {
+        let model = Arc::new(Mutex::new(UsbModel::default()));
+        let cancel = Cancellation::default();
+        let mut session = Session::new(RelativeFake {
+            model: model.clone(),
+            position: Arc::new(Mutex::new((0, 0))),
+            gain: 1,
+        });
+        session.synchronize(&cancel).unwrap();
+        assert!(
+            move_along_trajectory(
+                &mut session,
+                &[Node {
+                    at_ms: 0,
+                    x: 100,
+                    y: 100
+                }],
+                Screen {
+                    width: 1920,
+                    height: 1080
+                },
+                &cancel,
+                || Ok((
+                    Screen {
+                        width: 1280,
+                        height: 720
+                    },
+                    (0, 0)
+                ))
+            )
+            .is_err()
+        );
+        assert!(
+            !model
+                .lock()
+                .unwrap()
+                .writes
+                .iter()
+                .any(|p| p.opcode == v3::MOUSE_MOVE)
+        );
     }
     #[test]
     fn delta_boundary_and_conservation() {

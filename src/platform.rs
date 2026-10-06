@@ -14,11 +14,11 @@ pub fn screen_and_cursor() -> Result<(Screen, (i32, i32))> {
     use windows_sys::Win32::{
         Foundation::POINT,
         Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint},
-        UI::WindowsAndMessaging::GetCursorPos,
+        UI::WindowsAndMessaging::GetPhysicalCursorPos,
     };
     unsafe {
         let mut cursor = POINT { x: 0, y: 0 };
-        if GetCursorPos(&mut cursor) == 0 {
+        if GetPhysicalCursorPos(&mut cursor) == 0 {
             return Err(std::io::Error::last_os_error().into());
         }
         let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);

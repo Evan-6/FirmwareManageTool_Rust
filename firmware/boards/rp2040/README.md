@@ -1,6 +1,6 @@
-# RP2040 韌體 3.0.1
+# RP2040 韌體 3.0.2
 
-目標為 Raspberry Pi Pico、Seeed XIAO RP2040 與相容板。建置固定使用 arduino-pico **6.2.0**、內附 Adafruit TinyUSB；XIAO 另需 Adafruit NeoPixel。對外提供共用鍵盤／Consumer／相對與絕對滑鼠 HID，以及 Vendor HID，合計兩個介面，沒有 CDC／COM。
+目標為 Raspberry Pi Pico、Seeed XIAO RP2040 與相容板。建置固定使用 arduino-pico **6.2.0**、內附 Adafruit TinyUSB；XIAO 另需 Adafruit NeoPixel。對外提供共用鍵盤／Consumer／單一相對滑鼠 HID，以及 Vendor HID，合計兩個介面，沒有 CDC／COM。
 
 ## 協定與按鍵
 
@@ -8,7 +8,11 @@
 
 [v2 文字協定](../../protocol-v2.md) 保留原本指令、別名與 ACK，最多六個一般鍵加八個修飾鍵，租約 30 秒。v3 租約 2 秒、主機每 500ms 續租，一般輸入沒有 ACK；釋放與屏障會等待 USB 傳輸完成。v2/v3 不得同時修改輸入狀態，競爭時回 busy。
 
-3.0.1 修正單擊變成雙擊／多次點擊：按鈕固定由相對滑鼠 collection 輸出，絕對 collection 只送座標，避免 Windows 對兩個邏輯滑鼠分別產生按鍵事件。按鈕改變也不再重送舊絕對座標。需重新燒錄 RP2040；只更新主機程式無法修正舊韌體。Feature 14 回報韌體版本 3.0.1，USB bcdDevice 為 0x0301。
+3.0.2 移除絕對滑鼠 descriptor、座標狀態與輸出，硬體只提供相對位移、五鍵與雙軸滾輪。
+畫面上的「絕對定位」與擬人化曲線都由主機程式讀取實體游標、換算相對位移並回授修正。
+Feature 14 回報韌體版本 3.0.2、flags=7（absolute bit=0），USB bcdDevice 為 0x0302。
+舊 v3 opcode 33 會拒絕並釋放；v2 `mouse_abs` 回 `err:unsupported_mouse_abs`，不能誤當相對位移執行。
+需要重新燒錄 RP2040；主機軟體更新不會改變舊韌體的 USB descriptor。新版管理工具不再送出絕對命令。
 
 ## 模組
 

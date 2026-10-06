@@ -13,6 +13,9 @@ Session 先查詢 Feature 14。v3 使用 64-byte 完整封包、session／sequen
 屏障等待先前 USB report 傳送完成，不代表 Windows 應用程式已處理。
 v2 沒有 sequence id，以發送順序匹配 ACK，最多 4 個 outstanding 命令。
 兩者的短寫入、錯誤、timeout 或 failsafe 都使 session 失效，重連丟棄舊回應並清空輸入。
+畫面目標位置與擬人化曲線在主機計算，`input-protocol::pointer::RelativeTracker` 共用
+Windows 游標回授的相對位移控制器；USB 只送 MOUSE_MOVE，RP2040 3.0.2 只有相對滑鼠。
+末端定位最多在路徑結束後繼續修正 300ms；無法到達回錯誤，拖曳以 ReleaseGuard 清理。
 滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID／failsafe 計數未增加。
 
 | 階段 | 期限 |

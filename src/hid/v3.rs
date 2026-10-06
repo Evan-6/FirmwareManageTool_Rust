@@ -86,9 +86,6 @@ impl<T: HidTransport> Session<T> {
             Command::MouseMove(x, y) => {
                 self.queue(&format!("mouse_move:{x},{y}"), "ok:mouse_move", cancel)
             }
-            Command::MouseAbs(x, y) => {
-                self.queue(&format!("mouse_abs:{x},{y}"), "ok:mouse_abs", cancel)
-            }
             Command::MouseButtons(buttons) => {
                 ensure!(buttons & !31 == 0, "無效滑鼠按鈕");
                 for (bit, id) in [(1, 1), (2, 3), (4, 2), (8, 4), (16, 5)] {

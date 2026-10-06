@@ -154,3 +154,5 @@ pub fn new_session_id() -> u32 {
 
 #[cfg(feature = "test-support")]
 pub mod testing;
+
+pub mod pointer;

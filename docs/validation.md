@@ -5,6 +5,15 @@
 
 ## 本次已完成
 
+- 3.0.2 相對滑鼠：移除 absolute descriptor／座標／輸出，flags=7、bcdDevice=0x0302。
+  C++ 實際韌體測試確認沒有 report id 4、五鍵與拖曳只走相對 report，保留快速三連點與各類釋放。
+  舊 v3 opcode 33 拒絕並釋放，v2 mouse_abs 拒絕；沒有把舊絕對命令解讀為相對位移。
+  主機共用相對回授控制器的七項測試移到共享 crate；管理工具曲線改以相對位移與實體游標回授執行。
+  GUI workspace 37、共享協定 17 項測試通過，no-default-features 36＋17 項通過。
+  管理工具 Linux 全目標嚴格 Clippy 與 Windows GNU 目標編譯檢查通過；兩 repo 協定同步通過。
+  實際韌體 C++ 嚴格警告／ASan／UBSan、Pico／XIAO 建置通過。
+  Pico 91472 bytes flash／19288 bytes RAM，XIAO 94296 bytes flash／19380 bytes RAM。
+  USB descriptor 已改變，需要重新燒錄；尚未在 Windows／RP2040 實機驗收。
 - 3.0.1 滑鼠修正：在實際排程器搭配 USB 替身重現「送過絕對座標後單擊產生兩組按下／放開」。
   修正後每次單擊只產生一組，五鍵／兩種模式、混合模式拖曳、維護快照、快速三連點、
   in-flight 釋放、租約／USB 故障／拔線重連釋放與 v2→v3 交接回歸通過。

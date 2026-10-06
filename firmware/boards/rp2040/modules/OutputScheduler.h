@@ -2,15 +2,14 @@
 // All HID output is scheduled on core 0. Only completion notifications cross callbacks.
 class OutputScheduler {
   public:
-    enum : uint8_t { Keyboard = 1, Consumer = 2, Relative = 4, Absolute = 8 };
+    enum : uint8_t { Keyboard = 1, Consumer = 2, Relative = 4 };
     struct Job {
         InputState state{};
         int32_t x = 0, y = 0, wheel = 0, hwheel = 0;
-        uint16_t abs_x = 0, abs_y = 0;
         uint32_t sequence = 0;
         unsigned long queued_at = 0;
         uint8_t flags = 0;
-        uint8_t kind = 0; // 0 state/barrier, 1 relative, 2 absolute
+        uint8_t kind = 0; // 0 state/barrier, 1 relative
     };
     InputState desired{};
     InputState completed{};
@@ -25,9 +24,7 @@ class OutputScheduler {
             j.flags |= Keyboard;
         if (force || next.consumer != desired.consumer)
             j.flags |= Consumer;
-        // Windows exposes each top-level mouse collection as a separate device.
-        // Keep all button transitions in the relative collection, even while
-        // moving absolutely; mirroring buttons would generate duplicate clicks.
+        // One relative mouse owns movement, all five buttons and both wheels.
         if (force || next.buttons != desired.buttons)
             j.flags |= Relative;
         if (!add(j))
@@ -67,25 +64,6 @@ class OutputScheduler {
         j.sequence = seq;
         return add(j);
     }
-    bool absolute(uint16_t x, uint16_t y, uint32_t seq = 0) {
-        if (count_ > 1) {
-            Job &last = jobs_[(head_ + count_ - 1) % Depth];
-            if (last.kind == 2 && last.state.buttons == desired.buttons) {
-                last.abs_x = x;
-                last.abs_y = y;
-                last.sequence = seq;
-                return true;
-            }
-        }
-        Job j;
-        j.state = desired;
-        j.kind = 2;
-        j.flags = Absolute;
-        j.abs_x = x;
-        j.abs_y = y;
-        j.sequence = seq;
-        return add(j);
-    }
     bool barrier(uint32_t seq) {
         Job j;
         j.state = desired;
@@ -103,7 +81,7 @@ class OutputScheduler {
         Job j;
         j.state = desired;
         j.sequence = seq;
-        j.flags = Keyboard | Consumer | Relative | Absolute;
+        j.flags = Keyboard | Consumer | Relative;
         j.queued_at = millis();
         jobs_[0] = j;
         count_ = 1;
@@ -144,8 +122,7 @@ class OutputScheduler {
                     j.hwheel -= sent_hwheel_;
                     if (!j.x && !j.y && !j.wheel && !j.hwheel)
                         j.flags &= ~Relative;
-                } else if (done == AbsMouseReportId)
-                    j.flags &= ~Absolute;
+                }
             }
         }
         if (count_ && now - jobs_[head_].queued_at > 50 && protocol_owner != ProtocolOwner::None) {
@@ -188,25 +165,6 @@ class OutputScheduler {
             data[2] = sent_y_;
             data[3] = sent_wheel_;
             data[4] = sent_hwheel_;
-        } else if (j.flags & Absolute) {
-            if (j.kind == 2) {
-                abs_x_ = j.abs_x;
-                abs_y_ = j.abs_y;
-                abs_known_ = true;
-            }
-            if (!abs_known_) {
-                j.flags &= ~Absolute;
-                return;
-            }
-            id = AbsMouseReportId;
-            n = 5;
-            // The absolute collection owns coordinates only. Sending held buttons
-            // here would create a second press on the first absolute drag motion.
-            data[0] = 0;
-            data[1] = abs_x_;
-            data[2] = abs_x_ >> 8;
-            data[3] = abs_y_;
-            data[4] = abs_y_ >> 8;
         }
         last_send_at_ = now;
         in_flight_ = true;
@@ -224,8 +182,7 @@ class OutputScheduler {
     uint8_t head_ = 0, count_ = 0;
     unsigned long last_send_at_ = 0;
     uint32_t generation_ = 0, inflight_generation_ = 0;
-    bool in_flight_ = false, mounted_ = false, abs_known_ = false;
-    uint16_t abs_x_ = 0, abs_y_ = 0;
+    bool in_flight_ = false, mounted_ = false;
     int8_t sent_x_ = 0, sent_y_ = 0, sent_wheel_ = 0, sent_hwheel_ = 0;
     std::atomic<uint8_t> completion_{0};
     std::atomic<bool> failed_{false};
