@@ -1,6 +1,6 @@
 # Vendor HID protocol 3
 
-本檔與 `shared/input-protocol/keys.json`、`vectors.json` 為跨 C++／Rust／JavaScript 的規範。v2 的相容要求另見 [protocol-v2.md](protocol-v2.md)。VID/PID 與 Vendor usage 不變；USB bcdDevice 為 0x0300，序號使用板子的唯一 ID。
+本檔與 `shared/input-protocol/keys.json`、`vectors.json` 為跨 C++／Rust／JavaScript 的規範。v2 的相容要求另見 [protocol-v2.md](protocol-v2.md)。VID/PID 與 Vendor usage 不變；韌體 3.0.1 的 USB bcdDevice 為 0x0301，序號使用板子的唯一 ID。
 
 ## 能力與 framing
 
@@ -38,11 +38,12 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 
 ## 完成、租約與相容
 
+- 相對與絕對滑鼠為不同 HID top-level collection。五個按鈕一律由相對 collection 輸出；絕對 report 的按鈕 byte 固定為零，只輸出座標。切換移動模式或按住拖曳不轉移按鈕歸屬，按鈕變更不重送舊絕對座標。Vendor 命令與 USB report 格式維持相容。
 - 一般輸入沒有 ACK；主機 I/O 寫入成功表示已提交，不能作為 USB 完成證明。需要可靠完成的階段送 BARRIER，等待此前所有輸出由 TinyUSB completion callback 確認。
 - RELEASE_ALL 取消先前未執行輸入，優先清空 Keyboard／Consumer／相對與已使用的絕對滑鼠 collection；完成後才回覆。BOOTLOADER 再等待回覆 USB 傳送完成後重啟。仍不保證目標應用程式處理時間。
 - Output queue 32 項，最舊待送超過 50ms 或 queue overflow 即失效、清除及釋放。鍵盤與按鈕短按順序保留；相鄰待送同類移動可合併，但不跨按鈕、snapshot 或 barrier。相對／滾輪累加每軸上限 ±8192，超限亦失效。
 - v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。
-- v2 保留 report 10/11、ASCII 行規則、ACK、六鍵上限及 30 秒租約。新 RP2040 的 v2 hello 為 protocol=2,fw=3.0。USB 輸出共用 NKRO，但 v2 接受的狀態仍受六鍵上限約束。
+- v2 保留 report 10/11、ASCII 行規則、ACK、六鍵上限及 30 秒租約。新 RP2040 的 v2 hello 為 protocol=2,fw=3.0.1。USB 輸出共用 NKRO，但 v2 接受的狀態仍受六鍵上限約束。
 - v2/v3 寫入互斥。v3 OPEN 可接手已完成釋放的閒置 v2，或明確 RELEASE_ALL 且 USB 釋放已完成的舊 v3 session；v2 寫入也可接手該已釋放 v3。舊 v3 恢復輸入即撤銷交接資格，其餘競爭回 busy。v3 結束或失效後，須先完成釋放，才能切換版本。只讀 hello/status 不取得 ownership。
 - 非阻塞排程由 core 0 擁有，core 1 只處理 LED。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
 

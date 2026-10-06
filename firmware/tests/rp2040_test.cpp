@@ -69,7 +69,174 @@ bool replied(uint8_t op, uint32_t seq) {
             return true;
     return false;
 }
+void assertClicks(uint8_t button, unsigned expected = 1) {
+    uint8_t previous[2] = {};
+    unsigned downs = 0, ups = 0;
+    for (const auto &r : test_reports) {
+        if (r.id != MouseReportId && r.id != AbsMouseReportId)
+            continue;
+        const unsigned collection = r.id == MouseReportId ? 0 : 1;
+        if (collection == 1)
+            assert(r.data[0] == 0);
+        const bool before = (previous[collection] & button) != 0;
+        const bool after = (r.data[0] & button) != 0;
+        downs += !before && after;
+        ups += before && !after;
+        previous[collection] = r.data[0];
+    }
+    if (downs != expected || ups != expected)
+        fprintf(stderr, "Expected %u clicks, got %u downs and %u ups across HID collections\n",
+                expected, downs, ups);
+    assert(downs == expected && ups == expected);
+    assert(previous[0] == 0 && previous[1] == 0);
+}
+void testSingleClickAfterAbsolutePosition() {
+    // Windows enumerates the relative and absolute top-level mouse collections
+    // separately. Count transitions per collection rather than just final state.
+    fresh();
+    open();
+    send(binary::Absolute, 2, {0x00, 0x40, 0x00, 0x60});
+    tick(8);
+    test_reports.clear();
+    send(binary::Buttons, 3, {1});
+    send(binary::Buttons, 4, {0});
+    send(binary::Barrier, 5);
+    tick(15);
+    assert(replied(binary::Barrier, 5));
+    assertClicks(1);
+    // A click must not resend an old absolute position and move the cursor back.
+    for (const auto &r : test_reports)
+        assert(r.id != AbsMouseReportId);
+}
+void testButtonsInBothMotionModes() {
+    for (bool absolute : {false, true})
+        for (uint8_t button : {1, 2, 4, 8, 16}) {
+            fresh();
+            open();
+            uint32_t seq = 2;
+            send(binary::Buttons, seq++, {button});
+            send(absolute ? binary::Absolute : binary::Move, seq++, {10, 0, 20, 0});
+            send(binary::Buttons, seq++, {0});
+            send(binary::Barrier, seq);
+            tick(15);
+            assert(replied(binary::Barrier, seq));
+            assertClicks(button);
+        }
+}
+void testDragAcrossMotionModesAndMaintenance() {
+    fresh();
+    open();
+    send(binary::Buttons, 2, {31});
+    send(binary::Absolute, 3, {0, 0x40, 0, 0x60});
+    send(binary::Move, 4, {10, 0, 20, 0});
+    std::vector<uint8_t> snapshot(31);
+    snapshot[30] = 31;
+    send(binary::Snapshot, 5, snapshot);
+    send(binary::Absolute, 6, {0, 0x50, 0, 0x70});
+    send(binary::Wheel, 7, {1, 0, 0, 0});
+    send(binary::Status, 8);
+    send(binary::Heartbeat, 9);
+    tick(20);
+    // Relative movement/wheel reports retain the held state. Absolute reports
+    // never own buttons, even on the very first absolute motion during a drag.
+    unsigned absolute_reports = 0;
+    for (const auto &r : test_reports) {
+        if (r.id == MouseReportId)
+            assert(r.data[0] == 31);
+        if (r.id == AbsMouseReportId) {
+            assert(r.data[0] == 0);
+            ++absolute_reports;
+        }
+    }
+    assert(absolute_reports == 2 && output.completed.buttons == 31);
+    send(binary::Buttons, 10, {0});
+    send(binary::Snapshot, 11, std::vector<uint8_t>(31));
+    send(binary::Barrier, 12);
+    tick(12);
+    assert(replied(binary::Barrier, 12));
+    for (uint8_t button : {1, 2, 4, 8, 16})
+        assertClicks(button);
+}
+void testRealRapidClicksArePreserved() {
+    fresh();
+    open();
+    send(binary::Absolute, 2, {0, 0x40, 0, 0x60});
+    tick(8);
+    test_reports.clear();
+    for (uint32_t seq = 3; seq < 9; ++seq)
+        send(binary::Buttons, seq, {uint8_t(seq & 1)});
+    send(binary::Barrier, 9);
+    tick(15);
+    assert(replied(binary::Barrier, 9));
+    assertClicks(1, 3);
+}
+void testMouseReleaseAndFaults() {
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        fresh();
+        open();
+        send(binary::Absolute, 2, {0, 0x40, 0, 0x60});
+        tick(8);
+        test_reports.clear();
+        send(binary::Buttons, 3, {1});
+        tick(scenario == 0 ? 1 : 8); // Also release while a press is in flight.
+        if (scenario == 0)
+            send(binary::Release, 4);
+        else if (scenario == 1) {
+            test_time += 2001;
+            Firmware::loop();
+        } else if (scenario == 2) {
+            tud_hid_report_failed_cb(0, HID_REPORT_TYPE_INPUT, nullptr, 0);
+            Firmware::loop();
+        } else {
+            TinyUSBDevice.mounted_ = false;
+            Firmware::loop();
+            TinyUSBDevice.mounted_ = true;
+        }
+        tick(15);
+        assert(!output.completed.held());
+        if (scenario == 0)
+            assert(replied(binary::Release, 4));
+        else
+            assert(protocol_owner == ProtocolOwner::None);
+        assertClicks(1);
+    }
+}
+void testLegacyAbsoluteThenBinaryClick() {
+    fresh();
+    legacy("mouse_abs:16384,24576");
+    tick(8);
+    assert(protocol_owner == ProtocolOwner::Legacy);
+    legacy("reset");
+    tick(12);
+    open();
+    send(binary::Buttons, 2, {1});
+    send(binary::Buttons, 3, {0});
+    send(binary::Barrier, 4);
+    tick(15);
+    assert(replied(binary::Barrier, 4));
+    assertClicks(1);
+}
+void testLegacyClickAndAbsoluteDrag() {
+    fresh();
+    legacy("mouse_abs:16384,24576");
+    tick(8);
+    test_reports.clear();
+    legacy("mouse_button:1,down");
+    legacy("mouse_abs:20480,28672");
+    legacy("mouse_move:10,20");
+    legacy("mouse_button:1,up");
+    tick(15);
+    assert(output.idle());
+    assertClicks(1);
+}
 int main() {
+    testSingleClickAfterAbsolutePosition();
+    testButtonsInBothMotionModes();
+    testDragAcrossMotionModesAndMaintenance();
+    testRealRapidClicksArePreserved();
+    testMouseReleaseAndFaults();
+    testLegacyAbsoluteThenBinaryClick();
+    testLegacyClickAndAbsoluteDrag();
     fresh();
     for (const auto &wire : WireVectors) {
         vendorSetReport(0, HID_REPORT_TYPE_INVALID, wire, 64);
@@ -84,6 +251,7 @@ int main() {
     uint8_t feature[63];
     assert(binary::feature(14, HID_REPORT_TYPE_FEATURE, feature, 63) == 63);
     assert(memcmp(feature, "FMT3", 4) == 0);
+    assert(feature[6] == 3 && feature[7] == 0 && feature[8] == 1);
     assert(binary::read16(feature + 9) == 2000);
     open();
     send(binary::Key, 2, {7, 0, 4, 0, 1});
@@ -279,6 +447,7 @@ int main() {
     assert(replied(binary::Bootloader, 2) && !bootloader_reset_pending);
     tick();
     assert(bootloader_reset_pending && !output.completed.held());
-    puts("RP2040 firmware: short taps, NKRO/media, barriers, v2 compatibility, ownership, sequence "
+    puts("RP2040 firmware: single clicks in both modes, five buttons, mixed-mode drag, rapid clicks, "
+         "mouse fault release, short taps, NKRO/media, barriers, v2 compatibility, ownership, sequence "
          "faults, lease, overflow, stale output and disconnect passed");
 }

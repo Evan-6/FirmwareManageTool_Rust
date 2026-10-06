@@ -25,8 +25,11 @@ class OutputScheduler {
             j.flags |= Keyboard;
         if (force || next.consumer != desired.consumer)
             j.flags |= Consumer;
+        // Windows exposes each top-level mouse collection as a separate device.
+        // Keep all button transitions in the relative collection, even while
+        // moving absolutely; mirroring buttons would generate duplicate clicks.
         if (force || next.buttons != desired.buttons)
-            j.flags |= Relative | Absolute;
+            j.flags |= Relative;
         if (!add(j))
             return false;
         desired = next;
@@ -197,7 +200,9 @@ class OutputScheduler {
             }
             id = AbsMouseReportId;
             n = 5;
-            data[0] = j.state.buttons;
+            // The absolute collection owns coordinates only. Sending held buttons
+            // here would create a second press on the first absolute drag motion.
+            data[0] = 0;
             data[1] = abs_x_;
             data[2] = abs_x_ >> 8;
             data[3] = abs_y_;

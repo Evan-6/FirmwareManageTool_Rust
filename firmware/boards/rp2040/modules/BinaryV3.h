@@ -70,6 +70,7 @@ uint16_t feature(uint8_t id, hid_report_type_t type, uint8_t *buffer, uint16_t n
     buffer[5] = 1;
 #endif
     buffer[6] = 3;
+    buffer[8] = 1; // Firmware 3.0.1: single collection owns mouse buttons.
     write16(buffer + 9, 2000);
     write16(buffer + 11, 30000);
     buffer[13] = 1;

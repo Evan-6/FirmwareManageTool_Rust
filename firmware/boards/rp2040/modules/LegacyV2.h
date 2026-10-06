@@ -107,7 +107,7 @@ unsigned long leaseRemaining(unsigned long now) {
 
 void queueHello() {
     TextBuilder output;
-    output.append("ok:hello,protocol=2,fw=3.0,lease_ms=");
+    output.append("ok:hello,protocol=2,fw=3.0.1,lease_ms=");
     output.appendUnsigned(FailsafeReleaseMs);
     output.append(",max_nonmod=6,mouse=1\n");
     queueRam(output.data(), output.length());
@@ -312,10 +312,8 @@ bool handleMouseCommand(char *line) {
             QUEUE_ERROR("err:hid_send_failed\n");
             return true;
         }
-        // A relative move makes any previously known absolute position stale;
-        // without this, the next mouse_button would resync the abs pointer
-        // collection to that stale (x, y) and warp the cursor away from
-        // wherever the relative move just placed it. See resyncAbsMouseButtons().
+        // Invalidate the legacy absolute-position cache after relative motion.
+        // Button updates no longer resend coordinates in either collection.
         abs_mouse_known = false;
         renewLease();
         if (EnableKeyCommandAcks) {

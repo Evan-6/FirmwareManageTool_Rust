@@ -24,6 +24,8 @@ const uint8_t HidReportDescriptor[] = {
     // (also used by VirtualBox/VMware absolute-mouse devices): Windows' HID mouse class
     // driver maps the 0-65535 logical range onto the primary display, so the report
     // itself carries the on-screen position instead of a delta.
+    // Keep the descriptor/layout compatible, but always transmit zero buttons in
+    // this collection. The relative collection owns buttons for both motion modes.
     0x05, 0x01,                         // Usage Page (Generic Desktop)
     0x09, 0x02,                         // Usage (Mouse)
     0xA1, 0x01,                         // Collection (Application)

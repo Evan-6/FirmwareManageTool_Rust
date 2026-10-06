@@ -10,9 +10,9 @@ struct MouseReport {
 MouseReport mouse_report{};
 uint16_t mouse_send_failures = 0;
 
-// Absolute pointer report (report id AbsMouseReportId). Buttons mirror
-// mouse_report.buttons so a button pressed/released via mouse_button stays
-// consistent across both HID collections (see updateMouseButtons()).
+// Absolute pointer report (report id AbsMouseReportId). The button byte stays
+// zero: all button transitions belong to the relative mouse collection, so
+// absolute motion during a drag cannot generate an extra press/release.
 struct __attribute__((packed)) AbsMouseReport {
     uint8_t buttons;
     uint16_t x;

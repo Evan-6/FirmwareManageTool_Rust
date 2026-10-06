@@ -5,6 +5,12 @@
 
 ## 本次已完成
 
+- 3.0.1 滑鼠修正：在實際排程器搭配 USB 替身重現「送過絕對座標後單擊產生兩組按下／放開」。
+  修正後每次單擊只產生一組，五鍵／兩種模式、混合模式拖曳、維護快照、快速三連點、
+  in-flight 釋放、租約／USB 故障／拔線重連釋放與 v2→v3 交接回歸通過。
+  C++17 嚴格警告、ASan／UBSan 與協定同步檢查通過；EvanRemote hardware-input 34、共享協定 10 項測試通過。
+  Pico／XIAO 的 3.0.1 UF2 編譯通過；Pico 91872 bytes flash／19424 bytes RAM，XIAO 94688 bytes flash／19516 bytes RAM。
+  Feature 14 韌體版本為 3.0.1，USB bcdDevice 為 0x0301；未完成 Windows／USB 實機確認。
 - `cargo fmt --all -- --check`。
 - 管理工具 Linux／Windows MSVC 目標的 workspace Clippy：`--all-targets -- -D warnings`。
 - 管理工具 Linux workspace all-targets：主程式 36 項、共享協定 10 項測試通過。

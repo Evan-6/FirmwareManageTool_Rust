@@ -1,4 +1,4 @@
-# RP2040 韌體 3.0
+# RP2040 韌體 3.0.1
 
 目標為 Raspberry Pi Pico、Seeed XIAO RP2040 與相容板。建置固定使用 arduino-pico **6.2.0**、內附 Adafruit TinyUSB；XIAO 另需 Adafruit NeoPixel。對外提供共用鍵盤／Consumer／相對與絕對滑鼠 HID，以及 Vendor HID，合計兩個介面，沒有 CDC／COM。
 
@@ -7,6 +7,8 @@
 新版工具優先選擇 [v3 二進位協定](../../protocol-v3.md)。按鍵使用 `{usage_page, usage}`，區分主鍵區、數字鍵盤、左右修飾鍵與 ISO／JIS；鍵盤輸出為 NKRO。Consumer 支援音量增減、靜音、播放／暫停、上一首、下一首、停止。字元輸入與目標鍵盤配置由作業系統處理。
 
 [v2 文字協定](../../protocol-v2.md) 保留原本指令、別名與 ACK，最多六個一般鍵加八個修飾鍵，租約 30 秒。v3 租約 2 秒、主機每 500ms 續租，一般輸入沒有 ACK；釋放與屏障會等待 USB 傳輸完成。v2/v3 不得同時修改輸入狀態，競爭時回 busy。
+
+3.0.1 修正單擊變成雙擊／多次點擊：按鈕固定由相對滑鼠 collection 輸出，絕對 collection 只送座標，避免 Windows 對兩個邏輯滑鼠分別產生按鍵事件。按鈕改變也不再重送舊絕對座標。需重新燒錄 RP2040；只更新主機程式無法修正舊韌體。Feature 14 回報韌體版本 3.0.1，USB bcdDevice 為 0x0301。
 
 ## 模組
 
