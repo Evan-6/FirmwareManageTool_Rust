@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package an already-built MSVC executable on Linux, using only Python stdlib."""
+"""Package a natively built Windows MSVC executable on Windows."""
 import argparse
 import hashlib
 import json
@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import zipfile
 
 
@@ -14,6 +15,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path)
     options = parser.parse_args()
+    if sys.platform != "win32":
+        parser.error("Windows EXE/ZIP packaging must run on Windows. Use scripts/build.ps1 or scripts/package.ps1 on Windows.")
     root = Path(__file__).resolve().parent.parent
     binary = options.binary or root / "target/x86_64-pc-windows-msvc/release/firmware-manage-tool.exe"
     if not binary.is_file():
@@ -27,7 +30,7 @@ def main():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
     shutil.copy2(binary, stage / "FirmwareManageTool.exe")
-    for name in ("firmware", "docs", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+    for name in ("firmware", "shared", "docs", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         path = root / name
         if path.is_dir():
             shutil.copytree(path, stage / name)

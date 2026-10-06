@@ -1,5 +1,8 @@
 param([switch]$SkipChecks)
 $ErrorActionPreference = 'Stop'
+if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    throw 'Windows EXE/ZIP builds must run on Windows with the native MSVC toolchain.'
+}
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {

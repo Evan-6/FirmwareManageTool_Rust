@@ -21,14 +21,19 @@
 - arduino-cli 1.5.1、arduino-pico **6.2.0** 與其內附 TinyUSB、Adafruit NeoPixel 1.15.5：Pico 與 XIAO RP2040 編譯通過。
 - 本地 UF2 產物：`dist/rp2040-v3/pico-3.0.0.uf2`、`xiao-3.0.0.uf2`；BUILD.txt 記錄 SHA256 與來源指紋。
   Pico 91872 bytes flash／19424 bytes RAM，XIAO 94696 bytes flash／19516 bytes RAM。
-- 管理工具與 EvanRemote server Windows x86_64 MSVC **Release 交叉建置通過**。
-  使用 cargo-xwin 0.23.1、clang-cl／lld-link 14；尚未在 Windows 執行。
 - Windows／Linux 輸入 CI、Pico／XIAO 固定 core 建置 CI、可攜式套件納入共享按鍵表與授權。
   workflow 與 PowerShell 打包修改未在 GitHub Actions／Windows 原生環境執行。
 
 硬體 crate 所需 libudev 開發標頭與 pkg-config 在 `/tmp/rp2040-redesign/udev` 準備，
 執行時使用 PKG_CONFIG_PATH 與 CFLAGS，不修改系統套件。一般開發主機可直接安裝 libudev-dev。
-MSVC 靜態 CRT 缺少 Microsoft 私有 PDB 的 LNK4099 警告不影響 Release 連結成功。
+
+## Windows 建置方式與使用者回報
+
+先前管理工具與 EvanRemote server 曾在 Linux 使用 cargo-xwin 0.23.1、clang-cl／lld-link 14
+完成 MSVC Release 交叉連結。使用者回報 Linux 產出的執行檔無法啟動，自 Windows 編譯則可啟動；
+交叉連結結果不列為 Windows 執行或發行驗證。後續 Windows EXE／ZIP 僅由 Windows 原生 MSVC
+環境產生，Linux 僅執行原始碼檢查、測試與韌體／UF2 編譯。
+使用者的啟動回報不代表下列全部 Windows／USB 驗收項目已完成。
 
 ## 自動測試涵蓋
 
@@ -41,7 +46,7 @@ MSVC 靜態 CRT 缺少 Microsoft 私有 PDB 的 LNK4099 警告不影響 Release 
 - session ownership、失敗釋放重試／延後模式切換、舊版回退、閒置維護與去重長等待續租。
 - 既有 ACK 分段／合併、子程序期限／取消、燒錄歧義／重試、滑鼠與延遲統計回歸。
 
-鍵盘 descriptor 與 USB 替身不取代 Windows driver 或實體輸入測試。延遲終點仍為
+鍵盤 descriptor 與 USB 替身不取代 Windows driver 或實體輸入測試。延遲終點仍為
 Windows GetAsyncKeyState 觀察到輸入，沒有改成 MCU ACK／屏障時間。
 
 ## 待 Windows／USB 實機驗收

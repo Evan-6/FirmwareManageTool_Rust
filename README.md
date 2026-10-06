@@ -46,6 +46,7 @@ cargo run --locked
 `build.ps1` 執行 fmt、Clippy、測試與 MSVC Release 建置，然後輸出
 `dist/FirmwareManageTool_Rust-0.1.0-windows-x64.zip`。
 ZIP 包含 exe、韌體、文件與第三方授權資料。僅重新打包時使用 `scripts/package.ps1`。
+Windows EXE 與 ZIP 僅在 Windows 原生 MSVC 環境建置及打包；建置／打包腳本會拒絕在 Linux 執行。
 GitHub Actions workflow 已提供，但目前不代表已在遠端執行。
 
 ## Linux 開發檢查
@@ -60,6 +61,7 @@ bash scripts/test-rp2040.sh
 ```
 
 Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。
+Linux 開發執行原始碼檢查、測試及 RP2040 韌體／UF2 編譯，不產生 Windows EXE 或 ZIP。
 Linux GUI 字型使用系統 Noto CJK；Windows 使用系統 Microsoft JhengHei。
 
 架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。
