@@ -32,7 +32,7 @@ OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包
 
 控制回應 opcode=命令|80，回應 payload 首 byte result：0=成功、1=framing、2=busy、3=invalid input、5=lease、6=HID send failed、7=USB disconnect、8=overflow/stale output、9=duplicate sequence、10=sequence gap。正常控制回應僅一個 result byte；STATUS 為固定 51-byte payload。
 
-STATUS payload：result u8、received u32、completed u32、pending u8、lease_remaining u16、rx/tx/hid/failsafe 各 u16、input snapshot[31]。計數為 u16 wrap；主機比較工作前後計數，不能將該次工作中的變化視為成功。snapshot、received、completed、lease、pending 是查詢 session 自己的狀態；錯誤計數為裝置共用。completed 序號才表示該 session 前面的 USB 輸出已完成。
+STATUS payload：result u8、received u32、completed u32、pending u8、lease_remaining u16、rx/tx/hid/failsafe 各 u16、input snapshot[31]。計數為 u16 wrap。snapshot、received、completed、lease、pending 是查詢 session 自己的狀態；錯誤計數為裝置共用。其他 session 的租約到期或協議錯誤也會增加 failsafe，不能僅依此判定本工作失敗。本 session 故障以匹配自身 ID 的 EVENT／控制 timeout 判定，TX／HID 共用傳輸計數變化仍須檢查。completed 序號才表示該 session 前面的 USB 輸出已完成。
 
 故障事件 opcode=7F，包含 result byte 與故障 session／最近接收序號。非法輸入、序號與租約故障只使對應 session 失效，取消該 session 待送工作並釋放其持有狀態，保留其他 session。USB／共用佇列故障使全部 session 失效，各自產生一個故障事件。TX overflow 另記計數；事件可能因傳輸問題遺失，控制 timeout 也須使主機 session 失效。
 
@@ -59,4 +59,4 @@ bash scripts/test-rp2040.sh
 bash scripts/test-leonardo.sh
 ```
 
-同步腳本產生本地 Rust／C++／JavaScript 按鍵表、C++ wire vectors 與兩板的共享引擎 header 複本，並同步三個使用端。共用 firmware/common 是輸入狀態、排程、v3 解析與 USB report descriptor 的唯一來源。生成物需提交；只修改 Rust 一份或手改生成檔會被同步檢查拒絕。
+同步腳本產生本地 Rust／C++／JavaScript 按鍵表、C++ wire vectors 與 Leonardo 的引擎 header 複本，並同步三個使用端。RP2040 的唯一實作來源為 `boards/rp2040/src/`；`firmware/common` 暫留供 Leonardo 使用。生成物需提交；只修改 Rust 一份或手改生成檔會被同步檢查拒絕。RP2040 與 AVR 的引擎在過渡期間分開維護，協議／排程行為變更須以同一份 wire 規格及相容性案例確認兩板。

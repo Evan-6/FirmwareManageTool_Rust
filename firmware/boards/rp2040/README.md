@@ -33,7 +33,11 @@ BOOTLOADER 在其他 v3 session 存在時回 busy；燒錄前關閉其他控制�
 
 ## 模組
 
-`Firmware.cpp` 組合各內部模組，core 0 負責 USB／解析／狀態／排程；core 1 只讀取原子 LED 狀態並渲染。共用引擎在 `firmware/common/`，透過同步腳本產生 `modules/V3*.h`；其餘 `modules/` 分離設定、輸入模型、USB descriptor、輸出排程、v3 RX、LED 與生命週期。實作 header 只在此 translation unit 組合一次，避免 TinyUSB callbacks 與狀態出現多份實例。
+`Firmware.cpp` 僅組裝一個 `FirmwareRuntime` 並委派 Arduino 入口。`src/input/` 的 codec、session、scheduler 與 engine 使用正常 `.h/.cpp`，分別編譯及連結，可在不帶 Arduino／TinyUSB／Pico SDK 的主機測試。`src/platform/` 持有 USB、bootloader、LED 硬體，`src/runtime/` 依固定順序協調；標頭不建立可變全域狀態，也不依賴 include 順序。
+
+core 0 持有全部輸入、排程與 LED 狀態決策，core 1 只讀原子發布的 LED 狀態並渲染。USB callbacks 只交付 RX、完成／失敗及 reset 通知，Feature 使用初始化後的唯讀資料。RX 保留 Pico SDK queue，TX 改由 engine 的固定陣列持有，容量仍為 32。
+
+RP2040 不再使用生成的 `modules/V3*.h`；`firmware/common/` 暫留供 Leonardo 使用。兩板仍共用 wire 規格、按鍵表與 golden vectors。詳見 [重構規格](../../../docs/rp2040-refactor-spec.md)。
 
 - USB callback 只接收封包或通知完成；不執行輸入命令，也不等待 endpoint。
 - 鍵盤與按鈕轉換保持順序；32 項輸出佇列，50ms 過期／溢位停止 session 並優先釋放。

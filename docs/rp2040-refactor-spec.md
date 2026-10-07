@@ -1,14 +1,14 @@
 # RP2040 韌體重構規格
 
-日期：2026-10-07。狀態：規格草案，尚未實作。
+日期：2026-10-07。狀態：結構重構已實作並通過本機測試／板型建置；Windows／USB 實機驗收待完成。
 
 本次只整理 RP2040 韌體結構，涵蓋同一份 sketch 的 Raspberry Pi Pico、Seeed XIAO RP2040 與既有相容板設定。
 基準為 commit `8893eb5`：Vendor HID v3、韌體 3.1.0，以及管理工具的 RealTime 量測修正。
-本次交付只有規格文件；以下目錄、介面與測試均為後續實作要求。
+本文件記錄已確認的重構要求；實作與本機驗證結果見 [validation.md](validation.md#rp2040-結構重構)。
 
 ## 1. 問題與目標
 
-目前 `firmware/boards/rp2040/Firmware.cpp` 在匿名 namespace 內按固定順序 include 多個實作標頭。
+重構前的 `firmware/boards/rp2040/Firmware.cpp` 在匿名 namespace 內按固定順序 include 多個實作標頭。
 這些標頭直接建立 session、USB 物件、輸出排程及錯誤計數，並引用其他標頭先前建立的名稱。
 `OutputScheduler` 直接呼叫全域 `binary::completed`／`protocolFault`，協議處理又直接操作全域 `output`。
 測試透過 include 整份 `Firmware.cpp` 取得這些內部狀態。
@@ -54,7 +54,7 @@ firmware/boards/rp2040/
   KeyCatalog.h                    # 按鍵表生成物
   src/
     input/
-      InputState.h                # 純資料與局部操作
+      InputState.h/.cpp           # 純資料與局部操作
       WireCodec.h/.cpp            # framing、命令／回覆、Feature 編解碼
       SessionTable.h/.cpp         # 8 個 session 的資料與查詢
       OutputScheduler.h/.cpp      # 32 筆工作、歷史來源、USB 完成處理
@@ -76,7 +76,7 @@ firmware/boards/rp2040/
 
 ### 3.1 與 Leonardo 共用來源的過渡
 
-目前 `firmware/common/*.h` 是兩板的共同來源。RP2040 完成遷移後：
+重構前 `firmware/common/*.h` 是兩板的共同來源。RP2040 遷移後：
 
 - RP2040 `src/input/` 成為其引擎的唯一編譯來源，不再使用 `modules/V3*.h`。
 - 本次保留 `firmware/common/` 與 Leonardo 的生成副本，供未遷移的 AVR 使用；兩者內容不改。

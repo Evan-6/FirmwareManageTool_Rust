@@ -21,7 +21,8 @@ inline bool queue_try_add(queue_t *q, const void *p) {
 inline bool queue_try_peek(queue_t *q, void *p) {
     if (q->items.empty())
         return false;
-    if (p) memcpy(p, q->items.front().data(), q->size);
+    if (p)
+        memcpy(p, q->items.front().data(), q->size);
     return true;
 }
 inline bool queue_try_remove(queue_t *q, void *p) {
@@ -32,3 +33,5 @@ inline bool queue_try_remove(queue_t *q, void *p) {
 }
 
 inline unsigned queue_get_level(queue_t *q) { return q->items.size(); }
+
+inline void queue_free(queue_t *q) { q->items.clear(); }

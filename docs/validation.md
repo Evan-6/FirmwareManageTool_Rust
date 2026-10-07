@@ -2,7 +2,7 @@
 
 日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 Leonardo／RP2040 或 Windows USB 實機。
 
-## 韌體 3.1.0
+## 韌體 3.1.0（重構前產物）
 
 Leonardo／Pico／XIAO 僅提供 Vendor HID v3，8 個獨立 session、NKRO／Consumer／相對滑鼠。
 v2 解析器、report 10／11、serial 回退與舊 bootloader 線路已移除。
@@ -22,7 +22,7 @@ releaseSession 133、sessionFault 83、USB setup 80、reply 76、sendReport 73�
 
 ## 已通過的檢查
 
-- `scripts/test-rp2040.sh`：編譯實際 RP2040 Firmware.cpp，使用假 USB completion。
+- `scripts/test-rp2040.sh`：重構後分別編譯及連結 RP2040 的正式 `.cpp`，使用假 USB completion。
   涵蓋同鍵／五鍵持有、個別釋放／租約／錯誤、歷史短按與位移保留、序號、8 個 session／第九個拒絕、
   USB／佇列故障、bootloader 完成，以及舊 report／opcode 拒絕。
 - `scripts/test-leonardo.sh`：編譯實際 AVR Firmware.cpp 與內附 core 的 HidPackets.h。
@@ -71,3 +71,74 @@ GUI 原本已釋放的 session 仍需等待 2 秒租約到期；共用 failsafe 
 - REALTIME／TIME_CRITICAL 限於送出指令；Windows 觀察使用高精度優先權，避免在 REALTIME 忙等阻礙輸入。
 - 顯示成功／已執行／要求／未執行輪數，成功率以已執行輪數計算；15 成功、1 timeout、34 未執行有回歸測試。
 - Windows MSVC 全目標嚴格 Clippy 只做程式碼檢查；尚未進行 Windows／USB 實機重測，沒有產生 Windows EXE。
+
+
+## RP2040 結構重構
+
+Pico／XIAO 已依 [rp2040-refactor-spec.md](rp2040-refactor-spec.md) 遷移至正常 `.h/.cpp`；
+純引擎與平台分開，FirmwareRuntime 持有正式實例，core 0 決定輸入／LED 狀態，core 1 只渲染 LED。
+版本維持 protocol 3、firmware 3.1.0、bcdDevice 0x0310。Leonardo 與 `firmware/common/` 的內容未變。
+
+### 行為與建置
+
+- 重建 `ec34092` 的重構前 Pico／XIAO 基準，Flash／RAM 與上表一致。
+- 同一批既有測試命令／時間／USB completion 下，前後 552 筆 input／vendor report 的 bytes 與順序完全一致。
+  比對時每個測試案例都從零計數開始，舊 harness 的直接故障注入改由相同的 USB failed callback 觸發。
+- Pico／XIAO 的 159-byte input descriptor、35-byte vendor descriptor、63-byte Feature 各自逐位元組相同。
+  重構前的 bytes 固定於 `firmware/tests/Rp2040UsbGolden.h`，不由新 encoder 產生預期值。
+- `scripts/test-rp2040.sh` 同時驗證 Pico／XIAO runtime、無板級 SDK 的正式引擎、各 header 獨立編譯、兩個 TU 引用並正常連結。
+  新增獨立 engine、1999／2000ms 租約、50／51ms 過期、時鐘／計數 wrap、TX／motion overflow、RX 四筆預算與錯誤次數、
+  send 拒絕重試／清理、錯誤 report ID completion、USB reset 舊通知、BOOT ACK／119／120ms 與 LED 核心分工。
+- 完整 RP2040 測試另以 ASan／UBSan、`UBSAN_OPTIONS=halt_on_error=1` 通過。
+- arduino-cli 1.5.1、arduino-pico 6.2.0、TinyUSB、NeoPixel 1.15.5 下兩板全新編譯通過，所有新 `.cpp` 都出現在編譯清單。
+  擷取並編譯管理工具原有 `copy_tree` 函式，遞迴複製完整 sketch 至工作副本；來源逐檔相同，副本 Pico 建置也通過，UF2 與直接建置逐位元組相同。
+- Leonardo 模擬測試與固定 bundled core 建置通過，仍為 Flash 13474／靜態 RAM 1811 bytes。
+  共享生成物及四個 repo 的同步檢查通過；管理工具／共享協議 31＋17 項 Rust 測試通過。
+
+TinyUSB 的 `tud_event_hook_cb` 在 BUS_RESET／UNPLUGGED 發布同步 reset 通知，因 BUS_RESET 不保證出現主迴圈可觀察的 mounted=false。
+Transport 以 USB epoch、input report ID 與 BOOT 回覆 session／sequence 追蹤傳送；
+引擎在 reset／故障使 generation 失效，避免舊 completion 推進新工作或重啟。
+Vendor 回覆只在 send 接受後出列；BOOT ACK generation 在 callback 收到時保存，不被後續 STATUS 覆寫。
+
+同步使用固定 Core 的 `pico_atomic/atomic.c`：原子操作以 atomic spinlock 加上 IRQ save／restore 實作，
+不是假設 Cortex-M0+ 的原子操作皆 lock-free。callback 只執行有界複製、佇列操作與通知，
+沒有等待 USB、sleep、引擎命令執行或 NeoPixel 渲染。LED 狀態以 release／acquire 發布。
+
+### 資源差異
+
+| 板子 | 重構前 Flash | 重構後 Flash | 重構前靜態 RAM | 重構後靜態 RAM | 重構後可用 RAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Pico | 85376 | 87920 | 27492 | 29636 | 232508 |
+| XIAO | 88192 | 90792 | 27584 | 29712 | 232432 |
+
+Flash 分別增加 2544／2600 bytes，來自分檔後明確的模組呼叫與 USB 傳送追蹤／同步。
+TX 的 32×63=2016 bytes 改由 InputEngine 固定持有，原本的 Pico SDK TX queue heap 配置移除。
+固定 SDK 的 queue 實際配置為 `(32+1)×63=2079` bytes；RX 仍保留一組相同配置。
+因此靜態 RAM 的 +2144／+2128 bytes 並非全數增加執行期記憶體：扣除移除的 TX queue 資料配置，
+靜態加佇列資料合計差異為 +65／+49 bytes，未計 allocator metadata 或其他 SDK 執行期配置。
+沒有新增熱路徑 heap 配置或多組輸出／RX／TX 佇列。
+
+使用相同 ARM 編譯器／`-Os`，移除 LTO 旗標並加 `-fstack-usage`，分別編譯正式來源：
+
+| 函式 frame | 重構前 | 重構後 |
+| --- | ---: | ---: |
+| 主迴圈 | Firmware::loop 200 | FirmwareRuntime::loop 152；入口 wrapper 8 |
+| sessionFault | 120 | 32 |
+| releaseSession | 144 | 176 |
+| reply | 96 | 104 |
+| queueState／queueMotion／queueBarrier／cancelOwner | 融入原呼叫者 | 320／304／272／288 |
+
+新 wrapper 的主要成本是局部 8×31=248-byte 來源快照，取代 scheduler 對全域 session 的讀取。
+較深的應用程式路徑保守相加（未扣 tail call／未包含 SDK、libc、Arduino main 或中斷 frame）：
+
+- 原版：loop → sessionFault → releaseSession → state → protocolFault → reply 約 640 bytes。
+- 新版：入口 → runtime.loop → handle → queueState → checkScheduled → fault → event → reply → wire.reply 約 860 bytes。
+- 新版個別取消：入口 → runtime.loop → handle → sessionFault → cancelOwner → releaseSession → state 約 792 bytes。
+
+兩板 ELF linker map 的 core 0 stack 範圍為 `0x20041800..0x20042000`（2048 bytes）。
+上述數字是模組 frame 與主要呼叫路徑分析，不能當成完整 peak stack 或實機保證；
+USB 中斷、SDK 與 XIAO core 1 NeoPixel 的實際尖峰仍待硬體驗收。
+
+重構產物另存於 `dist/firmware-rp2040-refactor/`：`pico-3.1.0.uf2`、`xiao-3.1.0.uf2` 與 `BUILD-3.1.0.json`。
+manifest 記錄 sketch 來源指紋、產物 SHA256、固定工具／核心與用量；不覆蓋前述重構前產物。
+目前未燒錄設備，亦未產生 Windows EXE／ZIP；一般／高精度／RealTime 各 50 輪與多 session 的 Windows／USB 實機驗收仍待完成。

@@ -26,7 +26,8 @@ js+='const HID_KEY_TOKEN_MAP = '+json.dumps({t:{'p':r['page'],'u':r['usage']} fo
 vectors=json.loads((shared/'vectors.json').read_text())
 cpp_vectors='// Golden wire vectors from shared/input-protocol/vectors.json.\n#pragma once\nconstexpr uint8_t WireVectors[][64] = {\n'+''.join('{'+','.join(str(b) for b in v['bytes'])+'},\n' for v in vectors)+'};\n'
 outputs={shared/'src/keys_generated.rs':rust,shared/'keys_generated.js':js,shared/'keys_generated.h':cpp,root/'firmware/boards/rp2040/KeyCatalog.h':cpp,root/'firmware/boards/leonardo_avr/KeyCatalog.h':cpp,shared/'vectors_generated.h':cpp_vectors,root/'firmware/tests/ProtocolVectors.h':cpp_vectors}
-for board in ['rp2040','leonardo_avr']:
+# RP2040 uses separately compiled src/ modules; AVR retains generated headers.
+for board in ['leonardo_avr']:
     for source in (root/'firmware/common').glob('*.h'):
         outputs[root/'firmware/boards'/board/'modules'/('V3'+source.name)]='// Generated from firmware/common/'+source.name+'; do not edit this copy.\n'+source.read_text()
 for path,content in outputs.items():

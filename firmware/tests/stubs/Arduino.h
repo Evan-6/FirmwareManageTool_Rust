@@ -16,3 +16,7 @@ struct PicoStub {
     void rebootToBootloader() { rebooted = true; }
 };
 inline PicoStub rp2040;
+
+constexpr int OUTPUT = 1, HIGH = 1;
+inline void pinMode(int, int) {}
+inline void digitalWrite(int, int) {}

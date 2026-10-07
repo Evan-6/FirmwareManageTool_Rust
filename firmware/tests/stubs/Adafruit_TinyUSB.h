@@ -38,12 +38,20 @@ class Adafruit_USBD_HID {
   public:
     uint8_t instance;
     bool ready_ = true;
+    bool reject_next = false;
     static inline uint8_t next = 0;
-    Adafruit_USBD_HID(const uint8_t *, uint16_t, int, int, bool) : instance(next++) {}
+    static inline Adafruit_USBD_HID *devices[2] = {};
+    Adafruit_USBD_HID(const uint8_t *, uint16_t, int, int, bool) : instance(next++ % 2) {
+        devices[instance] = this;
+    }
     bool ready() { return ready_; }
     bool begin() { return true; }
     template <class A, class B> void setReportCallback(A, B) {}
     bool sendReport(uint8_t id, const void *p, uint8_t n) {
+        if (reject_next) {
+            reject_next = false;
+            return false;
+        }
         if (!ready_)
             return false;
         ready_ = false;

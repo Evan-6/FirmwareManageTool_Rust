@@ -74,3 +74,7 @@ STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共�
 共用 USB／佇列故障才釋放全部來源。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
 
 Leonardo 共用 firmware/common 引擎，輸出／RX／TX 佇列深度為 2／1／8；RP2040 為 32／32／32。AVR USB packet API 不阻塞或發送尾端 ZLP，完成依主機 ACK 的 endpoint bank；USB reset 不允許舊 boot 回覆被誤當完成。Leonardo 固定序號 HP-KB-0024，不可視為唯一身分。
+
+RP2040 已使用 `firmware/boards/rp2040/src/` 的獨立 `.cpp`：InputEngine 持有 session／scheduler／TX，FirmwareRuntime 組裝單一正式實例，平台層持有兩個 USB HID、RX、bootloader 與 LED。純引擎以主迴圈傳入的 uint32 時間運作，不直接呼叫硬體。callback 只發布同步通知，USB reset 透過 TinyUSB event hook 使舊傳送失效；core 1 只讀發布的 LED 狀態。測試正常編譯及連結這些來源，不再 include Firmware.cpp。重構規格見 [rp2040-refactor-spec.md](rp2040-refactor-spec.md)。
+
+`firmware/common/` 與 Leonardo 的生成引擎維持原樣，RP2040 不再由同步腳本複製引擎標頭；按鍵表與 wire vectors 仍共用。過渡期間修改協議或排程需同時確認兩板。

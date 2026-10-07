@@ -1,73 +1,9 @@
-// RP2040 internal module; included once by Firmware.cpp.
+#include "StatusLedRenderer.h"
+#include <Arduino.h>
+namespace hidfw {
+using namespace board;
 #if FIRMWARE_ENABLE_NEOPIXEL
-struct Rgb {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-};
-
-constexpr bool operator==(const Rgb &a, const Rgb &b) {
-    return a.r == b.r && a.g == b.g && a.b == b.b;
-}
-#endif
-
-namespace led {
-
-enum class State : uint8_t { Off, Idle, Held, Error, Failsafe, Bootloader };
-
-// This is the only state shared between the cores. Core 0 owns all priority and
-// timeout decisions; core 1 loads this value once per render frame.
-std::atomic<State> published_state{State::Off};
-unsigned long error_signalled_at = 0;
-unsigned long failsafe_signalled_at = 0;
-bool error_active = false;
-bool failsafe_active = false;
-bool bootloader_signalled = false;
-
-constexpr uint16_t ErrorFlashMs = 140;
-constexpr uint16_t FailsafeHoldMs = 3000;
-
-inline void signalError() {
-    error_signalled_at = millis();
-    error_active = true;
-}
-
-inline void signalFailsafe() {
-    failsafe_signalled_at = millis();
-    failsafe_active = true;
-}
-
-inline void signalBootloader() { bootloader_signalled = true; }
-
-void update(unsigned long now, bool mounted, bool has_pressed_keys) {
-    State state = State::Off;
-
-    if (bootloader_signalled) {
-        state = State::Bootloader;
-    } else if (!mounted) {
-        state = State::Off;
-    } else if (error_active && now - error_signalled_at < ErrorFlashMs) {
-        state = State::Error;
-    } else if (failsafe_active && now - failsafe_signalled_at < FailsafeHoldMs) {
-        state = State::Failsafe;
-    } else if (has_pressed_keys) {
-        state = State::Held;
-    } else {
-        state = State::Idle;
-    }
-
-    if (error_active && now - error_signalled_at >= ErrorFlashMs) {
-        error_active = false;
-    }
-    if (failsafe_active && now - failsafe_signalled_at >= FailsafeHoldMs) {
-        failsafe_active = false;
-    }
-
-    published_state.store(state, std::memory_order_release);
-}
-
-#if FIRMWARE_ENABLE_NEOPIXEL
-
+namespace {
 // --- renderer tunables --------------------------------------------------------
 constexpr uint8_t MaxBrightness = 160;
 constexpr uint16_t FrameIntervalMs = 10;
@@ -84,10 +20,6 @@ constexpr Rgb ColourIdle = {0, 40, 255};
 constexpr Rgb ColourError = {255, 20, 0};
 constexpr Rgb ColourFailsafe = {255, 120, 0};
 constexpr Rgb ColourBoot = {200, 0, 255};
-
-unsigned long last_frame_at = 0;
-Rgb current{0, 0, 0};
-Rgb shown{255, 255, 255};
 
 uint8_t scale8(uint8_t value, uint8_t scale) {
     return static_cast<uint8_t>((static_cast<uint16_t>(value) * scale) >> 8);
@@ -110,23 +42,23 @@ uint8_t breath(unsigned long now, uint16_t period) {
 
 bool blinkOn(unsigned long now, uint16_t period) { return (now % period) < (period / 2); }
 
-Rgb targetColour(State state, unsigned long now, bool &instant) {
+Rgb targetColour(LedState state, unsigned long now, bool &instant) {
     instant = false;
 
     switch (state) {
-    case State::Off:
+    case LedState::Off:
         return ColourOff;
-    case State::Error:
+    case LedState::Error:
         instant = true;
         return ColourError;
-    case State::Failsafe:
+    case LedState::Failsafe:
         return blinkOn(now, FailsafeBlinkMs) ? ColourFailsafe : ColourOff;
-    case State::Held:
+    case LedState::Held:
         return ColourHeld;
-    case State::Bootloader:
+    case LedState::Bootloader:
         instant = true;
         return blinkOn(now, BootBlinkMs) ? ColourBoot : ColourOff;
-    case State::Idle:
+    case LedState::Idle:
         if (!EnableRgbAnimations) {
             return ColourOff;
         }
@@ -151,59 +83,56 @@ uint8_t approach(uint8_t from, uint8_t to) {
     return delta <= FadeStep ? to : static_cast<uint8_t>(from - FadeStep);
 }
 
-void render(unsigned long now) {
+} // namespace
+void StatusLedRenderer::render(uint32_t now, LedState state) {
     if (!EnableStatusLed) {
         return;
     }
-    if (now - last_frame_at < FrameIntervalMs) {
+    if (now - last_frame_at_ < FrameIntervalMs) {
         return;
     }
-    last_frame_at = now;
+    last_frame_at_ = now;
 
-    const State state = published_state.load(std::memory_order_acquire);
     bool instant = false;
     const Rgb target = targetColour(state, now, instant);
 
     if (instant || !EnableRgbAnimations) {
-        current = target;
+        current_ = target;
     } else {
-        current.r = approach(current.r, target.r);
-        current.g = approach(current.g, target.g);
-        current.b = approach(current.b, target.b);
+        current_.r = approach(current_.r, target.r);
+        current_.g = approach(current_.g, target.g);
+        current_.b = approach(current_.b, target.b);
     }
 
-    const Rgb out = scaleRgb(current, MaxBrightness);
+    const Rgb out = scaleRgb(current_, MaxBrightness);
 
     // Only bit-bang the strip when the pixel actually changes. show() runs with
     // interrupts disabled, so skipping no-op frames keeps core 1 responsive.
-    if (out == shown) {
+    if (out == shown_) {
         return;
     }
-    shown = out;
-    pixels.setPixelColor(0, pixels.Color(out.r, out.g, out.b));
-    pixels.show();
+    shown_ = out;
+    pixels_.setPixelColor(0, pixels_.Color(out.r, out.g, out.b));
+    pixels_.show();
 }
 
-void begin() {
+void StatusLedRenderer::begin(uint32_t now) {
     if (!EnableStatusLed) {
         return;
     }
     pinMode(NeoPixelPowerPin, OUTPUT);
     digitalWrite(NeoPixelPowerPin, HIGH);
-    pixels.begin();
-    pixels.setBrightness(255); // brightness handled in software, keep the lib linear
-    pixels.setPixelColor(0, pixels.Color(0, 0, 0));
-    pixels.show();
-    current = ColourOff;
-    shown = ColourOff;
-    last_frame_at = millis();
+    pixels_.begin();
+    pixels_.setBrightness(255); // brightness handled in software, keep the lib linear
+    pixels_.setPixelColor(0, pixels_.Color(0, 0, 0));
+    pixels_.show();
+    current_ = ColourOff;
+    shown_ = ColourOff;
+    last_frame_at_ = now;
 }
 
 #else
-
-inline void render(unsigned long) {}
-inline void begin() {}
-
+void StatusLedRenderer::begin(uint32_t) {}
+void StatusLedRenderer::render(uint32_t, LedState) {}
 #endif
-
-} // namespace led
+} // namespace hidfw

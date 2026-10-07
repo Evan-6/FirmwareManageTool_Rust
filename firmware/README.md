@@ -45,8 +45,10 @@ firmware\boards\rp2040\upload.ps1
 
 ## 共用引擎與平台差異
 
-`common/` 是輸入狀態、v3 解析、排程及 USB report descriptor 的唯一來源。
-執行 `scripts/sync-input-protocol.py` 產生兩個 sketch 的 `modules/V3*.h`。
+RP2040 使用 `boards/rp2040/src/input/` 的獨立 `.cpp` 引擎與 `src/platform/` 平台層；
+`common/` 暫留供 Leonardo 的生成式實作使用。
+`scripts/sync-input-protocol.py` 繼續產生兩板的按鍵表、共享 wire vectors 及 Leonardo 的 `modules/V3*.h`，不再複製 RP2040 引擎。
+這是 RP2040 先遷移的過渡安排；未來協議或排程行為變更須同時確認兩板相容性。
 兩種板子都有 NKRO、七種 Consumer、五鍵相對滑鼠與雙軸滾輪。
 RP2040 output／RX／TX 深度為 32／32／32，AVR 為 2／1／8；滿載回報故障。
 USB 完成依平台的主機 ACK 通知；個別釋放保留其他來源，USB／共用佇列故障清理全部 session。

@@ -1,5 +1,8 @@
-// Generated from firmware/common/Descriptors.h; do not edit this copy.
-const uint8_t HidReportDescriptor[] V3_PROGMEM = {
+#include "UsbDescriptors.h"
+#include "../input/WireCodec.h"
+namespace hidfw::board {
+using namespace wire;
+const uint8_t HidReportDescriptor[] = {
     // 8 modifier bits, then 224 usage bits (reserved usages are always zero).
     0x05,
     0x01,
@@ -166,7 +169,11 @@ const uint8_t HidReportDescriptor[] V3_PROGMEM = {
 };
 
 // Vendor-defined command channel (usage page 0xFF60), mirrors the AVR build.
-const uint8_t VendorHidReportDescriptor[] V3_PROGMEM = {
-    0x06, 0x60, 0xFF, 0x09, 0x61, 0xA1, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00,
-    0x75, 0x08, 0x95, 63,   0x85, 12,   0x09, 0x64, 0x91, 0x02, 0x85, 13,
-    0x09, 0x65, 0x81, 0x02, 0x85, 14,   0x09, 0x66, 0xB1, 0x02, 0xC0};
+const uint8_t VendorHidReportDescriptor[] = {0x06, 0x60, 0xFF, 0x09, 0x61, 0xA1, 0x01, 0x15, 0x00,
+                                             0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 63,   0x85, 12,
+                                             0x09, 0x64, 0x91, 0x02, 0x85, 13,   0x09, 0x65, 0x81,
+                                             0x02, 0x85, 14,   0x09, 0x66, 0xB1, 0x02, 0xC0};
+
+const uint16_t HidReportDescriptorLength = sizeof(HidReportDescriptor);
+const uint16_t VendorHidReportDescriptorLength = sizeof(VendorHidReportDescriptor);
+} // namespace hidfw::board
