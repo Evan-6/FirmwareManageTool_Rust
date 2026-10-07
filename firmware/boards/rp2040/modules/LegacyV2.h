@@ -107,7 +107,7 @@ unsigned long leaseRemaining(unsigned long now) {
 
 void queueHello() {
     TextBuilder output;
-    output.append("ok:hello,protocol=2,fw=3.0.2,lease_ms=");
+    output.append("ok:hello,protocol=2,fw=3.0.3,lease_ms=");
     output.appendUnsigned(FailsafeReleaseMs);
     output.append(",max_nonmod=6,mouse=1\n");
     queueRam(output.data(), output.length());
@@ -451,7 +451,7 @@ void handleCommand(char *raw_line) {
     }
     protocol_owner = ProtocolOwner::Legacy;
     binary_released = false;
-    active_session = 0;
+    binary::resetSessions();
 
     if (strcmp(line, "enter_bootloader") == 0 || strcmp(line, "bootloader") == 0) {
         keyboard.releaseAll();

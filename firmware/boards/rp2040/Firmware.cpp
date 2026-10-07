@@ -58,7 +58,7 @@ void setup() {
         TinyUSBDevice.begin(0);
     Serial.end();
     TinyUSBDevice.setID(UsbVid, UsbPid);
-    TinyUSBDevice.setDeviceVersion(0x0302);
+    TinyUSBDevice.setDeviceVersion(0x0303);
     static char serial[17];
     pico_get_unique_board_id_string(serial, sizeof(serial));
     TinyUSBDevice.setSerialDescriptor(serial);
@@ -66,7 +66,7 @@ void setup() {
     TinyUSBDevice.setProductDescriptor(UsbProduct);
     queue_init(&vendor_rx, sizeof(RxEvent), RxQueueDepth);
     queue_init(&binary::rx, sizeof(binary::Report), 32);
-    queue_init(&binary::tx, sizeof(binary::Report), 8);
+    queue_init(&binary::tx, sizeof(binary::Report), 32);
     usb_vendor.setReportCallback(binary::feature, vendorSetReport);
     usb_hid.begin();
     usb_vendor.begin();

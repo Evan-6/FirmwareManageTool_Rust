@@ -53,9 +53,63 @@ static_assert(sizeof(InputState) == 31, "Input snapshot must have a stable byte 
 enum class ProtocolOwner : uint8_t { None, Legacy, Binary };
 ProtocolOwner protocol_owner = ProtocolOwner::None;
 ProtocolOwner releasing_protocol = ProtocolOwner::None;
-uint32_t active_session = 0, received_sequence = 0, completed_sequence = 0;
+namespace binary {
+constexpr uint8_t SessionLimit = 8;
+struct Pending {
+    uint8_t op = 0;
+    uint32_t seq = 0;
+};
+struct Session {
+    uint32_t id = 0, received = 0, completed = 0;
+    unsigned long lease_at = 0;
+    InputState state{};
+    Pending pending{};
+    bool released = false;
+};
+Session sessions[SessionLimit];
+Session *find(uint32_t id) {
+    if (id)
+        for (auto &s : sessions)
+            if (s.id == id)
+                return &s;
+    return nullptr;
+}
+uint8_t count() {
+    uint8_t n = 0;
+    for (const auto &s : sessions)
+        n += s.id != 0;
+    return n;
+}
+InputState merge(const InputState *states) {
+    InputState merged;
+    for (uint8_t i = 0; i < SessionLimit; ++i) {
+        merged.modifiers |= states[i].modifiers;
+        merged.consumer |= states[i].consumer;
+        merged.buttons |= states[i].buttons;
+        for (uint8_t k = 0; k < 28; ++k)
+            merged.keys[k] |= states[i].keys[k];
+    }
+    return merged;
+}
+void capture(InputState *states) {
+    for (uint8_t i = 0; i < SessionLimit; ++i)
+        states[i] = sessions[i].state;
+}
+InputState aggregate() {
+    InputState states[SessionLimit];
+    capture(states);
+    return merge(states);
+}
+void resetSessions() {
+    for (auto &s : sessions)
+        s = {};
+}
+void completed(uint32_t id, uint32_t seq) {
+    if (auto *s = find(id))
+        s->completed = seq;
+}
+} // namespace binary
 uint16_t binary_rx_errors = 0, binary_tx_errors = 0, binary_hid_errors = 0,
          binary_failsafe_count = 0;
-unsigned long binary_lease_at = 0;
 bool binary_released = false;
 void protocolFault(uint8_t code);

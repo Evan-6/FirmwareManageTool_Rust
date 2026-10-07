@@ -5,6 +5,8 @@ import argparse, json, shutil, subprocess
 parser=argparse.ArgumentParser()
 parser.add_argument('--check',action='store_true')
 parser.add_argument('--peer',type=Path)
+parser.add_argument('--mscv-rust',type=Path)
+parser.add_argument('--mscv-cpp',type=Path)
 a=parser.parse_args()
 root=Path(__file__).resolve().parents[1]; shared=root/'shared/input-protocol'
 s=json.loads((shared/'keys.json').read_text()); rows=s['keys']
@@ -39,3 +41,21 @@ if a.peer:
     else:
         shutil.copytree(shared,target,dirs_exist_ok=True,ignore=shutil.ignore_patterns('target','Cargo.lock'))
         (a.peer/'web/key-usages.js').write_text(js)
+
+if a.mscv_rust:
+    target=a.mscv_rust/'crates/input-protocol'
+    if a.check:
+        for path in shared.rglob('*'):
+            if path.is_file() and 'target' not in path.relative_to(shared).parts and path.name != 'Cargo.lock':
+                other=target/path.relative_to(shared)
+                if not other.exists() or other.read_bytes()!=path.read_bytes():raise SystemExit('MSCV Rust drift: '+str(other))
+    else:
+        shutil.copytree(shared,target,dirs_exist_ok=True,ignore=shutil.ignore_patterns('target','Cargo.lock'))
+if a.mscv_cpp:
+    tokens='// Generated from FirmwareManageTool_Rust/shared/input-protocol/keys.json.\n#pragma once\n#include <cstdint>\nnamespace hardware::v3 {\nstruct KeyToken { const char* token; std::uint16_t page, usage; };\ninline constexpr KeyToken KeyTokens[] = {\n'
+    tokens+=''.join('    {'+json.dumps(token)+', '+str(row['page'])+', '+str(row['usage'])+'},\n' for row in rows for token in [row['token']]+row['aliases'])
+    tokens+='};\n}\n'
+    for path,content in {a.mscv_cpp/'include/hardware/input_protocol/key_tokens_generated.h':tokens,a.mscv_cpp/'include/hardware/input_protocol/vectors_generated.h':cpp_vectors.replace('#pragma once', '#pragma once\n#include <stdint.h>')}.items():
+        if a.check:
+            if not path.exists() or path.read_text()!=content:raise SystemExit('MSCV C++ drift: '+str(path))
+        else:path.parent.mkdir(parents=True,exist_ok=True);path.write_text(content)

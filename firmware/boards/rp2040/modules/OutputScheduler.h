@@ -5,8 +5,9 @@ class OutputScheduler {
     enum : uint8_t { Keyboard = 1, Consumer = 2, Relative = 4 };
     struct Job {
         InputState state{};
+        InputState sources[binary::SessionLimit]{};
         int32_t x = 0, y = 0, wheel = 0, hwheel = 0;
-        uint32_t sequence = 0;
+        uint32_t sequence = 0, session = 0;
         unsigned long queued_at = 0;
         uint8_t flags = 0;
         uint8_t kind = 0; // 0 state/barrier, 1 relative
@@ -16,10 +17,12 @@ class OutputScheduler {
     uint8_t pending() const { return count_; }
     bool idle() const { return count_ == 0 && !in_flight_; }
     bool hasPressed() const { return desired.held(); }
-    bool state(const InputState &next, uint32_t seq = 0, bool force = false) {
+    bool state(const InputState &next, uint32_t seq = 0, bool force = false, uint32_t session = 0) {
         Job j;
         j.state = next;
         j.sequence = seq;
+        j.session = session;
+        binary::capture(j.sources);
         if (force || next.modifiers != desired.modifiers || memcmp(next.keys, desired.keys, 28))
             j.flags |= Keyboard;
         if (force || next.consumer != desired.consumer)
@@ -32,12 +35,12 @@ class OutputScheduler {
         desired = next;
         return true;
     }
-    bool motion(int32_t x, int32_t y, int32_t wheel, int32_t hwheel, uint32_t seq = 0) {
+    bool motion(int32_t x, int32_t y, int32_t wheel, int32_t hwheel, uint32_t seq = 0, uint32_t session = 0) {
         // Only combine adjacent pending motion, never the in-flight head or across
         // buttons/barriers.
         if (count_ > 1) {
             Job &last = jobs_[(head_ + count_ - 1) % Depth];
-            if (last.kind == 1 && last.state.buttons == desired.buttons) {
+            if (last.kind == 1 && last.session == session && last.state.buttons == desired.buttons) {
                 const int64_t nx = int64_t(last.x) + x, ny = int64_t(last.y) + y,
                               nw = int64_t(last.wheel) + wheel, nh = int64_t(last.hwheel) + hwheel;
                 if (nx < -8192 || nx > 8192 || ny < -8192 || ny > 8192 || nw < -8192 || nw > 8192 ||
@@ -62,12 +65,16 @@ class OutputScheduler {
         j.wheel = wheel;
         j.hwheel = hwheel;
         j.sequence = seq;
+        j.session = session;
+        binary::capture(j.sources);
         return add(j);
     }
-    bool barrier(uint32_t seq) {
+    bool barrier(uint32_t seq, uint32_t session = 0) {
         Job j;
         j.state = desired;
         j.sequence = seq;
+        j.session = session;
+        binary::capture(j.sources);
         return add(j);
     }
     void release(uint32_t seq = 0) {
@@ -85,6 +92,41 @@ class OutputScheduler {
         j.queued_at = millis();
         jobs_[0] = j;
         count_ = 1;
+    }
+    // Remove only this client's queued work. Historical snapshots of the other
+    // clients preserve their short taps and barriers while removing stale holds.
+    bool releaseSession(uint32_t session, uint32_t seq, uint8_t slot) {
+        releasing_protocol = ProtocolOwner::Binary;
+        const bool preserve_inflight = in_flight_ && count_ && jobs_[head_].session != session;
+        if (!preserve_inflight)
+            ++generation_; // Ignore completion only when its owner is being cancelled.
+        const uint8_t old_count = count_;
+        uint8_t kept = 0;
+        InputState previous = completed;
+        for (uint8_t i = 0; i < old_count; ++i) {
+            Job j = jobs_[(head_ + i) % Depth];
+            if (j.session == session)
+                continue;
+            const uint8_t original_flags = j.flags;
+            j.sources[slot] = {};
+            j.state = binary::merge(j.sources);
+            j.flags = 0;
+            if (!kept || j.state.modifiers != previous.modifiers ||
+                memcmp(j.state.keys, previous.keys, 28))
+                j.flags |= Keyboard;
+            if (!kept || j.state.consumer != previous.consumer)
+                j.flags |= Consumer;
+            if (!kept || j.kind == 1 || j.state.buttons != previous.buttons)
+                j.flags |= Relative;
+            if (i == 0 && preserve_inflight)
+                j.flags = original_flags; // Its pending completion must subtract motion exactly once.
+            jobs_[(head_ + kept) % Depth] = j;
+            previous = j.state;
+            ++kept;
+        }
+        count_ = kept;
+        desired = previous;
+        return state(binary::aggregate(), seq, true, session);
     }
     void complete(uint8_t report_id) { completion_.store(report_id, std::memory_order_release); }
     void failed() { failed_.store(true, std::memory_order_release); }
@@ -135,7 +177,7 @@ class OutputScheduler {
             Job &j = jobs_[head_];
             completed = j.state;
             if (j.sequence)
-                completed_sequence = j.sequence;
+                binary::completed(j.session, j.sequence);
             head_ = (head_ + 1) % Depth;
             --count_;
         }

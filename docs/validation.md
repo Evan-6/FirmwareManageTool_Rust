@@ -1,10 +1,23 @@
 # 驗證紀錄
 
-日期：2026-10-06（Asia/Taipei）。開發主機為 Linux，沒有連接 AVR／RP2040 或 Windows 實機。
+日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 AVR／RP2040 或 Windows 實機。
 以下編譯與模擬結果不等同 USB／Windows 實機驗收。
 
 ## 本次已完成
 
+- 3.0.3 多程式控制：最多八個 v3 session，各自保存序號、租約、輸入與控制完成；
+  鍵盤／Consumer／滑鼠按鈕取聯集，STATUS 回傳查詢者自己的狀態。
+  OPEN、個別 RELEASE_ALL／非法輸入／序號故障／租約到期不清掉其他來源。
+  C++ 實際韌體測試涵蓋兩來源同鍵／snapshot／五鍵持有、個別釋放、晚到心跳、
+  多來源屏障、取消時保留另一來源的短按與已在傳送中的相對位移（無重送）、
+  第九個連線／session ID 碰撞、八來源 USB 故障事件與 v2 完成釋放後交接。
+  BOOTLOADER 拒絕其他 session，錯誤回覆不排定重啟；租約到期清除待送的舊 boot 回覆。
+  C++17 嚴格警告、ASan／UBSan 通過；Rust no-default-features 37＋17 項、嚴格 Clippy、fmt 與協定同步檢查通過。
+  新增主機測試確認別的 session 的控制回覆／故障事件不使自己的連線失效。
+  Pico／XIAO arduino-pico 6.2.0 建置通過；Pico 92912 bytes flash／27804 bytes RAM，XIAO 95728 bytes flash／27896 bytes RAM。
+  UF2 位於 `dist/rp2040-v3/pico-3.0.3.uf2`、`xiao-3.0.3.uf2`，
+  `BUILD-3.0.3.txt` 保存來源指紋與 SHA256。Feature flags=23、bcdDevice=0x0303；需重新燒錄。
+  **尚未在 Windows／RP2040 實機驗證多 handle 的同時開啟、回覆接收與同時輸入。v2 不阻擋多程式送指令，但共用狀態／租約／ACK，沒有來源隔離。**
 - 3.0.2 相對滑鼠：移除 absolute descriptor／座標／輸出，flags=7、bcdDevice=0x0302。
   C++ 實際韌體測試確認沒有 report id 4、五鍵與拖曳只走相對 report，保留快速三連點與各類釋放。
   舊 v3 opcode 33 拒絕並釋放，v2 mouse_abs 拒絕；沒有把舊絕對命令解讀為相對位移。
@@ -70,10 +83,16 @@ Windows GetAsyncKeyState 觀察到輸入，沒有改成 MCU ACK／屏障時間�
 - [ ] 主鍵區／數字鍵盤各數字與 Enter、左右修飾鍵；Num Lock 開／關不遺失來源。
 - [ ] ISO／JIS 與七種 Consumer 鍵；超過六鍵同按、同毫秒短按與快速點擊。
 - [ ] 點擊、五鍵、拖曳、雙軸滾輪、相對／絕對滑鼠、取消、失焦與模式切換。
-- [ ] 多 session ownership、拔線／USB 擁塞、租約釋放、完成屏障與重新連線空狀態。
+- [ ] 兩個 Windows 程式同時開啟 Vendor HID、同時輸入／接收自己回覆、同鍵持有與各自釋放。
+- [ ] 八個 v3 session 與個別租約、拔線／USB 擁塞、租約釋放、完成屏障與重新連線空狀態。
 - [ ] 舊工具／MSCV 控制新版 RP2040；新版工具控制舊 RP2040／AVR；v2／v3 互斥與交接。
 - [ ] PowerShell v2 bootloader 入口、管理工具燒錄後板型驗證、多裝置與下載失敗。
 - [ ] Windows 原生 fmt／Clippy／測試／Release／打包、GUI 中文與 manifest／DPI、EvanRemote 軟體輸出。
 - [ ] A 鍵一般／高精度／極限量測、取消／異常清理與真實按鍵到達延遲。
 
-AVR 與 MSCV 未修改；其既有實機描述不是本次新版 RP2040 實機驗證證據。
+MSCV 與 MSCV_RUST 已升級為僅支援 v3、程式各自持有 session；絕對移動 API 移除。
+MSCV_RUST 的 Windows 目標 app／bins 檢查、輸入層嚴格 Clippy、共享協定 17 項與
+輸入 facade／假 USB 14 項測試通過。MSCV 的鍵盤輸入層與 InputController Windows
+目標編譯檢查、可攜式協議測試及 ASan／UBSan 通過。兩個 MSCV 複本的協議同步
+檢查通過；完整 Windows 建置與實體 USB 多程式操作尚未驗證。
+AVR 未修改；既有實機描述不是本次新版 RP2040 實機驗證證據。

@@ -268,3 +268,30 @@ fn idle_wait_renews_binary_lease_without_an_input_ack() {
     );
     session.finish(&cancel).unwrap();
 }
+
+#[test]
+fn binary_shared_reports_ignore_other_clients_replies_and_faults() {
+    use input_protocol::v3::{self, Packet};
+    let cancel = Cancellation::default();
+    let mut session = Session::new(BinaryFake(Default::default()));
+    session.synchronize(&cancel).unwrap();
+    let own_id = session.binary.as_ref().unwrap().session;
+    for opcode in [v3::EVENT, v3::BARRIER | 128, v3::OPEN | 128] {
+        session.transport.0.reads.push_back(
+            Packet {
+                opcode,
+                flags: 0,
+                session: own_id.wrapping_add(1),
+                sequence: 2,
+                payload: vec![5],
+            }
+            .encode(v3::IN_ID)
+            .unwrap(),
+        );
+    }
+    session.finish(&cancel).unwrap();
+    assert!(session.is_valid());
+    session.transport.0.fault(5);
+    assert!(session.poll().is_err());
+    assert!(!session.is_valid());
+}

@@ -30,3 +30,5 @@ inline bool queue_try_remove(queue_t *q, void *p) {
     q->items.pop_front();
     return true;
 }
+
+inline unsigned queue_get_level(queue_t *q) { return q->items.size(); }

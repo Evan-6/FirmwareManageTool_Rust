@@ -29,8 +29,8 @@ void fresh() {
     new (&output) OutputScheduler;
     binary_released = false;
     releasing_protocol = protocol_owner = ProtocolOwner::None;
-    active_session = received_sequence = completed_sequence = 0;
-    binary::pending = {};
+    binary::resetSessions();
+    binary::boot_requested = false;
     binary::overflow.store(false);
     binary::invalid_report.store(false);
     binary::boot_reply_inflight = false;
@@ -186,7 +186,186 @@ void testOldAbsoluteCommandsAreRejected() {
     assert(protocol_owner == ProtocolOwner::None && !output.completed.held());
     assertClicks(1);
 }
+void openPeer(uint32_t id = 43) {
+    send(binary::Open, 1, {}, id);
+    tick(12);
+    assert(binary::find(id) && binary::find(id)->completed == 1);
+}
+bool responseFor(uint32_t id, uint8_t op, uint32_t seq, uint8_t code = 0) {
+    for (const auto &r : test_reports)
+        if (r.id == 13 && r.data[1] == op && binary::read32(r.data.data() + 4) == id &&
+            binary::read32(r.data.data() + 8) == seq && r.data[12] == code)
+            return true;
+    return false;
+}
+void testConcurrentStateAndRelease() {
+    fresh();
+    open();
+    send(binary::Key, 2, {7, 0, 4, 0, 1});
+    send(binary::Buttons, 3, {1});
+    tick(10);
+    openPeer(); // OPEN must preserve the existing client's held key and button.
+    assert(output.completed.keys[0] == 16 && output.completed.buttons == 1);
+    std::vector<uint8_t> snapshot(31);
+    snapshot[0] = 2;
+    snapshot[1] = 16; // Same A key, independently owned.
+    snapshot[29] = 2;
+    snapshot[30] = 3;
+    send(binary::Snapshot, 2, snapshot, 43);
+    send(binary::Release, 4);
+    send(binary::Barrier, 3, {}, 43);
+    tick(20);
+    assert(output.completed.keys[0] == 16 && output.completed.modifiers == 2 &&
+           output.completed.consumer == 2 && output.completed.buttons == 3);
+    assert(responseFor(42, binary::Release | 128, 4));
+    assert(responseFor(43, binary::Barrier | 128, 3));
+    send(binary::Status, 5);
+    send(binary::Status, 4, {}, 43);
+    tick(5);
+    for (const auto &r : test_reports) {
+        if (r.id != 13 || r.data[1] != (binary::Status | 128))
+            continue;
+        const uint32_t id = binary::read32(r.data.data() + 4);
+        assert(binary::read32(r.data.data() + 13) == (id == 42 ? 5u : 4u));
+        InputState state;
+        memcpy(&state, r.data.data() + 32, 31);
+        assert(state.held() == (id == 43));
+    }
+    send(binary::Release, 5, {}, 43);
+    tick(12);
+    assert(!output.completed.held());
+    // A released client can resume while the other remains connected.
+    send(binary::Key, 6, {7, 0, 5, 0, 1});
+    tick(8);
+    assert(output.completed.keys[0] == 32 && binary::count() == 2);
+}
+void testConcurrentFaultAndLease() {
+    for (uint8_t scenario : {0, 1, 2, 3}) {
+        fresh();
+        open();
+        openPeer();
+        send(binary::Key, 2, {7, 0, 4, 0, 1});
+        send(binary::Key, 2, {7, 0, 5, 0, 1}, 43);
+        send(binary::Buttons, 3, {1});
+        send(binary::Buttons, 3, {2}, 43);
+        tick(15);
+        if (scenario == 0)
+            send(binary::Key, 3, {7, 0, 4, 0, 0}); // Duplicate.
+        else if (scenario == 1)
+            send(binary::Key, 5, {7, 0, 4, 0, 0}); // Gap.
+        else if (scenario == 2)
+            send(binary::Buttons, 4, {32}); // Invalid input.
+        else {
+            test_time += 1500;
+            send(binary::Heartbeat, 4, {}, 43);
+            test_time += 501;
+            send(binary::Heartbeat, 4); // Late heartbeat must not revive this session.
+        }
+        tick(15);
+        assert(!binary::find(42) && binary::find(43));
+        assert(output.completed.keys[0] == 32 && output.completed.buttons == 2);
+        send(binary::Barrier, scenario == 3 ? 5 : 4, {}, 43);
+        tick(12);
+        assert(binary::find(43));
+    }
+}
+void testConcurrentQueuedWork() {
+    for (uint8_t scenario : {0, 1}) {
+        fresh();
+        open();
+        openPeer();
+        send(binary::Key, 2, {7, 0, 4, 0, 1});
+        tick(8);
+        // Other client's relative transfer is already in flight when A releases.
+        send(binary::Move, 2, {200, 0, 0, 0}, 43);
+        if (scenario)
+            tick();
+        send(binary::Release, 3);
+        send(binary::Buttons, 3, {1}, 43);
+        send(binary::Buttons, 4, {0}, 43);
+        send(binary::Barrier, 5, {}, 43);
+        tick(30);
+        int motion = 0;
+        for (const auto &r : test_reports)
+            if (r.id == MouseReportId)
+                motion += int8_t(r.data[1]);
+        assert(motion == 200);
+        assertClicks(1);
+        assert(responseFor(42, binary::Release | 128, 3));
+        assert(responseFor(43, binary::Barrier | 128, 5));
+        assert(!output.completed.held());
+    }
+    fresh();
+    open();
+    openPeer();
+    // Queued A movement must be cancelled without deleting B's movement or barriers.
+    send(binary::Buttons, 2, {1}, 43);
+    send(binary::Move, 2, {100, 0, 0, 0});
+    send(binary::Move, 3, {50, 0, 0, 0}, 43);
+    send(binary::Barrier, 4, {}, 43);
+    send(binary::Release, 3);
+    tick(25);
+    int motion = 0;
+    for (const auto &r : test_reports)
+        if (r.id == MouseReportId)
+            motion += int8_t(r.data[1]);
+    assert(motion == 50 && output.completed.buttons == 1);
+    assert(responseFor(43, binary::Barrier | 128, 4));
+}
+void testSessionCapacityAndBootloader() {
+    fresh();
+    open();
+    usb_vendor.ready_ = false;
+    send(binary::Bootloader, 2);
+    tick(12);
+    assert(binary::boot_requested && !bootloader_reset_pending);
+    test_time += 2001;
+    Firmware::loop();
+    tick(12);
+    assert(!binary::boot_requested && !binary::count());
+    usb_vendor.ready_ = true;
+    openPeer(43);
+    assert(!bootloader_reset_pending);
+    fresh();
+    open();
+    send(binary::Key, 2, {7, 0, 4, 0, 1});
+    tick(8);
+    send(binary::Key, 2, {7, 0, 4, 0, 0});
+    legacy("d:b");
+    assert(protocol_owner == ProtocolOwner::None);
+    tick(12);
+    legacy("d:b");
+    tick(8);
+    assert(protocol_owner == ProtocolOwner::Legacy && output.completed.keys[0] == 32);
+    fresh();
+    open();
+    for (uint32_t id = 43; id < 42 + binary::SessionLimit; ++id)
+        openPeer(id);
+    send(binary::Open, 1, {}, 99);
+    tick(4);
+    assert(binary::count() == binary::SessionLimit && !binary::find(99));
+    assert(responseFor(99, binary::Open | 128, 1, 2));
+    send(binary::Key, 2, {7, 0, 4, 0, 1});
+    tick(8);
+    send(binary::Open, 1);
+    tick(4);
+    assert(binary::find(42)->received == 2 && output.completed.keys[0] == 16);
+    send(binary::Bootloader, 3);
+    tick(4);
+    assert(responseFor(42, binary::Bootloader | 128, 3, 2));
+    assert(!bootloader_reset_pending && !binary::boot_requested);
+    // Shared USB failure invalidates all sessions and broadcasts one event per client.
+    tud_hid_report_failed_cb(0, HID_REPORT_TYPE_INPUT, nullptr, 0);
+    tick(25);
+    assert(binary::count() == 0 && !output.completed.held());
+    for (uint32_t id = 42; id < 42 + binary::SessionLimit; ++id)
+        assert(responseFor(id, binary::Event, id == 42 ? 3 : 1, 6));
+}
 int main() {
+    testConcurrentStateAndRelease();
+    testConcurrentFaultAndLease();
+    testConcurrentQueuedWork();
+    testSessionCapacityAndBootloader();
     testRelativeMouseOnly();
     testRealRapidClicksArePreserved();
     testMouseReleaseAndFaults();
@@ -201,14 +380,14 @@ int main() {
     assert(output.desired.keys[30 / 8] & (1 << (30 % 8)));
     assert(output.desired.keys[89 / 8] & (1 << (89 % 8)));
     assert(output.desired.consumer == 2);
-    assert(completed_sequence == 5);
+    assert(binary::find(0x12345678)->completed == 5);
     fresh();
     uint8_t feature[63];
     assert(binary::feature(14, HID_REPORT_TYPE_FEATURE, feature, 63) == 63);
     assert(memcmp(feature, "FMT3", 4) == 0);
-    assert(feature[6] == 3 && feature[7] == 0 && feature[8] == 2);
+    assert(feature[6] == 3 && feature[7] == 0 && feature[8] == 3);
     assert(binary::read16(feature + 9) == 2000);
-    assert(binary::read32(feature + 14) == 7);
+    assert(binary::read32(feature + 14) == 23);
     open();
     send(binary::Key, 2, {7, 0, 4, 0, 1});
     send(binary::Key, 3, {7, 0, 4, 0, 0});
@@ -317,10 +496,10 @@ int main() {
     tick(12);
     send(binary::Open, 1, {}, 43);
     tick(12);
-    assert(active_session == 43 && replied(binary::Open, 1));
-    send(binary::Key, 3, {7, 0, 4, 0, 1}, 42);
-    tick(8);
+    assert(binary::find(43) != nullptr && replied(binary::Open, 1));
     assert(!output.desired.held());
+    send(binary::Release, 3, {}, 42);
+    tick(8);
     send(binary::Release, 2, {}, 43);
     legacy("d:b");
     assert(protocol_owner == ProtocolOwner::Binary);
@@ -404,6 +583,7 @@ int main() {
     tick();
     assert(bootloader_reset_pending && !output.completed.held());
     puts("RP2040 firmware: relative-only descriptor, five buttons, relative drag, rapid clicks, "
+         "eight concurrent sessions, isolated releases/leases/faults, per-session barriers, "
          "mouse fault release, short taps, NKRO/media, barriers, v2 compatibility, ownership, sequence "
          "faults, lease, overflow, stale output and disconnect passed");
 }
