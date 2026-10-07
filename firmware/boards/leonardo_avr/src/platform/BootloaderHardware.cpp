@@ -1,7 +1,12 @@
-#pragma once
+#include "Bootloader.h"
+#include <Arduino.h>
+#include <avr/pgmspace.h>
+#include <avr/wdt.h>
+namespace hidfw {
+namespace avr {
 bool hasNewLufaBootloader() { return pgm_read_word(FLASHEND - 1) == NEW_LUFA_SIGNATURE; }
 
-void enterBootloaderNow() {
+void enterBootloader() {
     uintptr_t magic_key_pos = MAGIC_KEY_POS;
 
 #if MAGIC_KEY_POS != (RAMEND - 1)
@@ -20,12 +25,5 @@ void enterBootloaderNow() {
     }
 }
 
-void scheduleBootloaderReset() {
-    bootloader_reset_pending = true;
-    bootloader_reset_requested_at = millis();
-}
-void serviceBootloaderReset(unsigned long now) {
-    if (bootloader_reset_pending && now - bootloader_reset_requested_at >= 120 && output.idle() &&
-        usb_vendor.ready() && queue_get_level(&binary::tx) == 0)
-        enterBootloaderNow();
-}
+} // namespace avr
+} // namespace hidfw

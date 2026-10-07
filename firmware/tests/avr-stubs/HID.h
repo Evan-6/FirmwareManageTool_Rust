@@ -99,7 +99,8 @@ struct LockEP {
     }
 };
 inline uint8_t FifoByteCount() { return fifo[selected_ep].size(); }
-inline bool ReadWriteAllowed() { return fifo[selected_ep].size() < 64; }
+inline bool test_allow_write = true;
+inline bool ReadWriteAllowed() { return test_allow_write && fifo[selected_ep].size() < 64; }
 inline void Send8(uint8_t v) { fifo[selected_ep].push_back(v); }
 inline void ReleaseTX() {
     test_packets.push_back({selected_ep, fifo[selected_ep], false});
@@ -107,7 +108,8 @@ inline void ReleaseTX() {
     ep_busy[selected_ep] = 1;
 }
 // Compile the actual bundled AVR core packet helpers, using fake endpoint registers.
-#include "../../boards/leonardo_avr/hardware/goosedevil/avr/cores/arduino/HidPackets.h"
+bool USB_PacketComplete(u8 ep);
+bool USB_TrySendPacket(u8 ep, const u8 *data, u8 length);
 inline uint8_t USB_Available(uint8_t) { return test_out.empty() ? 0 : test_out.front().size(); }
 inline int USB_Recv(uint8_t, void *d, int n) {
     if (test_out.empty())

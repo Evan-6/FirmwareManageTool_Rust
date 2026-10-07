@@ -4,7 +4,7 @@
 
 本次只整理 RP2040 韌體結構，涵蓋同一份 sketch 的 Raspberry Pi Pico、Seeed XIAO RP2040 與既有相容板設定。
 基準為 commit `8893eb5`：Vendor HID v3、韌體 3.1.0，以及管理工具的 RealTime 量測修正。
-本文件記錄已確認的重構要求；實作與本機驗證結果見 [validation.md](validation.md#rp2040-結構重構)。
+本文件記錄第一階段 RP2040 重構（`d9d8ef7`）的已確認要求；後續使用者要求兩板共用實作，由 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md) 記錄，取代本文的 AVR 過渡安排。第一階段實作與本機驗證結果見 [validation.md](validation.md#rp2040-結構重構)。
 
 ## 1. 問題與目標
 

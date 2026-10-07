@@ -11,8 +11,12 @@ USB VID/PID 03F0:0024，固定序號 HP-KB-0024，Feature board=3、fw=3.1.0、f
 受 2560 bytes SRAM 限制，輸出佇列 2 筆、RX 1 筆、TX 8 筆；滿載或輸出過期回 fault 8 並清理全部 session。
 短按 down/up/barrier 可共用最後一筆的完成序號；大量連續輸入需等待 BARRIER，故障後重新 OPEN。
 
-共享引擎修改 `firmware/common/`，執行同步腳本更新 `modules/V3*.h`，不要手改生成物。
-`modules/Platform.h` 提供 AVR 原子變數與有界佇列；`UsbTransport.h` 註冊兩個 PluggableUSB 介面。
+`Firmware.cpp` 只持有一個 FirmwareRuntime 並委派 Arduino 入口。
+協議、session、scheduler、TX 與 bootloader 等待條件共用 `firmware/common/input/`；descriptor 共用 `firmware/common/usb/`。
+同步腳本更新兩板 `src/` 的正常 `.h/.cpp` 副本，由 Arduino 分別編譯，不再 include 實作標頭或 `.cpp`。
+AVR 平台層持有一筆 RX 與同步錯誤通知，使用 ATOMIC_BLOCK 保護 callback／主迴圈交接，並註冊兩個 PluggableUSB 介面。
+排程使用短暫的 8 個唯讀指標（AVR 16 bytes），工作本身仍保存各來源的歷史快照。
+詳見 [共用重構規格](../../../docs/shared-firmware-refactor-spec.md)。
 內附 USB core 的 HidPackets.h 非阻塞提交單一 packet，不額外送 ZLP；bank 被主機 ACK 後才通知排程完成。
 USB reset／suspend 會使舊 session 失效。Bootloader 先等輸入釋放與回覆 USB 完成，再用 watchdog／MAGIC_KEY 進 Caterina。
 

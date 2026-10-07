@@ -1,13 +1,12 @@
 #pragma once
-#include <stdint.h>
+#include "../input/BootloaderGate.h"
 namespace hidfw {
 class Bootloader {
   public:
     void update(uint32_t now, bool confirmed, bool output_idle, bool vendor_ready, bool tx_empty);
-    bool pending() const { return pending_; }
+    bool pending() const { return gate_.pending(); }
 
   private:
-    uint32_t at_ = 0;
-    bool pending_ = false;
+    BootloaderGate gate_{};
 };
 } // namespace hidfw

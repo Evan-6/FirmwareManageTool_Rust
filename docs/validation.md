@@ -142,3 +142,60 @@ USB 中斷、SDK 與 XIAO core 1 NeoPixel 的實際尖峰仍待硬體驗收。
 重構產物另存於 `dist/firmware-rp2040-refactor/`：`pico-3.1.0.uf2`、`xiao-3.1.0.uf2` 與 `BUILD-3.1.0.json`。
 manifest 記錄 sketch 來源指紋、產物 SHA256、固定工具／核心與用量；不覆蓋前述重構前產物。
 目前未燒錄設備，亦未產生 Windows EXE／ZIP；一般／高精度／RealTime 各 50 輪與多 session 的 Windows／USB 實機驗收仍待完成。
+
+
+## 兩板共用引擎與 Leonardo 重構
+
+基準 `d9d8ef7`。共用正式來源為 `firmware/common/input/`（引擎與 BootloaderGate）及
+`firmware/common/usb/`（descriptor），同步為兩板可獨立編譯的 `.h/.cpp`。
+規格見 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md)；前一節記錄的是 RP2040 第一階段。
+
+- 共用來源以 RP2040 與 AVR 容量配置，不帶板級 SDK 跑同一套引擎測試。
+- 兩板 runtime 測試、各 header 獨立編譯與兩個 TU 連結通過；Leonardo 測試不再 include Firmware.cpp。
+- 原有 USB report 比對：RP2040 552 筆、Leonardo 123 筆，bytes 與順序完全一致。
+  舊／新 harness 每個案例均從零計數開始；新增案例在既有序列後另行驗證。
+- Leonardo 完整 Feature 固定於 `LeonardoUsbGolden.h`，兩板 descriptor 共用 `Rp2040UsbGolden.h` 的重構前 bytes。
+- 新增 AVR interrupt／control OUT 共用 RX、傳送拒絕保留 vendor 回覆、input 拒絕故障／釋放、RX framing 優先與累計次數、
+  TX 八筆滿載、reset 後新 OUT 不被舊 mailbox 清理吞掉、BOOT ACK 後 119／120ms 與 ACK 後 reset 取消。Linux 不執行 AVR MMIO／watchdog 入口，僅替換該硬體函式。
+  USB packet helpers 仍編譯內附 core 的實際 HidPackets.h，於單一 TU 定義。
+- 共用引擎新增已 RELEASE 的 GUI session 到期而 peer 繼續短按／屏障、歷史快照非別名，以及共用 boot gate 的時鐘 wrap／三個重啟條件。
+- 兩板完整模擬測試另以 ASan／UBSan、`UBSAN_OPTIONS=halt_on_error=1` 通過。
+- 管理工具及共享協議 31＋17 項 Rust 測試、四 repo 同步檢查通過；主機輸入 API／wire 不變。
+- Arduino CLI 1.5.1、AVR bundled 1.8.8、arduino-pico 6.2.0、TinyUSB、NeoPixel 1.15.5 全新編譯通過。管理工具原有 copy_tree 遞迴複製的 Pico／Leonardo 工作副本也通過，
+  UF2／HEX 與直接建置逐位元組相同。
+
+| 板子 | 基準 Flash | 現行 Flash | 基準靜態 RAM | 現行靜態 RAM | 現行可用 RAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Leonardo | 13474 | 15584 | 1811 | 1838 | 722 |
+| Pico | 87920 | 87920 | 29636 | 29636 | 232508 |
+| XIAO | 90792 | 90792 | 29712 | 29712 | 232432 |
+
+AVR 增加 2110 bytes Flash、27 bytes 靜態 RAM，含明確物件／RX 通知／傳送與 boot generation 等狀態。
+SourceView 為 AVR 16 bytes、RP2040 32 bytes，取代 RP2040 第一階段的 248-byte wrapper 快照，
+每個 job 仍保存來源值；不增加 SRAM scratch buffer、heap 或 queue 深度。
+
+ARM 同一編譯器／`-Os -fstack-usage` 的 wrapper frame：queueState／queueMotion／queueBarrier／cancelOwner
+由 320／304／272／288 降為 104／88／56／72 bytes，各減少 216 bytes。
+第一階段的主要應用程式故障呼叫路徑估算 860 bytes，現行約 644 bytes；未含 SDK／中斷，不能作為實機 peak stack。
+
+AVR 以同一 7.3.0 編譯器量測，非 LTO 單函式 frame：Runtime.loop 119、handle 64、queueState 72、
+cancelOwner 39、releaseSession 141、sessionFault 17、reply 79、USB setup 73 bytes。
+另保留正式 LTO，僅在 link 加 `-fstack-usage -save-temps` 擷取實際 LTRANS；診斷版 HEX 與正常 HEX 完全相同：
+
+| 實際 LTO frame | 基準 | 現行 |
+| --- | ---: | ---: |
+| main（含 inline 的 runtime／命令） | 179 | 157 |
+| sessionFault | 83 | 84 |
+| 個別取消（原 releaseSession／現 cancelOwner） | 133 | 156 |
+| 共用故障 | 13 | 15 |
+| reply | 76 | 78 |
+| USB control ISR | 39 | 39 |
+| HID setup（含 Feature 編碼） | 80 | 89 |
+
+較深的故障路徑保守相加：現行 main → sessionFault → cancelOwner → fault → reply 約 490 bytes；
+若同時被 USB control 中斷，ISR → HID setup → USB_SendControl → SendControl 約 139 bytes，合計約 629 bytes。
+這是依已編譯 frame 的呼叫路徑估算，不扣 tail call，也不是實際 high-water mark；低階 libc／其他中斷與實體板負載仍需驗收。
+現行 722 bytes 供堆疊／執行期使用，不能把減少某一函式 frame 誤認為整體 peak 一定降低。
+
+現行產物另存 `dist/firmware-shared-refactor/`（HEX／兩個 UF2／BUILD manifest）；先前產物保留供對照。
+沒有燒錄硬體或產生 Windows EXE／ZIP。實際延遲、CPU 使用量、USB 相容性與 RealTime 50 輪成功率尚未實機量測。

@@ -1,5 +1,6 @@
 // Link the production engine without Arduino, TinyUSB or Pico SDK headers.
-#include "../boards/rp2040/src/input/InputEngine.h"
+#include "../common/input/InputEngine.h"
+#include "../common/input/BootloaderGate.h"
 #include "../boards/rp2040/src/platform/StatusIndicator.h"
 #include <assert.h>
 #include <stdio.h>
@@ -129,7 +130,7 @@ void testStaleAndTxOverflow() {
 
     Harness tx;
     tx.open();
-    for (uint32_t seq = 2; seq <= 34; ++seq)
+    for (uint32_t seq = 2; seq <= uint32_t(config::TxDepth) + 2; ++seq)
         tx.send(w::Status, seq);
     assert(tx.engine.counters().tx == 1);
     tx.engine.receiveFault(0, 0, tx.now);
@@ -166,6 +167,48 @@ void testMotionOverflowAndBootCompletion() {
     boot.engine.serviceControl(boot.now);
     assert(!boot.engine.bootConfirmed());
 }
+void testPeerReleaseAndHistoricalCapture() {
+    Harness h;
+    h.open();
+    h.send(w::Open, 1, {}, 43);
+    h.tick(12);
+    h.send(w::Release, 2);
+    h.tick(12);
+    const uint32_t lease = h.engine.session(42)->lease_at;
+    h.now = lease + 1900;
+    h.send(w::Heartbeat, 2, {}, 43);
+    h.now = lease + 2000;
+    h.engine.serviceControl(h.now);
+    assert(!h.engine.session(42) && h.engine.session(43));
+    h.tick(12);
+    h.send(w::Key, 3, {7, 0, 4, 0, 1}, 43);
+    h.send(w::Key, 4, {7, 0, 4, 0, 0}, 43);
+    h.send(w::Barrier, 5, {}, 43);
+    h.tick(12);
+    bool down = false, barrier = false;
+    for (const auto &r : h.input)
+        if (r.id == w::KeyboardReportId && (r.data[1] & 16))
+            down = true;
+    for (const auto &r : h.replies)
+        if (r.bytes[1] == (w::Barrier | 128) && w::read32(r.bytes + 4) == 43)
+            barrier = true;
+    assert(down && barrier && !h.engine.completedState().held());
+    assert(h.engine.counters().failsafe == 1);
+}
+void testSharedBootGate() {
+    BootloaderGate gate;
+    const uint32_t at = UINT32_MAX - 60;
+    assert(!gate.advance(at, false, true, true, true));
+    assert(!gate.advance(at, true, true, true, true));
+    assert(gate.pending());
+    assert(!gate.advance(at + 119, true, true, true, true));
+    assert(!gate.advance(at + 120, true, false, true, true));
+    assert(!gate.advance(at + 120, true, true, false, true));
+    assert(!gate.advance(at + 120, true, true, true, false));
+    assert(gate.advance(at + 120, true, true, true, true));
+    assert(!gate.advance(at + 120, false, true, true, true) && !gate.pending());
+    assert(!gate.advance(at + 121, true, true, true, true));
+}
 void testLedPriorityAndWrap() {
     StatusIndicator led;
     led.update(0, false, false);
@@ -195,6 +238,8 @@ int main() {
     testStaleAndTxOverflow();
     testMotionOverflowAndBootCompletion();
     testLedPriorityAndWrap();
+    testSharedBootGate();
+    testPeerReleaseAndHistoricalCapture();
     puts("RP2040 portable engine: independent instances, lease/stale boundaries, clock/counter "
          "wrap, TX/motion overflow, boot generation and LED priority passed");
 }

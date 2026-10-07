@@ -12,6 +12,8 @@
 firmware/
   README.md            ← 本檔（總覽 + 板子清單）
   PROTOCOL.md          ← 線路協定規格（板子共用）
+  common/input/        ← 共用協議、session、排程、TX、boot gate
+  common/usb/          ← 共用 report descriptors
   tools/
     vendor_hid_bootloader.ps1  ← 共用：透過 Vendor HID 送指令（含 enter_bootloader）
   boards/
@@ -45,10 +47,12 @@ firmware\boards\rp2040\upload.ps1
 
 ## 共用引擎與平台差異
 
-RP2040 使用 `boards/rp2040/src/input/` 的獨立 `.cpp` 引擎與 `src/platform/` 平台層；
-`common/` 暫留供 Leonardo 的生成式實作使用。
-`scripts/sync-input-protocol.py` 繼續產生兩板的按鍵表、共享 wire vectors 及 Leonardo 的 `modules/V3*.h`，不再複製 RP2040 引擎。
-這是 RP2040 先遷移的過渡安排；未來協議或排程行為變更須同時確認兩板相容性。
+`common/input/` 是協議、session、輸出排程、TX 與 bootloader 等待條件的唯一實作來源；
+`common/usb/` 是 USB report descriptor 的唯一來源。
+`scripts/sync-input-protocol.py` 將相同的正常 `.h/.cpp` 同步到兩板的 `src/`，供 Arduino 獨立編譯；
+按鍵表仍由 `shared/input-protocol/keys.json` 產生。生成物需提交，`--check` 會檢查兩板漂移與多餘的引擎來源。
+板型差異限於 `src/platform/`、`src/runtime/` 及容量設定；不再有 namespace 內 include 的實作片段。
+詳見 [共用韌體重構規格](../docs/shared-firmware-refactor-spec.md)。
 兩種板子都有 NKRO、七種 Consumer、五鍵相對滑鼠與雙軸滾輪。
 RP2040 output／RX／TX 深度為 32／32／32，AVR 為 2／1／8；滿載回報故障。
 USB 完成依平台的主機 ACK 通知；個別釋放保留其他來源，USB／共用佇列故障清理全部 session。

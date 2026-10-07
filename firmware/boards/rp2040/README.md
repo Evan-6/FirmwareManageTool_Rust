@@ -37,7 +37,7 @@ BOOTLOADER 在其他 v3 session 存在時回 busy；燒錄前關閉其他控制�
 
 core 0 持有全部輸入、排程與 LED 狀態決策，core 1 只讀原子發布的 LED 狀態並渲染。USB callbacks 只交付 RX、完成／失敗及 reset 通知，Feature 使用初始化後的唯讀資料。RX 保留 Pico SDK queue，TX 改由 engine 的固定陣列持有，容量仍為 32。
 
-RP2040 不再使用生成的 `modules/V3*.h`；`firmware/common/` 暫留供 Leonardo 使用。兩板仍共用 wire 規格、按鍵表與 golden vectors。詳見 [重構規格](../../../docs/rp2040-refactor-spec.md)。
+`src/input/` 是 `firmware/common/input/` 的生成副本；兩板編譯相同的協議／session／scheduler／boot gate 實作，descriptor 來自 `firmware/common/usb/`。修改共用來源後執行同步腳本，不能手改副本。詳見 [共用重構規格](../../../docs/shared-firmware-refactor-spec.md)。
 
 - USB callback 只接收封包或通知完成；不執行輸入命令，也不等待 endpoint。
 - 鍵盤與按鈕轉換保持順序；32 項輸出佇列，50ms 過期／溢位停止 session 並優先釋放。

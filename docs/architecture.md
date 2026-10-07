@@ -75,6 +75,8 @@ STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共�
 
 Leonardo 共用 firmware/common 引擎，輸出／RX／TX 佇列深度為 2／1／8；RP2040 為 32／32／32。AVR USB packet API 不阻塞或發送尾端 ZLP，完成依主機 ACK 的 endpoint bank；USB reset 不允許舊 boot 回覆被誤當完成。Leonardo 固定序號 HP-KB-0024，不可視為唯一身分。
 
-RP2040 已使用 `firmware/boards/rp2040/src/` 的獨立 `.cpp`：InputEngine 持有 session／scheduler／TX，FirmwareRuntime 組裝單一正式實例，平台層持有兩個 USB HID、RX、bootloader 與 LED。純引擎以主迴圈傳入的 uint32 時間運作，不直接呼叫硬體。callback 只發布同步通知，USB reset 透過 TinyUSB event hook 使舊傳送失效；core 1 只讀發布的 LED 狀態。測試正常編譯及連結這些來源，不再 include Firmware.cpp。重構規格見 [rp2040-refactor-spec.md](rp2040-refactor-spec.md)。
+兩板的 `Firmware.cpp` 均只組裝一個 FirmwareRuntime。InputEngine 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、scheduler、TX 與 BootloaderGate 的唯一來源為 `firmware/common/input/`，descriptor 為 `firmware/common/usb/`；同步腳本產生兩板 `src/` 的相同 `.h/.cpp`，Arduino 正常分檔編譯，測試也正常連結正式來源。
 
-`firmware/common/` 與 Leonardo 的生成引擎維持原樣，RP2040 不再由同步腳本複製引擎標頭；按鍵表與 wire vectors 仍共用。過渡期間修改協議或排程需同時確認兩板。
+RP2040 平台層持有 TinyUSB／Pico RX queue／原子 callback 通知，core 1 只讀發布的 LED 狀態。Leonardo 平台層持有 PluggableUSB／單筆 RX／AVR 原子區段，以 USB core reset generation 與 endpoint bank ACK 判定完成。重啟入口分別為 BOOTSEL 與 Caterina watchdog；共用 gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
+
+共用 InputConfig 以建置目標選擇 AVR 的 2／1／8 或 RP2040 的 32／32／32 容量，兩板均為 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。規格見 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md)。

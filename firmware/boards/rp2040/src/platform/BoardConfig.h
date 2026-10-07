@@ -42,8 +42,6 @@ constexpr uint16_t UsbPid = FIRMWARE_USB_PID;
 constexpr char UsbManufacturer[] = FIRMWARE_USB_MANUFACTURER;
 constexpr char UsbProduct[] = FIRMWARE_USB_PRODUCT;
 
-constexpr unsigned long BootloaderResetDelayMs = 120;
-
 constexpr uint8_t BoardId =
 #ifdef ARDUINO_SEEED_XIAO_RP2040
     2;

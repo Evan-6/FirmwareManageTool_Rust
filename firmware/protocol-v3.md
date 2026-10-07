@@ -59,4 +59,4 @@ bash scripts/test-rp2040.sh
 bash scripts/test-leonardo.sh
 ```
 
-同步腳本產生本地 Rust／C++／JavaScript 按鍵表、C++ wire vectors 與 Leonardo 的引擎 header 複本，並同步三個使用端。RP2040 的唯一實作來源為 `boards/rp2040/src/`；`firmware/common` 暫留供 Leonardo 使用。生成物需提交；只修改 Rust 一份或手改生成檔會被同步檢查拒絕。RP2040 與 AVR 的引擎在過渡期間分開維護，協議／排程行為變更須以同一份 wire 規格及相容性案例確認兩板。
+同步腳本產生本地 Rust／C++／JavaScript 按鍵表、C++ wire vectors，並將 `firmware/common/input/` 的共用引擎及 `firmware/common/usb/` 的 descriptor 同步到兩板 sketch 的 `src/`。兩板正常編譯相同 `.cpp`，平台層只處理 USB／同步／板型身分／重啟與 LED 差異。生成物需提交；手改副本、缺少來源或多餘的舊引擎來源會被 `--check` 拒絕。共享 wire 規格與三個主機使用端的同步方式不變。
