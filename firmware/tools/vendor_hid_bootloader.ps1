@@ -12,7 +12,8 @@ using Microsoft.Win32.SafeHandles;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
+using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 
 public static class VendorHidUpload
@@ -26,8 +27,8 @@ public static class VendorHidUpload
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
     private const uint FILE_FLAG_OVERLAPPED = 0x40000000;
-    private const byte CommandReportId = 10;
-    private const byte ResponseReportId = 11;
+    private const byte CommandReportId = 12;
+    private const byte ResponseReportId = 13;
     private const int HIDP_STATUS_SUCCESS = 0x00110000;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -87,6 +88,9 @@ public static class VendorHidUpload
 
     [DllImport("hid.dll")]
     private static extern void HidD_GetHidGuid(out Guid hidGuid);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    private static extern bool HidD_GetFeature(SafeFileHandle handle, [In, Out] byte[] report, int length);
 
     [DllImport("hid.dll", SetLastError = true)]
     private static extern bool HidD_GetAttributes(SafeFileHandle hidDeviceObject, ref HIDD_ATTRIBUTES attributes);
@@ -159,8 +163,8 @@ public static class VendorHidUpload
             if (status != HIDP_STATUS_SUCCESS ||
                 caps.UsagePage != usagePage ||
                 caps.Usage != usage ||
-                caps.InputReportByteLength < 2 ||
-                caps.OutputReportByteLength < 2)
+                caps.InputReportByteLength != 64 ||
+                caps.OutputReportByteLength != 64 || caps.FeatureReportByteLength != 64)
             {
                 return false;
             }
@@ -183,6 +187,7 @@ public static class VendorHidUpload
             throw new InvalidOperationException("SetupDiGetClassDevs failed.");
         }
 
+        HidDevice found = null;
         try
         {
             for (uint index = 0; ; index++)
@@ -205,7 +210,8 @@ public static class VendorHidUpload
                 HidDevice device;
                 if (Query(detailData.DevicePath, vid, pid, usagePage, usage, out device))
                 {
-                    return device;
+                    if (found != null) throw new InvalidOperationException("Multiple Vendor HID devices; connect only the board to flash.");
+                    found = device;
                 }
             }
         }
@@ -214,68 +220,74 @@ public static class VendorHidUpload
             SetupDiDestroyDeviceInfoList(infoSet);
         }
 
+        if (found != null) return found;
         throw new InvalidOperationException("Vendor HID device not found.");
     }
 
+    private static uint Read32(byte[] data, int offset)
+    {
+        return (uint)data[offset] | ((uint)data[offset+1] << 8) |
+               ((uint)data[offset+2] << 16) | ((uint)data[offset+3] << 24);
+    }
+    private static void Write32(byte[] data, int offset, uint value)
+    {
+        for (int i=0; i<4; i++) data[offset+i] = (byte)(value >> (8*i));
+    }
+    private static void Control(Stream stream, byte opcode, uint session, uint sequence,
+                                Stopwatch timer, int timeoutMs)
+    {
+        byte[] output = new byte[64];
+        output[0] = CommandReportId; output[1] = 3; output[2] = opcode;
+        Write32(output, 5, session); Write32(output, 9, sequence);
+        int remaining = timeoutMs - (int)timer.ElapsedMilliseconds;
+        if (remaining <= 0 || !stream.WriteAsync(output, 0, output.Length).Wait(remaining))
+            throw new TimeoutException("Vendor HID v3 write timed out.");
+        while (true)
+        {
+            byte[] input = new byte[64];
+            remaining = timeoutMs - (int)timer.ElapsedMilliseconds;
+            if (remaining <= 0) throw new TimeoutException("No Vendor HID v3 response.");
+            Task<int> read = stream.ReadAsync(input, 0, input.Length);
+            if (!read.Wait(remaining)) throw new TimeoutException("No Vendor HID v3 response.");
+            if (read.Result != 64 || input[0] != ResponseReportId || input[1] != 3 ||
+                input[3] > 51 || input[4] != 0)
+                throw new InvalidOperationException("Invalid Vendor HID v3 response framing.");
+            for (int i=13+input[3]; i<64; i++)
+                if (input[i] != 0) throw new InvalidOperationException("Invalid v3 response padding.");
+            if (Read32(input, 5) != session) continue;
+            if (input[2] == 127) throw new InvalidOperationException("Device fault in bootloader session.");
+            if (input[2] != (opcode | 128) || Read32(input, 9) != sequence || input[3] != 1)
+                throw new InvalidOperationException("Unexpected Vendor HID v3 control response.");
+            if (input[13] != 0) throw new InvalidOperationException("Bootloader request rejected, v3 code=" + input[13]);
+            return;
+        }
+    }
     public static string SendCommand(ushort vid, ushort pid, ushort usagePage, ushort usage, string command, int timeoutMs)
     {
+        if (command != "enter_bootloader") throw new ArgumentException("Only the v3 bootloader operation is supported.");
         HidDevice device = Find(vid, pid, usagePage, usage);
         using (SafeFileHandle handle = Open(device.Path))
-        using (FileStream stream = new FileStream(handle, FileAccess.ReadWrite, Math.Max(device.InputReportLength, device.OutputReportLength), true))
         {
-            byte[] output = new byte[device.OutputReportLength];
-            byte[] commandBytes = Encoding.ASCII.GetBytes(command + "\n");
-            if (commandBytes.Length > output.Length - 1)
+            if (handle.IsInvalid) throw new IOException("Cannot open Vendor HID device.");
+            byte[] feature = new byte[64]; feature[0] = 14;
+            if (!HidD_GetFeature(handle, feature, feature.Length) || feature[0] != 14 ||
+                feature[1] != 'F' || feature[2] != 'M' || feature[3] != 'T' || feature[4] != '3' || feature[5] != 3)
+                throw new InvalidOperationException("Unsupported device: Vendor HID v3 is required. Use physical reset/BOOTSEL for old firmware.");
+            for (int i=57; i<64; i++)
+                if (feature[i] != 0) throw new InvalidOperationException("Invalid v3 feature padding.");
+            if ((feature[10] | feature[11] << 8) < 1000 || feature[14] == 0)
+                throw new InvalidOperationException("Invalid v3 capabilities.");
+            byte[] nonce = new byte[4];
+            using (RandomNumberGenerator random = RandomNumberGenerator.Create()) random.GetBytes(nonce);
+            uint session = Read32(nonce, 0); if (session == 0) session = 1;
+            using (FileStream stream = new FileStream(handle, FileAccess.ReadWrite, 64, true))
             {
-                throw new InvalidOperationException("Command too long for HID report.");
+                Stopwatch timer = Stopwatch.StartNew();
+                Control(stream, 1, session, 1, timer, timeoutMs);
+                Control(stream, 6, session, 2, timer, timeoutMs);
             }
-
-            output[0] = CommandReportId;
-            Array.Copy(commandBytes, 0, output, 1, commandBytes.Length);
-            stream.Write(output, 0, output.Length);
-            stream.Flush();
-
-            StringBuilder text = new StringBuilder();
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-            while (DateTime.UtcNow < deadline)
-            {
-                byte[] input = new byte[device.InputReportLength];
-                Task<int> readTask = stream.ReadAsync(input, 0, input.Length);
-                int remaining = Math.Max(1, (int)(deadline - DateTime.UtcNow).TotalMilliseconds);
-                if (!readTask.Wait(remaining))
-                {
-                    break;
-                }
-
-                int read = readTask.Result;
-                if (read <= 0 || input[0] != ResponseReportId)
-                {
-                    continue;
-                }
-
-                for (int i = 1; i < read; i++)
-                {
-                    byte value = input[i];
-                    if (value == 0)
-                    {
-                        continue;
-                    }
-                    if (value == (byte)'\n')
-                    {
-                        string line = text.ToString().TrimEnd('\r');
-                        if (line.StartsWith("mscv-keyboard:ready", StringComparison.Ordinal))
-                        {
-                            text.Clear();
-                            continue;
-                        }
-                        return line;
-                    }
-                    text.Append((char)value);
-                }
-            }
+            return "ok:v3_bootloader";
         }
-
-        throw new TimeoutException("No Vendor HID response.");
     }
 }
 '@

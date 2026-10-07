@@ -15,7 +15,7 @@ pub const BOOTLOADER: u8 = 6;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOUSE_MOVE: u8 = 32;
-/// Reserved legacy opcode; relative-only firmware rejects it.
+/// Reserved removed absolute opcode; relative-only firmware rejects it.
 pub const MOUSE_ABS: u8 = 33;
 pub const MOUSE_BUTTONS: u8 = 34;
 pub const WHEEL: u8 = 35;
@@ -157,7 +157,6 @@ pub struct Capabilities {
     pub board: u8,
     pub firmware: String,
     pub lease_ms: u16,
-    pub legacy_lease_ms: u16,
     pub poll_ms: u8,
     pub flags: u32,
     pub keyboard: [u8; 28],
@@ -176,7 +175,6 @@ impl Capabilities {
             board: r[6],
             firmware: format!("{}.{}.{}", r[7], r[8], r[9]),
             lease_ms: u16::from_le_bytes(r[10..12].try_into()?),
-            legacy_lease_ms: u16::from_le_bytes(r[12..14].try_into()?),
             poll_ms: r[14],
             flags: u32::from_le_bytes(r[15..19].try_into()?),
             keyboard: r[19..47].try_into()?,

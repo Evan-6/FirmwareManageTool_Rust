@@ -1,7 +1,6 @@
 //! Portable physical-key model and Vendor HID protocol v3.
 pub mod client;
 pub mod v3;
-use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -35,17 +34,9 @@ impl KeyId {
     pub fn token(self) -> &'static str {
         self.entry().map(|k| k.token).unwrap_or("unknown")
     }
-    pub fn legacy_token(self) -> Result<&'static str> {
-        if self.usage_page != 7 || (0x87..=0x8b).contains(&self.usage) || self.usage == 0x64 {
-            bail!("v2 不支援按鍵 {}", self.token());
-        }
-        self.entry()
-            .map(|k| k.token)
-            .ok_or_else(|| anyhow::anyhow!("不支援的 HID usage"))
-    }
 }
 
-/// JSON accepts exactly one complete representation: legacy k, or physical p/u.
+/// JSON accepts exactly one complete representation: named k, or physical p/u.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyInput(pub KeyId);
 impl Serialize for KeyInput {

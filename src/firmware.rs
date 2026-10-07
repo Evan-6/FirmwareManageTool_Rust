@@ -306,7 +306,7 @@ fn transfer_at<R: ProcessRunner>(
                 "core",
                 "install",
                 if config.board.is_avr() {
-                    "arduino:avr"
+                    "arduino:avr@1.8.8"
                 } else {
                     "rp2040:rp2040@6.2.0"
                 },
@@ -622,6 +622,7 @@ fn verify_board_capability(board: Board, reported: u8) -> Result<()> {
     let expected = match board {
         Board::XiaoRp2040 => Some(2),
         Board::Pico => Some(1),
+        Board::Leonardo => Some(3),
         _ => None,
     };
     ensure!(
@@ -685,6 +686,8 @@ mod tests {
     fn flashed_capability_must_match_board() {
         assert!(verify_board_capability(Board::XiaoRp2040, 2).is_ok());
         assert!(verify_board_capability(Board::Pico, 2).is_err());
+        assert!(verify_board_capability(Board::Leonardo, 3).is_ok());
+        assert!(verify_board_capability(Board::Leonardo, 1).is_err());
         assert!(verify_board_capability(Board::CustomRp2040, 2).is_ok());
     }
     #[test]
@@ -888,7 +891,7 @@ mod tests {
                 if tries == 1 {
                     bail!("delayed handshake");
                 }
-                Ok("ok:hello,protocol=2".into())
+                Ok("ok:hello,protocol=3".into())
             },
         );
         assert!(result.is_ok());

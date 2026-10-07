@@ -79,19 +79,21 @@ const u8 STRING_MANUFACTURER[] PROGMEM = USB_MANUFACTURER;
 
 #ifdef CDC_ENABLED
 const DeviceDescriptor USB_DeviceDescriptorIAD =
-	D_DEVICE(0xEF,0x02,0x01,64,USB_VID,USB_PID,0x100,IMANUFACTURER,IPRODUCT,ISERIAL,1);
+	D_DEVICE(0xEF,0x02,0x01,64,USB_VID,USB_PID,0x0310,IMANUFACTURER,IPRODUCT,ISERIAL,1);
 #else // CDC_DISABLED
 // The default descriptor uses USB class OxEF, subclass 0x02 with protocol 1
 // which means "Interface Association Descriptor" - that's needed for the CDC,
 // but doesn't make much sense as a default for custom devices when CDC is disabled.
 // (0x00 means "Use class information in the Interface Descriptors" which should be generally ok)
 const DeviceDescriptor USB_DeviceDescriptorIAD =
-	D_DEVICE(0x00,0x00,0x00,64,USB_VID,USB_PID,0x100,IMANUFACTURER,IPRODUCT,ISERIAL,1);
+	D_DEVICE(0x00,0x00,0x00,64,USB_VID,USB_PID,0x0310,IMANUFACTURER,IPRODUCT,ISERIAL,1);
 #endif
 
 //==================================================================
 //==================================================================
 
+volatile u8 _usbResetGeneration = 0;
+u8 USB_ResetGeneration() { return _usbResetGeneration; }
 volatile u8 _usbConfiguration = 0;
 volatile u8 _usbCurrentStatus = 0; // meaning of bits see usb_20.pdf, Figure 9-4. Information Returned by a GetStatus() Request to a Device
 volatile u8 _usbSuspendState = 0; // copy of UDINT to check SUSPI and WAKEUPI bits
@@ -270,6 +272,8 @@ u8 USB_SendSpace(u8 ep)
 		return 0;
 	return USB_EP_SIZE - FifoByteCount();
 }
+
+#include "HidPackets.h"
 
 //	Blocking Send of data to an endpoint
 int USB_Send(u8 ep, const void* d, int len)
@@ -772,6 +776,7 @@ ISR(USB_GEN_vect)
 	//	End of Reset
 	if (udint & (1<<EORSTI))
 	{
+		++_usbResetGeneration;
 		InitEP(0,EP_TYPE_CONTROL,EP_SINGLE_64);	// init ep0
 		_usbConfiguration = 0;			// not configured yet
 		UEIENX = 1 << RXSTPE;			// Enable interrupts for ep0
@@ -780,7 +785,9 @@ ISR(USB_GEN_vect)
 	//	Start of Frame - happens every millisecond so we use it for TX and RX LED one-shot timing, too
 	if (udint & (1<<SOFI))
 	{
+#ifdef CDC_ENABLED
 		USB_Flush(CDC_TX);				// Send a tx frame if found
+#endif
 		
 		// check whether the one-shot period has elapsed.  if so, turn off the LED
 		if (TxLEDPulse && !(--TxLEDPulse))

@@ -12,6 +12,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
+      - name: Validate v3 bootloader helper
+        shell: pwsh
+        run: ./scripts/test-v3-bootloader.ps1
       - name: Build, test and package
         shell: pwsh
         run: ./scripts/build.ps1
@@ -29,6 +32,7 @@ jobs:
       - run: cargo test --locked --workspace --no-default-features
       - run: python3 scripts/sync-input-protocol.py --check
       - run: bash scripts/test-rp2040.sh
+      - run: bash scripts/test-leonardo.sh
 
   rp2040:
     runs-on: ubuntu-latest
@@ -42,3 +46,15 @@ jobs:
           arduino-cli lib install "Adafruit NeoPixel@1.15.5"
       - run: arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb firmware/boards/rp2040
       - run: arduino-cli compile --fqbn rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb firmware/boards/rp2040
+
+  leonardo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install the pinned AVR tools and build bundled core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+          arduino-cli config set directories.user "$PWD/firmware/boards/leonardo_avr"
+          arduino-cli compile --fqbn goosedevil:avr:keyboard firmware/boards/leonardo_avr

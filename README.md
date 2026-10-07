@@ -2,8 +2,7 @@
 
 以 Rust 2024、egui／eframe 0.36.2 與 Wgpu 重寫的 Windows 11 x64 GUI 工具。
 支援 Leonardo AVR、Seeed XIAO RP2040、Pico 及其他 arduino-pico 板型。
-RP2040 使用 Vendor HID v3 二進位協定、實體 HID usage、NKRO 與七種多媒體鍵；
-保留 v2 相容層。AVR 韌體與 MSCV 保持不變。
+Leonardo 與 RP2040 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
 
 ## Windows 使用
 
@@ -21,14 +20,15 @@ RP2040 使用 Vendor HID v3 二進位協定、實體 HID usage、NKRO 與七種�
    測試 A 鍵，請勿操作實體鍵盤。極限量測使用獨立子程序，GUI 維持一般優先權。
 5. 「滑鼠測試」包含擬人化／原始移動、拖曳、點擊、五鍵與雙軸滾輪。
    主機計算主顯示器目標／曲線並以相對滑鼠位移輸出，請先將游標放在主顯示器內。
-   RP2040 3.0.3 只有一個相對滑鼠；畫面上的目標定位不使用絕對 HID。
+   新版韌體 只有一個相對滑鼠；畫面上的目標定位不使用絕對 HID。
 
-「全部放開／停止」在工作中會取消操作並清理；閒置時直接 reset。
-連線先查詢 Feature 14，自動選用 v3 或回退 v2。v3 釋放／屏障等待 USB 傳送完成，
-再由 status 確認；拔線後顯示未知，重新連線建立空狀態。
-v3 每 500ms 續租、租約 2 秒；v2 保留 30 秒租約與原有 ACK 語意。
-RP2040 3.0.3 支援最多八個 v3 程式同時輸入，各自釋放／租約不影響其他程式按住的狀態；
-STATUS 只回報自己的輸入。需重新燒錄 3.0.3；v2 可由多程式送指令，但共用同一份狀態，沒有來源隔離。詳見 [RP2040 多程式控制](firmware/boards/rp2040/README.md#多程式同時控制)。
+「全部放開／停止」在工作中會取消操作並清理；閒置時釋放自己的 session。
+連線先查詢 Feature 14，再建立獨立 session；舊 v2／serial 設備直接顯示不支援。
+釋放／屏障等待 USB 傳送完成，再由 STATUS 確認。拔線後顯示未知，重連建立自己的空狀態。
+每 500ms 續租，租約 2 秒。個別釋放、協議故障與租約到期保留其他程式；
+USB／共用佇列故障釋放所有 session。STATUS 的輸入與待送數只屬於查詢者。
+兩種板子均需重新燒錄 3.1.0；第一次從舊韌體升級使用實體 reset／BOOTSEL。
+Leonardo 序號固定為 HP-KB-0024，RP2040 使用唯一板號。燒錄前關閉其他控制程式並等 2 秒。
 
 設定、Arduino CLI 設定／依賴、sketch 工作副本及建置產物儲存在
 `%LOCALAPPDATA%\FirmwareManageTool_Rust`。設定會於開始工作、保存設定及離開時保存。
@@ -61,10 +61,11 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 python3 scripts/sync-input-protocol.py --check
 bash scripts/test-rp2040.sh
+bash scripts/test-leonardo.sh
 ```
 
 Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。
-Linux 開發執行原始碼檢查、測試及 RP2040 韌體／UF2 編譯，不產生 Windows EXE 或 ZIP。
+Linux 開發執行原始碼檢查、測試及 AVR／RP2040 韌體編譯，不產生 Windows EXE 或 ZIP。
 Linux GUI 字型使用系統 Noto CJK；Windows 使用系統 Microsoft JhengHei。
 
 架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。

@@ -5,16 +5,15 @@ GUI 只保存顯示狀態，透過型別化 AppCommand／AppEvent 與背景工�
 bootloader 選擇使用獨立 channel，長工作不阻塞 GUI。
 
 HidTransport／ProcessRunner 可替換為假裝置／假子程序。裝置傳輸在 `src/hid/transport.rs`，
-v2 文字編解碼在 `src/protocol/v2.rs`，v3 I/O 在 `src/hid/v3.rs`，共用編解碼與
+v3 I/O 在 `src/hid/v3.rs`，共用編解碼與
 session 序號在 `shared/input-protocol`。業務端使用型別化輸入，不自行組合二進位封包。
 
 Session 先查詢 Feature 14。v3 使用 64-byte 完整封包、session／sequence，
 一般輸入無 ACK；OPEN／STATUS／BARRIER／RELEASE_ALL／BOOTLOADER 有對應回覆。
 屏障等待先前 USB report 傳送完成，不代表 Windows 應用程式已處理。
-v2 沒有 sequence id，以發送順序匹配 ACK，最多 4 個 outstanding 命令。
-兩者的短寫入、錯誤、timeout 或 failsafe 都使 session 失效，重連丟棄舊回應並建立自己的空輸入狀態。
+所有短寫入、錯誤、timeout 或 failsafe 都使 session 失效，重連丟棄舊回應並建立自己的空輸入狀態。
 畫面目標位置與擬人化曲線在主機計算，`input-protocol::pointer::RelativeTracker` 共用
-Windows 游標回授的相對位移控制器；USB 只送 MOUSE_MOVE，RP2040 3.0.3 只有相對滑鼠。
+Windows 游標回授的相對位移控制器；USB 只送 MOUSE_MOVE，韌體 3.1.0 只有相對滑鼠。
 末端定位最多在路徑結束後繼續修正 300ms；無法到達回錯誤，拖曳以 ReleaseGuard 清理。
 滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID／failsafe 計數未增加。
 
@@ -51,19 +50,21 @@ bootloader，避免自動選到另一台板子。GUI 直接呼叫 arduino-cli，
 上傳腳本，也不依賴 runtime CDC touch。AVR 以 upload --verify 傳輸；RP2040
 複製確切 sketch 的 UF2，任何 OS 複製錯誤保留為失敗。兩者都再驗證 runtime hello。
 驗證排除傳輸前已存在的 runtime 裝置，避免別台板子的 hello 被當成此次燒錄成功。
-AVR 以 v2 hello 驗證；新版 RP2040 以 v3 能力查詢與 OPEN 驗證，並檢查 Pico／XIAO 板型。
+AVR／RP2040 均以 v3 能力查詢與 OPEN 驗證，檢查 board id（Leonardo=3、Pico=1、XIAO=2）。
 RP2040 使用 MCU unique ID 作為 USB 序號與能力識別，未提供映像 hash 或密碼學身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
 
 擬人化軌跡以主螢幕實體像素計算 minimum-jerk／Bézier，保留低振幅偏移、
 重複像素省略及精確最後目標。排程遲到跳過過期節點，不補送所有舊點。
 原始相對移動及滾輪以 ±1024 拆指令，8-bit USB report 拆分由韌體排程執行。
-點擊／拖曳有釋放 guard。v3 閒置時也每 500ms 續租；v2 按住時每 5 秒 ping。
-斷線回報釋放狀態未知，重新連線先清空。RP2040 v3 租約 2 秒，v2 租約 30 秒。
+點擊／拖曳有釋放 guard，閒置時也每 500ms 續租。
+斷線回報釋放狀態未知，重新連線先清空。兩種板子租約均為 2 秒。
 RP2040 的 32 項輸出佇列保留按鍵／按鈕順序；滿載或等待超過 50ms 時停止 session 並優先釋放。
 
-RP2040 3.0.3 最多八個 v3 session 可同時控制，各自保存序號、租約與輸入狀態；
+韌體 3.1.0 最多八個 v3 session 可同時控制，各自保存序號、租約與輸入狀態；
 USB 按鍵／Consumer／滑鼠按鈕取聯集，位移與滾輪依接收順序輸出。
 排程工作記錄 session 與各來源快照，個別 RELEASE_ALL／租約／協定故障取消自己的待送工作，
 重建其他來源的歷史狀態並保留其短按、相對位移與屏障完成通知。
-STATUS 的輸入／序號／租約屬於查詢者，錯誤計數與佇列仍共用。
-共用 USB／佇列故障才釋放全部來源；v2 保留互斥控制。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
+STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共用。
+共用 USB／佇列故障才釋放全部來源。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
+
+Leonardo 共用 firmware/common 引擎，輸出／RX／TX 佇列深度為 2／1／8；RP2040 為 32／32／32。AVR USB packet API 不阻塞或發送尾端 ZLP，完成依主機 ACK 的 endpoint bank；USB reset 不允許舊 boot 回覆被誤當完成。Leonardo 固定序號 HP-KB-0024，不可視為唯一身分。

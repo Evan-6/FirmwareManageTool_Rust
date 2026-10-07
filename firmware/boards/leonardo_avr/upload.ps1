@@ -1,8 +1,7 @@
 param(
     [string]$Port = "",
     [string]$SketchDir = $PSScriptRoot,
-    [switch]$SkipCoreInstall,
-    [switch]$SkipLibraryInstall
+    [switch]$SkipCoreInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -213,54 +212,7 @@ function Install-ArduinoAvrCoreIfMissing {
 
     Write-Step "Installing Arduino AVR core"
     Invoke-ArduinoCli @("core", "update-index")
-    Invoke-ArduinoCli @("core", "install", "arduino:avr")
-}
-
-function Install-ArduinoLibraryIfMissing {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LibraryName
-    )
-
-    Write-Step "Checking Arduino library: $LibraryName"
-
-    $libListOutput = & arduino-cli lib list 2>&1
-    $libListExitCode = $LASTEXITCODE
-
-    if ($libListExitCode -eq 0) {
-        $joined = $libListOutput -join "`n"
-
-        if ($joined -match "(?m)^$([regex]::Escape($LibraryName))\s") {
-            Write-Host "$LibraryName library is already installed."
-            return
-        }
-    }
-
-    Write-Host "$LibraryName library not found, installing..." -ForegroundColor Yellow
-
-    Invoke-ArduinoCli @("lib", "update-index")
-    Invoke-ArduinoCli @("lib", "install", $LibraryName)
-
-    $verifyOutput = & arduino-cli lib list 2>&1
-    $verifyJoined = $verifyOutput -join "`n"
-
-    if ($verifyJoined -notmatch "(?m)^$([regex]::Escape($LibraryName))\s") {
-        throw "$LibraryName library was installed, but arduino-cli lib list cannot find it."
-    }
-
-    Write-Host "$LibraryName library installed." -ForegroundColor Green
-}
-
-function Install-RequiredLibraries {
-    if ($SkipLibraryInstall) {
-        Write-Step "Skipping Arduino library install"
-        return
-    }
-
-    Install-ArduinoLibraryIfMissing "Keyboard"
-
-    # �p�G�A���{�����Ӧ��� Mouse.h�A�i�H�����U���o�����
-    # Install-ArduinoLibraryIfMissing "Mouse"
+    Invoke-ArduinoCli @("core", "install", "arduino:avr@1.8.8")
 }
 
 function Find-ComPortInText {
@@ -426,8 +378,6 @@ try {
     Initialize-ArduinoCliConfig
 
     Install-ArduinoAvrCoreIfMissing
-
-    Install-RequiredLibraries
 
     $manualPortSpecified = -not [string]::IsNullOrWhiteSpace($Port)
     $usingHidBootloaderPort = $false

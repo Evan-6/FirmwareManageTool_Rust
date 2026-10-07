@@ -27,8 +27,7 @@ void tick(unsigned n = 1) {
 void fresh() {
     output.~OutputScheduler();
     new (&output) OutputScheduler;
-    binary_released = false;
-    releasing_protocol = protocol_owner = ProtocolOwner::None;
+    protocol_owner = ProtocolOwner::None;
     binary::resetSessions();
     binary::boot_requested = false;
     binary::overflow.store(false);
@@ -58,11 +57,6 @@ void open() {
     assert(protocol_owner == ProtocolOwner::Binary);
     test_reports.clear();
 }
-void legacy(const char *command) {
-    char line[128];
-    snprintf(line, sizeof(line), "%s", command);
-    handleCommand(line);
-}
 bool replied(uint8_t op, uint32_t seq) {
     for (const auto &r : test_reports)
         if (r.id == 13 && r.data[1] == (op | 128) && binary::read32(r.data.data() + 8) == seq)
@@ -89,8 +83,7 @@ void testRelativeMouseOnly() {
     for (size_t i = 0; i + 1 < sizeof(HidReportDescriptor); ++i)
         if (HidReportDescriptor[i] == 0x85)
             ids |= 1u << HidReportDescriptor[i + 1];
-    assert(ids == ((1u << KeyboardReportId) | (1u << ConsumerReportId) |
-                   (1u << MouseReportId)));
+    assert(ids == ((1u << KeyboardReportId) | (1u << ConsumerReportId) | (1u << MouseReportId)));
     for (uint8_t button : {1, 2, 4, 8, 16}) {
         fresh();
         open();
@@ -151,33 +144,8 @@ void testMouseReleaseAndFaults() {
         assertClicks(1);
     }
 }
-void testLegacyThenBinaryClick() {
-    fresh();
-    legacy("mouse_button:1,down");
-    legacy("mouse_move:10,20");
-    legacy("mouse_button:1,up");
-    tick(15);
-    assert(output.idle() && protocol_owner == ProtocolOwner::Legacy);
-    assertClicks(1);
-    legacy("reset");
-    tick(12);
-    open();
-    send(binary::Buttons, 2, {1});
-    send(binary::Move, 3, {20, 0, 10, 0});
-    send(binary::Buttons, 4, {0});
-    send(binary::Barrier, 5);
-    tick(15);
-    assert(replied(binary::Barrier, 5));
-    assertClicks(1);
-}
 void testOldAbsoluteCommandsAreRejected() {
     fresh();
-    legacy("mouse_abs:16384,24576");
-    tick(8);
-    for (const auto &r : test_reports)
-        assert(r.id != MouseReportId && r.id != 4);
-    legacy("reset");
-    tick(12);
     open();
     send(binary::Buttons, 2, {1});
     tick(8);
@@ -331,12 +299,9 @@ void testSessionCapacityAndBootloader() {
     send(binary::Key, 2, {7, 0, 4, 0, 1});
     tick(8);
     send(binary::Key, 2, {7, 0, 4, 0, 0});
-    legacy("d:b");
     assert(protocol_owner == ProtocolOwner::None);
     tick(12);
-    legacy("d:b");
-    tick(8);
-    assert(protocol_owner == ProtocolOwner::Legacy && output.completed.keys[0] == 32);
+    assert(!output.completed.held());
     fresh();
     open();
     for (uint32_t id = 43; id < 42 + binary::SessionLimit; ++id)
@@ -369,7 +334,6 @@ int main() {
     testRelativeMouseOnly();
     testRealRapidClicksArePreserved();
     testMouseReleaseAndFaults();
-    testLegacyThenBinaryClick();
     testOldAbsoluteCommandsAreRejected();
     fresh();
     for (const auto &wire : WireVectors) {
@@ -385,7 +349,7 @@ int main() {
     uint8_t feature[63];
     assert(binary::feature(14, HID_REPORT_TYPE_FEATURE, feature, 63) == 63);
     assert(memcmp(feature, "FMT3", 4) == 0);
-    assert(feature[6] == 3 && feature[7] == 0 && feature[8] == 3);
+    assert(feature[6] == 3 && feature[7] == 1 && feature[8] == 0);
     assert(binary::read16(feature + 9) == 2000);
     assert(binary::read32(feature + 14) == 23);
     open();
@@ -415,23 +379,6 @@ int main() {
     tick(12);
     assert(replied(binary::Release, 13));
     assert(!output.completed.held());
-    fresh();
-    open();
-    legacy("d:a");
-    assert(output.desired.keys[0] == 0);
-    assert(protocol_owner == ProtocolOwner::Binary);
-    fresh();
-    for (const char *k : {"d:a", "d:b", "d:c", "d:d", "d:e", "d:f", "d:g"})
-        legacy(k);
-    tick(20);
-    assert(output.desired.keys[1] == 3);
-    assert(!(output.desired.keys[1] & 4));
-    send(binary::Open, 1);
-    tick(12);
-    assert(protocol_owner == ProtocolOwner::Legacy);
-    legacy("reset");
-    tick(12);
-    open();
     fresh();
     open();
     send(binary::Key, 2, {7, 0, 4, 0, 1});
@@ -483,12 +430,10 @@ int main() {
     open();
     send(binary::Key, 2, {7, 0, 4, 0, 1});
     protocolFault(6);
-    legacy("d:b");
     assert(protocol_owner == ProtocolOwner::None && !output.desired.held());
     tick(12);
-    legacy("d:b");
-    tick(12);
-    assert(protocol_owner == ProtocolOwner::Legacy && output.desired.held());
+    openPeer(43);
+    assert(!output.desired.held());
     // A completed explicit release permits immediate handoff, with no lease-length pause.
     fresh();
     open();
@@ -501,12 +446,15 @@ int main() {
     send(binary::Release, 3, {}, 42);
     tick(8);
     send(binary::Release, 2, {}, 43);
-    legacy("d:b");
-    assert(protocol_owner == ProtocolOwner::Binary);
     tick(12);
-    legacy("d:b");
+    assert(binary::count() == 2 && !output.desired.held());
+    // Old text reports are rejected and cannot execute input.
+    uint8_t old_report[64] = {10, 'd', ':', 'b', '\n'};
+    vendorSetReport(0, HID_REPORT_TYPE_INVALID, old_report, 64);
     tick(12);
-    assert(protocol_owner == ProtocolOwner::Legacy && output.desired.held());
+    assert(binary::count() == 0 && !output.completed.held());
+    for (const auto &r : test_reports)
+        assert(r.id != 11);
     // Motion coalescing preserves sums on each side of a button transition.
     fresh();
     open();
@@ -584,6 +532,6 @@ int main() {
     assert(bootloader_reset_pending && !output.completed.held());
     puts("RP2040 firmware: relative-only descriptor, five buttons, relative drag, rapid clicks, "
          "eight concurrent sessions, isolated releases/leases/faults, per-session barriers, "
-         "mouse fault release, short taps, NKRO/media, barriers, v2 compatibility, ownership, sequence "
+         "mouse fault release, short taps, NKRO/media, barriers, old report rejection, sequence "
          "faults, lease, overflow, stale output and disconnect passed");
 }

@@ -6,9 +6,9 @@ It does not relicense the copied `firmware/` sources or third-party Rust depende
 - `firmware/` was copied from the existing sibling FirmwareManageTool project. Existing
   copyright notices and licenses remain applicable; project-specific firmware without
   an explicit license is included as supplied, without a new license grant.
-- The bundled Arduino AVR core, HID library, and Keyboard library contain Arduino and
-  contributor copyright notices. See individual source headers and
-  `firmware/boards/leonardo_avr/libraries/Keyboard/LICENSE` (GNU LGPL 2.1).
+- The bundled Arduino AVR core and HID library contain Arduino and
+  contributor copyright notices. See individual source headers; the bundled
+  core license applies (GNU LGPL 2.1).
   Full firmware source is provided to permit inspection and modification.
 - Arduino CLI, AVR/RP2040 cores and Adafruit NeoPixel downloaded during operation retain
   their own licenses. They are installed separately and are not included as binaries
@@ -26,6 +26,5 @@ Primary upstream projects:
 - HIDAPI C library: https://github.com/libusb/hidapi (upstream dual/triple license;
   license files are included from the hidapi package)
 - Arduino AVR core: https://github.com/arduino/ArduinoCore-avr
-- Arduino Keyboard: https://github.com/arduino-libraries/Keyboard
 - arduino-pico: https://github.com/earlephilhower/arduino-pico
 - Adafruit NeoPixel: https://github.com/adafruit/Adafruit_NeoPixel

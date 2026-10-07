@@ -1,98 +1,61 @@
 # 驗證紀錄
 
-日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 AVR／RP2040 或 Windows 實機。
-以下編譯與模擬結果不等同 USB／Windows 實機驗收。
+日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 Leonardo／RP2040 或 Windows USB 實機。
 
-## 本次已完成
+## 韌體 3.1.0
 
-- 3.0.3 多程式控制：最多八個 v3 session，各自保存序號、租約、輸入與控制完成；
-  鍵盤／Consumer／滑鼠按鈕取聯集，STATUS 回傳查詢者自己的狀態。
-  OPEN、個別 RELEASE_ALL／非法輸入／序號故障／租約到期不清掉其他來源。
-  C++ 實際韌體測試涵蓋兩來源同鍵／snapshot／五鍵持有、個別釋放、晚到心跳、
-  多來源屏障、取消時保留另一來源的短按與已在傳送中的相對位移（無重送）、
-  第九個連線／session ID 碰撞、八來源 USB 故障事件與 v2 完成釋放後交接。
-  BOOTLOADER 拒絕其他 session，錯誤回覆不排定重啟；租約到期清除待送的舊 boot 回覆。
-  C++17 嚴格警告、ASan／UBSan 通過；Rust no-default-features 37＋17 項、嚴格 Clippy、fmt 與協定同步檢查通過。
-  新增主機測試確認別的 session 的控制回覆／故障事件不使自己的連線失效。
-  Pico／XIAO arduino-pico 6.2.0 建置通過；Pico 92912 bytes flash／27804 bytes RAM，XIAO 95728 bytes flash／27896 bytes RAM。
-  UF2 位於 `dist/rp2040-v3/pico-3.0.3.uf2`、`xiao-3.0.3.uf2`，
-  `BUILD-3.0.3.txt` 保存來源指紋與 SHA256。Feature flags=23、bcdDevice=0x0303；需重新燒錄。
-  **尚未在 Windows／RP2040 實機驗證多 handle 的同時開啟、回覆接收與同時輸入。v2 不阻擋多程式送指令，但共用狀態／租約／ACK，沒有來源隔離。**
-- 3.0.2 相對滑鼠：移除 absolute descriptor／座標／輸出，flags=7、bcdDevice=0x0302。
-  C++ 實際韌體測試確認沒有 report id 4、五鍵與拖曳只走相對 report，保留快速三連點與各類釋放。
-  舊 v3 opcode 33 拒絕並釋放，v2 mouse_abs 拒絕；沒有把舊絕對命令解讀為相對位移。
-  主機共用相對回授控制器的七項測試移到共享 crate；管理工具曲線改以相對位移與實體游標回授執行。
-  GUI workspace 37、共享協定 17 項測試通過，no-default-features 36＋17 項通過。
-  管理工具 Linux 全目標嚴格 Clippy 與 Windows GNU 目標編譯檢查通過；兩 repo 協定同步通過。
-  實際韌體 C++ 嚴格警告／ASan／UBSan、Pico／XIAO 建置通過。
-  Pico 91472 bytes flash／19288 bytes RAM，XIAO 94296 bytes flash／19380 bytes RAM。
-  USB descriptor 已改變，需要重新燒錄；尚未在 Windows／RP2040 實機驗收。
-- 3.0.1 滑鼠修正：在實際排程器搭配 USB 替身重現「送過絕對座標後單擊產生兩組按下／放開」。
-  修正後每次單擊只產生一組，五鍵／兩種模式、混合模式拖曳、維護快照、快速三連點、
-  in-flight 釋放、租約／USB 故障／拔線重連釋放與 v2→v3 交接回歸通過。
-  C++17 嚴格警告、ASan／UBSan 與協定同步檢查通過；EvanRemote hardware-input 34、共享協定 10 項測試通過。
-  Pico／XIAO 的 3.0.1 UF2 編譯通過；Pico 91872 bytes flash／19424 bytes RAM，XIAO 94688 bytes flash／19516 bytes RAM。
-  Feature 14 韌體版本為 3.0.1，USB bcdDevice 為 0x0301；未完成 Windows／USB 實機確認。
-- `cargo fmt --all -- --check`。
-- 管理工具 Linux／Windows MSVC 目標的 workspace Clippy：`--all-targets -- -D warnings`。
-- 管理工具 Linux workspace all-targets：主程式 36 項、共享協定 10 項測試通過。
-  no-default-features：主程式 35 項、共享協定 10 項通過。
-- EvanRemote Linux：core 13、hardware-input 33、共享協定 10 項測試通過。
-- EvanRemote 修改的 Rust 檔案以 rustfmt（skip_children）檢查；未格式化無關的既有檔案。
-- EvanRemote 輸入相關 crate 的 Clippy 在允許五項既有 core lint 後通過：
-  derivable_impls、io_other_error、result_unit_err、type_complexity、too_many_arguments。
-  整個 EvanRemote 的無例外 fmt／Clippy 仍不是通過狀態。
-- Node 18 項；Playwright 1.57 Chromium 操作測試通過，包含實體鍵封包、模式切換、失焦／拖曳與網頁既有回歸。
-- 按鍵表／固定封包向量生成與跨 repo 漂移檢查：`sync-input-protocol.py --check --peer ../EvanRemote`。
-- C++ 實際 RP2040 韌體配合 USB 替身：`scripts/test-rp2040.sh`（C++17、Wall／Wextra／Werror）。
-  同一套測試另以 AddressSanitizer／UndefinedBehaviorSanitizer 執行通過。
-- arduino-cli 1.5.1、arduino-pico **6.2.0** 與其內附 TinyUSB、Adafruit NeoPixel 1.15.5：Pico 與 XIAO RP2040 編譯通過。
-- 本地 UF2 產物：`dist/rp2040-v3/pico-3.0.0.uf2`、`xiao-3.0.0.uf2`；BUILD.txt 記錄 SHA256 與來源指紋。
-  Pico 91872 bytes flash／19424 bytes RAM，XIAO 94696 bytes flash／19516 bytes RAM。
-- Windows／Linux 輸入 CI、Pico／XIAO 固定 core 建置 CI、可攜式套件納入共享按鍵表與授權。
-  workflow 與 PowerShell 打包修改未在 GitHub Actions／Windows 原生環境執行。
+Leonardo／Pico／XIAO 僅提供 Vendor HID v3，8 個獨立 session、NKRO／Consumer／相對滑鼠。
+v2 解析器、report 10／11、serial 回退與舊 bootloader 線路已移除。
+Leonardo 固定序號 HP-KB-0024、Feature board=3；RP2040 保留唯一板號。
+兩種板子 Feature flags=23、bcdDevice=0x0310；Feature 原先的舊租約位置保留為零，不改動後續欄位。
 
-硬體 crate 所需 libudev 開發標頭與 pkg-config 在 `/tmp/rp2040-redesign/udev` 準備，
-執行時使用 PKG_CONFIG_PATH 與 CFLAGS，不修改系統套件。一般開發主機可直接安裝 libudev-dev。
+| 板子 | 固定 Core | Flash bytes | 靜態 RAM bytes | 可用 RAM bytes |
+| --- | --- | ---: | ---: | ---: |
+| Leonardo | bundled AVR 1.8.8 | 13474 | 1811 | 749 |
+| Pico | arduino-pico 6.2.0 | 85376 | 27492 | 234652 |
+| XIAO | arduino-pico 6.2.0、NeoPixel 1.15.5 | 88192 | 27584 | 234560 |
 
-## Windows 建置方式與使用者回報
+產物位於 `dist/firmware-v3/`：`leonardo-3.1.0.hex`、`pico-3.1.0.uf2`、`xiao-3.1.0.uf2`。
+`BUILD-3.1.0.json` 保存來源指紋、產物 SHA256、固定 Core 版本與建置用量；dist 不納入版本控制。
+AVR 額外以同一編譯器、停用 LTO 的 `-fstack-usage` 檢查個別函式：最大 frame 為主迴圈 198 bytes，
+releaseSession 133、sessionFault 83、USB setup 80、reply 76、sendReport 73、protocolFault 13；這不是完整堆疊或實機保證。
 
-先前管理工具與 EvanRemote server 曾在 Linux 使用 cargo-xwin 0.23.1、clang-cl／lld-link 14
-完成 MSVC Release 交叉連結。使用者回報 Linux 產出的執行檔無法啟動，自 Windows 編譯則可啟動；
-交叉連結結果不列為 Windows 執行或發行驗證。後續 Windows EXE／ZIP 僅由 Windows 原生 MSVC
-環境產生，Linux 僅執行原始碼檢查、測試與韌體／UF2 編譯。
-使用者的啟動回報不代表下列全部 Windows／USB 驗收項目已完成。
+## 已通過的檢查
 
-## 自動測試涵蓋
+- `scripts/test-rp2040.sh`：編譯實際 RP2040 Firmware.cpp，使用假 USB completion。
+  涵蓋同鍵／五鍵持有、個別釋放／租約／錯誤、歷史短按與位移保留、序號、8 個 session／第九個拒絕、
+  USB／佇列故障、bootloader 完成，以及舊 report／opcode 拒絕。
+- `scripts/test-leonardo.sh`：編譯實際 AVR Firmware.cpp 與內附 core 的 HidPackets.h。
+  涵蓋 endpoint bank ACK、不發送尾端 ZLP、Feature／介面、快速 down/up/barrier、8 個 session、
+  個別釋放／STATUS pending、滿載廣播、8 個閒置租約同時到期、USB reset／suspend 與 bootloader 回覆完成。
+- 兩種韌體測試另以 ASan／UBSan 執行，`UBSAN_OPTIONS=halt_on_error=1` 通過。
+- `scripts/test-v3-bootloader.ps1`：PowerShell parser 與內嵌 C# 編譯；以假 Stream 執行實際控制函式，
+  驗證 OPEN／BOOTLOADER 固定封包、其他 session、busy／fault、填充、短回覆、序號及 timeout。
+  未在 Linux 呼叫 Windows HID P/Invoke 或實際重啟設備。
+- 管理工具：workspace no-default-features 29＋共享協定 17 項測試、全目標嚴格 Clippy、fmt 通過。
+  全 workspace／all-targets 的 Windows MSVC 原始碼檢查通過。
+- MSCV_RUST：輸入 facade／假 USB 14 項測試，輸入層 Windows MSVC 嚴格 Clippy，app／bins 原始碼檢查通過。
+  未格式化無關的既有 app 程式。
+- MSCV：可攜式 v3 測試與 ASan／UBSan、HardwareKeyboard Windows GNU 目標物件編譯（嚴格警告）通過。
+- EvanRemote：core 19、hardware-input 23、共享協定 17 項測試與 Node 18 項通過。
+  hardware-input／server 的 Windows MSVC 原始碼檢查通過；原有軟體輸出測試持續通過。
+  輸入相關嚴格 Clippy 在允許既有 core 五項 lint 後通過：derivable_impls、io_other_error、result_unit_err、type_complexity、too_many_arguments。
+- `sync-input-protocol.py --check --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV` 通過。
+  共享引擎與按鍵表生成物已納入版本控制，使用端可獨立建置。
 
-- 主鍵區／數字鍵盤數字、Enter／KP Enter、左右修飾鍵、ISO／JIS、Consumer 與超過六鍵的識別。
-- v3 固定向量、framing／版本／長度、保留填充、混用 k 與 p/u（含 null）、短寫入、舊 session 回覆、控制 timeout／取消。
-- 實際韌體的同毫秒短按、無逐鍵 ACK、延後完成屏障、NKRO／Consumer、優先釋放與 in-flight 取消。
-- 滑鼠合併數值守恆及按鈕邊界、v2 六鍵限制、v2／v3 互斥與完成釋放後立即交接。
-- 租約、重複／缺號、佇列溢位／50ms 過期、USB completion 失敗、拔線與重連不重播。
-- bootloader 等待輸入釋放與回覆 USB 完成後才排定重啟。
-- session ownership、失敗釋放重試／延後模式切換、舊版回退、閒置維護與去重長等待續租。
-- 既有 ACK 分段／合併、子程序期限／取消、燒錄歧義／重試、滑鼠與延遲統計回歸。
-
-鍵盤 descriptor 與 USB 替身不取代 Windows driver 或實體輸入測試。延遲終點仍為
-Windows GetAsyncKeyState 觀察到輸入，沒有改成 MCU ACK／屏障時間。
+CI 已加入 Leonardo 固定 Core 建置、實際韌體測試及 PowerShell bootloader 測試；尚未在遠端執行。
+libudev 開發標頭與 pkg-config 在 `/tmp/rp2040-redesign/udev` 準備，以 PKG_CONFIG_PATH／CFLAGS 驗證，未修改系統套件。
+Windows 原始碼檢查使用既有 SDK／交叉工具，只有 check 或物件編譯，沒有產生 Windows EXE／ZIP。
+先前使用者回報 Linux 產出的 Windows EXE 無法啟動；後續發行檔僅由 Windows 原生 MSVC 建置。
 
 ## 待 Windows／USB 實機驗收
 
-- [ ] Pico／XIAO 燒錄、USB 兩介面列舉、唯一序號與 Feature 14 能力、鎖定鍵 LED output。
-- [ ] 主鍵區／數字鍵盤各數字與 Enter、左右修飾鍵；Num Lock 開／關不遺失來源。
-- [ ] ISO／JIS 與七種 Consumer 鍵；超過六鍵同按、同毫秒短按與快速點擊。
-- [ ] 點擊、五鍵、拖曳、雙軸滾輪、相對／絕對滑鼠、取消、失焦與模式切換。
-- [ ] 兩個 Windows 程式同時開啟 Vendor HID、同時輸入／接收自己回覆、同鍵持有與各自釋放。
-- [ ] 八個 v3 session 與個別租約、拔線／USB 擁塞、租約釋放、完成屏障與重新連線空狀態。
-- [ ] 舊工具／MSCV 控制新版 RP2040；新版工具控制舊 RP2040／AVR；v2／v3 互斥與交接。
-- [ ] PowerShell v2 bootloader 入口、管理工具燒錄後板型驗證、多裝置與下載失敗。
-- [ ] Windows 原生 fmt／Clippy／測試／Release／打包、GUI 中文與 manifest／DPI、EvanRemote 軟體輸出。
-- [ ] A 鍵一般／高精度／極限量測、取消／異常清理與真實按鍵到達延遲。
+- [ ] Leonardo／Pico／XIAO 列舉、Feature、NKRO／Consumer、鎖定鍵 LED、五鍵／雙軸滾輪及快速短按。
+- [ ] 多個 Windows 程式同時開啟 Vendor HID，收到自己的回覆／EVENT，同鍵持有與個別停止／退出。
+- [ ] 8 個 session、個別租約、AVR 小佇列的實際負載／故障回報、USB 擁塞／reset／拔線及重連。
+- [ ] 原有游標回授與 Windows 軟體輸出、模式切換與失焦／取消清理。
+- [ ] 舊設備拒絕、首次 reset／BOOTSEL 升級、v3 bootloader 回覆完成與燒錄後板型驗證。
+- [ ] 重複 Leonardo 序號／多設備的燒錄歧義處理。
+- [ ] Windows 原生完整 app 建置／測試／打包，GUI 與延遲量測實際操作。
 
-MSCV 與 MSCV_RUST 已升級為僅支援 v3、程式各自持有 session；絕對移動 API 移除。
-MSCV_RUST 的 Windows 目標 app／bins 檢查、輸入層嚴格 Clippy、共享協定 17 項與
-輸入 facade／假 USB 14 項測試通過。MSCV 的鍵盤輸入層與 InputController Windows
-目標編譯檢查、可攜式協議測試及 ASan／UBSan 通過。兩個 MSCV 複本的協議同步
-檢查通過；完整 Windows 建置與實體 USB 多程式操作尚未驗證。
-AVR 未修改；既有實機描述不是本次新版 RP2040 實機驗證證據。
+編譯及模擬測試不取代 Windows driver 或 USB 實機驗證。屏障代表 USB 完成，延遲量測仍以 Windows GetAsyncKeyState 觀察到輸入為終點。

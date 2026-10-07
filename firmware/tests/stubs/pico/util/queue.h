@@ -21,7 +21,7 @@ inline bool queue_try_add(queue_t *q, const void *p) {
 inline bool queue_try_peek(queue_t *q, void *p) {
     if (q->items.empty())
         return false;
-    memcpy(p, q->items.front().data(), q->size);
+    if (p) memcpy(p, q->items.front().data(), q->size);
     return true;
 }
 inline bool queue_try_remove(queue_t *q, void *p) {

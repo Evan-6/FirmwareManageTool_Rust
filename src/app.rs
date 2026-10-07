@@ -129,7 +129,7 @@ impl App {
             close_started: None,
             stopped: false,
         };
-        app.log("FirmwareManageTool Rust • Windows 11 x64 • protocol=2".into());
+        app.log("FirmwareManageTool Rust • Windows 11 x64 • protocol=3".into());
         if !font_loaded {
             app.log("未找到系統中文字型；請安裝 Windows 繁中文字型以正常顯示介面".into());
         }
@@ -514,8 +514,8 @@ fn text_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
 fn button_label(button: u8) -> &'static str {
     match button {
         1 => "1 左鍵",
-        2 => "2 中鍵",
-        3 => "3 右鍵",
+        2 => "2 右鍵",
+        3 => "3 中鍵",
         4 => "4 側鍵",
         _ => "5 側鍵",
     }

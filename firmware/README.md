@@ -2,9 +2,9 @@
 
 低延遲 USB HID 韌體：主機透過 USB 下指令，裝置以硬體鍵盤與滑鼠身分送出輸入。
 指令走 **Vendor HID**（usage page `0xFF60`），**不列舉 CDC 序列埠、對外不露出 COM 埠**；
-提供鍵盤、相對／絕對滑鼠、5 鍵、垂直／水平滾輪，以及 failsafe 自動放開。
+提供鍵盤、相對滑鼠、5 鍵、垂直／水平滾輪，以及 failsafe 自動放開。
 
-線路協定索引見 **[PROTOCOL.md](PROTOCOL.md)**。AVR 使用 v2；RP2040 同時提供 v2 相容介面與 v3。
+線路協定索引見 **[PROTOCOL.md](PROTOCOL.md)**。Leonardo 與 RP2040 都只接受 Vendor HID v3，最多 8 個 session，沒有舊版回退。
 
 ## 資料夾架構
 
@@ -26,7 +26,7 @@ firmware/
 
 | 板子 | MCU | 目標 | Core / USB 堆疊 | 狀態 |
 |------|-----|------|-----------------|------|
-| [`leonardo_avr`](boards/leonardo_avr/) | ATmega32U4 | Leonardo / Micro / Pro Micro | 自帶 `goosedevil:avr` board package（Arduino AVR core + PluggableUSB） | 已在實機運作 |
+| [`leonardo_avr`](boards/leonardo_avr/) | ATmega32U4 | Leonardo / Micro / Pro Micro | 自帶 `goosedevil:avr` board package（Arduino AVR core + PluggableUSB） | 新版已編譯／模擬測試，待實機驗證 |
 | [`rp2040`](boards/rp2040/) | RP2040 | Raspberry Pi Pico 及相容板 | arduino-pico（`rp2040:rp2040`）+ Adafruit TinyUSB | 新版已編譯／模擬測試，待實機驗證 |
 
 ## 快速燒錄
@@ -43,6 +43,11 @@ firmware\boards\rp2040\upload.ps1
 
 各板的 core 安裝、bootloader 進入方式、注意事項見該資料夾 `README.md`。
 
-## 平台與相容性
+## 共用引擎與平台差異
 
-AVR 維持既有 v2 實作。RP2040 拆出独立的 v2 adapter，與 v3 共用輸入狀態和非阻塞 USB 排程；協定規格與測試向量共同约束跨平台實作，不要求 AVR 跟隨新增 NKRO／Consumer 功能。
+`common/` 是輸入狀態、v3 解析、排程及 USB report descriptor 的唯一來源。
+執行 `scripts/sync-input-protocol.py` 產生兩個 sketch 的 `modules/V3*.h`。
+兩種板子都有 NKRO、七種 Consumer、五鍵相對滑鼠與雙軸滾輪。
+RP2040 output／RX／TX 深度為 32／32／32，AVR 為 2／1／8；滿載回報故障。
+USB 完成依平台的主機 ACK 通知；個別釋放保留其他來源，USB／共用佇列故障清理全部 session。
+第一次從舊韌體升級使用 reset（AVR）或 BOOTSEL（RP2040）。新版 PowerShell bootloader 入口也只用 v3。

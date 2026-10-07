@@ -1,16 +1,5 @@
-// RP2040 internal module; included once by Firmware.cpp.
-constexpr unsigned long FailsafeReleaseMs = 30000UL;
-constexpr unsigned long LineIdleTimeoutMs = 1000UL;
-
-constexpr uint8_t RxBudgetPerLoop = 64;
-constexpr uint8_t LineBufferSize = 128;
-constexpr uint8_t TxBufferSize = 128; // Must be a power of two and <= 256.
-constexpr uint16_t RxQueueDepth = 128;
-
-constexpr bool EnableKeyCommandAcks = true;
 constexpr bool EnableStatusLed = FIRMWARE_ENABLE_NEOPIXEL != 0;
 constexpr bool EnableRgbAnimations = true; // false => flat colours, no fades.
-#
 #if FIRMWARE_ENABLE_NEOPIXEL
 #if !defined(FIRMWARE_NEOPIXEL_POWER_PIN)
 #define FIRMWARE_NEOPIXEL_POWER_PIN 11
@@ -27,12 +16,6 @@ Adafruit_NeoPixel pixels(1, NeoPixelDataPin, NEO_GRB + NEO_KHZ800);
 constexpr uint8_t KeyboardReportId = 2;
 constexpr uint8_t ConsumerReportId = 5;
 constexpr uint8_t MouseReportId = 3;
-constexpr uint8_t MaxNonModifierKeys = 6;
-constexpr uint8_t VendorCommandReportId = 10;  // OUT: host -> device
-constexpr uint8_t VendorResponseReportId = 11; // IN:  device -> host
-constexpr uint8_t VendorHidPayloadSize = 63;   // 64-byte endpoint minus report id.
-constexpr unsigned long BootloaderResetDelayMs = 120UL;
-
 // USB identity: kept in sync with boards/leonardo_avr so the host recognises
 // either board interchangeably.
 #if !defined(FIRMWARE_USB_VID)
@@ -53,4 +36,24 @@ constexpr uint16_t UsbPid = FIRMWARE_USB_PID;
 constexpr char UsbManufacturer[] = FIRMWARE_USB_MANUFACTURER;
 constexpr char UsbProduct[] = FIRMWARE_USB_PRODUCT;
 
-static_assert((TxBufferSize & (TxBufferSize - 1)) == 0, "TxBufferSize must be a power of two");
+constexpr unsigned long BootloaderResetDelayMs = 120;
+constexpr uint8_t V3OutputDepth = 32;
+constexpr uint8_t V3BoardId =
+#if defined(ARDUINO_SEEED_XIAO_RP2040)
+    2;
+#else
+    1;
+#endif
+#define V3_PROGMEM
+using AtomicBool = std::atomic<bool>;
+using AtomicByte = std::atomic<uint8_t>;
+using V3RxQueue = queue_t;
+using V3TxQueue = queue_t;
+void platformDeviceId(uint8_t *id) {
+    pico_unique_board_id_t uid;
+    pico_get_unique_board_id(&uid);
+    memcpy(id, uid.id, 8);
+}
+bool bootloader_reset_pending = false;
+unsigned long bootloader_reset_requested_at = 0;
+void scheduleBootloaderReset();

@@ -199,6 +199,10 @@ int USB_RecvControlLong(void* d, int len);
 
 uint8_t	USB_Available(uint8_t ep);
 uint8_t USB_SendSpace(uint8_t ep);
+// Nonblocking HID packet submission and actual host-ACK completion.
+bool USB_TrySendPacket(uint8_t ep, const uint8_t *data, uint8_t length);
+bool USB_PacketComplete(uint8_t ep);
+uint8_t USB_ResetGeneration();
 int USB_Send(uint8_t ep, const void* data, int len);	// blocking
 int USB_Recv(uint8_t ep, void* data, int len);		// non-blocking
 int USB_Recv(uint8_t ep);							// non-blocking

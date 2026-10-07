@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(windows)]
+use crate::protocol;
+#[cfg(windows)]
 struct NativeTransport(hidapi::HidDevice);
 #[cfg(windows)]
 impl HidTransport for NativeTransport {

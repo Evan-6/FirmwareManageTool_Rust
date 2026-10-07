@@ -133,7 +133,7 @@ function Send-EnterBootloader {
     }
     catch {
         # "device not found" => not running our firmware (maybe already in BOOTSEL).
-        # A post-send exception => device likely already rebooting; treat as delivered.
+        # Rejection or timeout is not proof that the v3 boot request completed.
         Write-Host "Vendor HID enter_bootloader: $($_.Exception.Message)" -ForegroundColor DarkYellow
         return $false
     }

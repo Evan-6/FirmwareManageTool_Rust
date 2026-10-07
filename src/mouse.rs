@@ -502,48 +502,30 @@ mod tests {
         assert_eq!(current_node(&nodes, 0, 21), 1);
         assert_eq!(current_node(&nodes, 0, 99), 2);
     }
+    type ClickLog = std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u8>)>>>;
     struct ClickFake {
-        responses: std::collections::VecDeque<Vec<u8>>,
-        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        model: input_protocol::testing::UsbModel,
+        log: ClickLog,
         cancel: Cancellation,
     }
     impl HidTransport for ClickFake {
-        fn write(&mut self, report: &[u8]) -> Result<usize> {
-            let command = String::from_utf8_lossy(&report[1..])
-                .trim_matches(['\0', '\n'])
-                .to_owned();
-            self.log.lock().unwrap().push(command.clone());
-            let line = if command == "status" {
-                "ok:status,p=0,tx=0,hid=0,fs=0,mb=00"
-            } else if command == "reset" {
-                "ok:release_all"
-            } else {
-                "ok:mouse_button"
-            };
-            self.responses.push_back(
-                [
-                    vec![crate::protocol::IN_ID],
-                    format!("{line}\n").into_bytes(),
-                ]
-                .concat(),
-            );
-            Ok(report.len())
+        fn feature(&mut self) -> Result<Option<[u8; 64]>> {
+            Ok(Some(input_protocol::testing::UsbModel::feature()))
         }
-        fn read_timeout(&mut self, buffer: &mut [u8], _: i32) -> Result<usize> {
-            let Some(report) = self.responses.pop_front() else {
-                return Ok(0);
-            };
-            buffer[..report.len()].copy_from_slice(&report);
-            if self
-                .log
+        fn write(&mut self, report: &[u8]) -> Result<usize> {
+            let packet = input_protocol::v3::Packet::decode(report, input_protocol::v3::OUT_ID)?;
+            self.log
                 .lock()
                 .unwrap()
-                .last()
-                .is_some_and(|c| c.ends_with(",down"))
-            {
+                .push((packet.opcode, packet.payload));
+            self.model.write(report)
+        }
+        fn read_timeout(&mut self, buffer: &mut [u8], _: i32) -> Result<usize> {
+            let n = self.model.read(buffer);
+            if n > 0 && self.model.state.buttons == 1 {
                 self.cancel.cancel();
             }
-            Ok(report.len())
+            Ok(n)
         }
     }
     #[test]
@@ -551,10 +533,11 @@ mod tests {
         let token = Cancellation::default();
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut session = Session::new(ClickFake {
-            responses: Default::default(),
+            model: Default::default(),
             log: log.clone(),
             cancel: token.clone(),
         });
+        session.synchronize(&Cancellation::default()).unwrap();
         assert!(
             execute(
                 &mut session,
@@ -567,10 +550,15 @@ mod tests {
             .is_err()
         );
         let commands = log.lock().unwrap();
-        assert_eq!(
-            commands.iter().position(|s| s == "mouse_button:1,down"),
-            Some(1)
+        let down = commands
+            .iter()
+            .position(|(op, p)| *op == v3::MOUSE_BUTTONS && p == &[1])
+            .unwrap();
+        assert!(
+            commands
+                .iter()
+                .skip(down + 1)
+                .any(|(op, _)| *op == v3::RELEASE_ALL)
         );
-        assert!(commands.iter().skip(2).any(|s| s == "reset"));
     }
 }

@@ -1,22 +1,11 @@
-// Lease and legacy framing timeouts.
-void serviceLineTimeout(CommandParser &parser, unsigned long now) {
-    if ((parser.line_length > 0 || parser.discarding_line) &&
-        now - parser.last_rx_byte_at >= LineIdleTimeoutMs) {
-        resetParser(parser);
-        ++line_timeout_count;
-        QUEUE_ERROR("err:line_timeout\n");
-    }
+void scheduleBootloaderReset() {
+    bootloader_reset_requested_at = millis();
+    bootloader_reset_pending = true;
+    led::signalBootloader();
 }
-
-void serviceFailsafe(unsigned long now) {
-    if (protocol_owner == ProtocolOwner::Legacy &&
-        (keyboard.hasPressedKeys() || mouse_report.buttons != 0) &&
-        now - last_lease_renewed_at >= FailsafeReleaseMs) {
-        keyboard.releaseAll();
-        protocol_owner = ProtocolOwner::None;
-        releaseAllMouseButtons();
-        ++failsafe_count;
-        led::signalFailsafe();
-        QUEUE_TEXT("warn:failsafe_release_all\n");
+void serviceBootloaderReset(unsigned long now) {
+    if (bootloader_reset_pending && now - bootloader_reset_requested_at >= BootloaderResetDelayMs &&
+        output.idle() && usb_vendor.ready() && queue_get_level(&binary::tx) == 0) {
+        rp2040.rebootToBootloader();
     }
 }
