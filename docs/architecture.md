@@ -15,7 +15,9 @@ Session 先查詢 Feature 14。v3 使用 64-byte 完整封包、session／sequen
 畫面目標位置與擬人化曲線在主機計算，`input-protocol::pointer::RelativeTracker` 共用
 Windows 游標回授的相對位移控制器；USB 只送 MOUSE_MOVE，韌體 3.1.0 只有相對滑鼠。
 末端定位最多在路徑結束後繼續修正 300ms；無法到達回錯誤，拖曳以 ReleaseGuard 清理。
-滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID／failsafe 計數未增加。
+滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID 計數未增加。
+failsafe 計數是全裝置共用，其他 session 的租約到期也會增加，不能據此判定本工作失敗；
+本 session 或全裝置故障以帶 session 的 EVENT 判定，接收後立即使連線失效。
 
 | 階段 | 期限 |
 | --- | --- |
@@ -37,12 +39,16 @@ stdout／stderr 串流顯示，各自保存最多 10MiB；GUI 保存最近 1000 
 
 極限測試透過相同 exe 的內部 `--latency-worker` 入口執行，以 JSON 行傳遞要求、
 逐輪結果和報告，stdin `cancel` 或 EOF 觸發取消。REALTIME／TIME_CRITICAL 僅套用
-在量測子程序的單輪計時區間，RAII 還原優先權。主 GUI 從不切換 REALTIME。
-高精度只提高背景工作執行緒優先權，並有期限自旋；一般模式使用短 sleep 輪詢。
+在量測子程序送出按下指令時，送出後先以 RAII 還原程序優先權，再觀察 Windows 輸入。
+觀察執行緒與高精度模式相同，使用 ABOVE_NORMAL、有期限自旋及定期 yield；一般模式使用短 sleep 輪詢。
+主 GUI 從不切換 REALTIME。持續以 REALTIME 忙等會阻礙 Windows 鍵盤輸入執行緒，
+因此不能將這個優先權延伸至 GetAsyncKeyState 等待區間（[Microsoft 排程說明](https://learn.microsoft.com/zh-tw/windows/win32/procthread/scheduling-priorities)）。
 
 QPC 計時包含 Rust 主機送出命令的 session 處理、USB 寫入、韌體、Windows driver
-及 GetAsyncKeyState 輪詢，並非 MCU 單獨處理時間。只有完整按下／放開及
+及 GetAsyncKeyState 輪詢，極限模式也包含送出後還原優先權的耗時，並非 MCU 單獨處理時間。只有完整按下／放開及
 協定檢查成功的輪次納入統計；錯誤即停止，不繼續累積被污染的樣本。
+成功率以實際執行輪數為分母，另列要求及未執行輪數；提前停止後未執行的輪次不算失敗。
+每輪錯誤標明送出、Windows 觀察、USB 屏障或裝置狀態檢查階段。
 P95／P99 使用 nearest-rank；標準差使用 n−1，單樣本不計。
 
 燒錄先編譯再進 bootloader。自動重啟已選取 runtime 時，排除重啟前已存在的

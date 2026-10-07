@@ -7,6 +7,8 @@ use crate::{
     hid::{self, Device, HidTransport, NativeSession, Session},
     process::{Stream, read_lines, spawn_managed},
 };
+#[cfg(windows)]
+use anyhow::Context;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +31,7 @@ impl Mode {
         match self {
             Self::Normal => "一般",
             Self::HighPrecision => "高精度",
-            Self::Extreme => "極限 REALTIME",
+            Self::Extreme => "極限 REALTIME（僅送出）",
         }
     }
 }
@@ -78,6 +80,8 @@ pub struct Report {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Statistics {
+    pub attempted: usize,
+    pub unattempted: usize,
     pub successful: usize,
     pub failed: usize,
     pub timeouts: usize,
@@ -119,6 +123,8 @@ impl Report {
             }
         };
         Statistics {
+            attempted: self.rounds.len(),
+            unattempted: (self.config.rounds as usize).saturating_sub(self.rounds.len()),
             successful: n,
             failed: self
                 .rounds
@@ -217,7 +223,7 @@ fn wait_key(target: bool, counter: &Counter, mode: Mode, cancel: &Cancellation) 
         } else {
             std::hint::spin_loop();
             spins = spins.wrapping_add(1);
-            if mode == Mode::HighPrecision && spins.is_multiple_of(2048) {
+            if spins.is_multiple_of(2048) {
                 std::thread::yield_now();
             }
         }
@@ -267,40 +273,54 @@ pub fn measure<T: HidTransport>(
                     break;
                 }
                 let result = (|| -> Result<f64> {
-                    wait_key(false, &counter, config.mode, cancel)?;
+                    wait_key(false, &counter, config.mode, cancel)
+                        .context("量測前確認 A 已放開")?;
                     cancel.sleep(Duration::from_millis(80))?;
                     let duration;
                     {
-                        // Only this short measurement interval has elevated priorities.
-                        let _priority = PriorityGuard::set(
-                            config.mode == Mode::Extreme,
-                            config.mode == Mode::HighPrecision,
-                        )?;
+                        // Windows must be able to process input while we observe it.
+                        // REALTIME polling can starve the very input thread we await.
+                        let _observer_priority =
+                            PriorityGuard::set(false, config.mode != Mode::Normal)
+                                .context("設定觀察執行緒優先權")?;
+                        let send_priority = if config.mode == Mode::Extreme {
+                            Some(
+                                PriorityGuard::set(true, false)
+                                    .context("設定 REALTIME 送出優先權")?,
+                            )
+                        } else {
+                            None
+                        };
                         let start = counter.ticks();
-                        session.key(
+                        let sent = session.key(
                             input_protocol::KeyId::from_token("a").unwrap(),
                             true,
                             cancel,
-                        )?;
-                        wait_key(true, &counter, config.mode, cancel)?;
+                        );
+                        // Restore both process and thread before polling, including
+                        // when the write failed. Keep restoration inside QPC timing.
+                        drop(send_priority);
+                        sent.context("送出 A 按下")?;
+                        wait_key(true, &counter, config.mode, cancel)
+                            .context("等待 Windows 觀察到 A 按下")?;
                         let end = counter.ticks();
                         duration = counter.millis(end - start);
                     }
-                    session.finish(cancel)?;
-                    session.key(
-                        input_protocol::KeyId::from_token("a").unwrap(),
-                        false,
-                        cancel,
-                    )?;
-                    session.finish(cancel)?;
-                    wait_key(false, &counter, config.mode, cancel)?;
-                    let after = session.status(cancel)?;
-                    ensure!(
-                        after.count("hid") == before.count("hid")
-                            && after.count("tx") == before.count("tx")
-                            && after.count("fs") == before.count("fs"),
-                        "量測期間裝置失敗計數增加"
-                    );
+                    session.finish(cancel).context("確認 A 按下的 USB 屏障")?;
+                    session
+                        .key(
+                            input_protocol::KeyId::from_token("a").unwrap(),
+                            false,
+                            cancel,
+                        )
+                        .context("送出 A 放開")?;
+                    session.finish(cancel).context("確認 A 放開的 USB 屏障")?;
+                    wait_key(false, &counter, config.mode, cancel)
+                        .context("等待 Windows 觀察到 A 放開")?;
+                    let after = session.status(cancel).context("讀取量測後的裝置狀態")?;
+                    after
+                        .check_transport_since(&before)
+                        .context("檢查量測期間的裝置傳輸")?;
                     Ok(duration)
                 })();
                 let record = match result {
@@ -621,5 +641,25 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+    #[test]
+    fn early_stop_counts_only_attempted_rounds() {
+        let mut measured = report(&[1.0; 15]);
+        measured.rounds.push(Round {
+            round: 16,
+            latency_ms: None,
+            outcome: RoundOutcome::Timeout,
+            error: "等待 A 按下逾時".into(),
+        });
+        let stats = measured.statistics();
+        assert_eq!(stats.attempted, 16);
+        assert_eq!(stats.unattempted, 34);
+        assert_eq!(stats.successful, 15);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.timeouts, 1);
+        assert_eq!(stats.average, Some(1.0));
+        let empty = report(&[]).statistics();
+        assert_eq!(empty.attempted, 0);
+        assert_eq!(empty.unattempted, 50);
     }
 }

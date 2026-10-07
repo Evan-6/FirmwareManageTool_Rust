@@ -323,13 +323,7 @@ pub fn execute<T: HidTransport>(
         }
     }
     let after = session.status(cancel)?;
-    ensure!(
-        before.count("tx") == after.count("tx")
-            && before.count("hid") == after.count("hid")
-            && before.count("fs") == after.count("fs"),
-        "操作期間裝置失敗計數增加，不能確認成功：{}",
-        after.raw
-    );
+    after.check_transport_since(&before)?;
     Ok(after)
 }
 #[cfg(test)]

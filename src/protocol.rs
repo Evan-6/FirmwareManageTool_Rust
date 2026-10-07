@@ -22,6 +22,19 @@ pub struct Status {
     pub raw: String,
 }
 impl Status {
+    /// Check shared transport failures. `fs` also counts other clients' lease
+    /// expiry; our own faults are rejected by Session's session-tagged EVENT.
+    pub fn check_transport_since(&self, before: &Self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.count("hid") == before.count("hid") && self.count("tx") == before.count("tx"),
+            "裝置傳輸失敗計數增加：hid {}→{}，tx {}→{}",
+            before.count("hid"),
+            self.count("hid"),
+            before.count("tx"),
+            self.count("tx")
+        );
+        Ok(())
+    }
     pub fn count(&self, name: &str) -> u64 {
         self.fields
             .get(name)

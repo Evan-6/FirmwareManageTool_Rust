@@ -32,7 +32,7 @@ releaseSession 133、sessionFault 83、USB setup 80、reply 76、sendReport 73�
 - `scripts/test-v3-bootloader.ps1`：PowerShell parser 與內嵌 C# 編譯；以假 Stream 執行實際控制函式，
   驗證 OPEN／BOOTLOADER 固定封包、其他 session、busy／fault、填充、短回覆、序號及 timeout。
   未在 Linux 呼叫 Windows HID P/Invoke 或實際重啟設備。
-- 管理工具：workspace no-default-features 29＋共享協定 17 項測試、全目標嚴格 Clippy、fmt 通過。
+- 管理工具：workspace no-default-features 31＋共享協定 17 項測試、全目標嚴格 Clippy、fmt 通過。
   全 workspace／all-targets 的 Windows MSVC 原始碼檢查通過。
 - MSCV_RUST：輸入 facade／假 USB 14 項測試，輸入層 Windows MSVC 嚴格 Clippy，app／bins 原始碼檢查通過。
   未格式化無關的既有 app 程式。
@@ -59,3 +59,15 @@ Windows 原始碼檢查使用既有 SDK／交叉工具，只有 check 或物件�
 - [ ] Windows 原生完整 app 建置／測試／打包，GUI 與延遲量測實際操作。
 
 編譯及模擬測試不取代 Windows driver 或 USB 實機驗證。屏障代表 USB 完成，延遲量測仍以 Windows GetAsyncKeyState 觀察到輸入為終點。
+
+## RealTime 量測修正
+
+使用者回報要求 50 輪卻只有約 15 輪成功。已確認極限測試切換至子程序後，
+GUI 原本已釋放的 session 仍需等待 2 秒租約到期；共用 failsafe 計數因此增加，
+舊量測判定會將其他 session 的到期誤認為本輪故障並停止。實際出錯輪數仍需使用者的錯誤文字確認。
+
+- 實際共用韌體測試重現 GUI session 到期、只有 GUI 收到 EVENT、worker 仍能按下／放開／屏障／STATUS，且 failsafe 增加。
+- 主機假 USB 回歸測試確認：其他 session 的 EVENT 與 failsafe 增加不會使測試失敗；本 session EVENT、TX／HID 計數增加仍失敗。
+- REALTIME／TIME_CRITICAL 限於送出指令；Windows 觀察使用高精度優先權，避免在 REALTIME 忙等阻礙輸入。
+- 顯示成功／已執行／要求／未執行輪數，成功率以已執行輪數計算；15 成功、1 timeout、34 未執行有回歸測試。
+- Windows MSVC 全目標嚴格 Clippy 只做程式碼檢查；尚未進行 Windows／USB 實機重測，沒有產生 Windows EXE。

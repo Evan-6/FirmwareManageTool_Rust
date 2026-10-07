@@ -118,6 +118,91 @@ fn binary_shared_reports_ignore_other_clients_replies_and_faults() {
     assert!(!session.is_valid());
 }
 
+// An expired GUI/peer session raises the device-global failsafe counter while
+// the latency worker's own session remains healthy. Exercise real v3 I/O and
+// the status check used by both latency and mouse operations.
+struct PeerExpiryFake {
+    inner: BinaryFake,
+    failsafe: u16,
+    tx_errors: u16,
+    hid_errors: u16,
+}
+impl HidTransport for PeerExpiryFake {
+    fn feature(&mut self) -> Result<Option<[u8; 64]>> {
+        self.inner.feature()
+    }
+    fn write(&mut self, r: &[u8]) -> Result<usize> {
+        self.inner.write(r)
+    }
+    fn read_timeout(&mut self, r: &mut [u8], timeout: i32) -> Result<usize> {
+        use input_protocol::v3;
+        let n = self.inner.read_timeout(r, timeout)?;
+        if n > 0 {
+            let mut packet = v3::Packet::decode(&r[..n], v3::IN_ID)?;
+            if packet.opcode == v3::STATUS | 128 {
+                packet.payload[14..16].copy_from_slice(&self.tx_errors.to_le_bytes());
+                packet.payload[16..18].copy_from_slice(&self.hid_errors.to_le_bytes());
+                packet.payload[18..20].copy_from_slice(&self.failsafe.to_le_bytes());
+                r[..64].copy_from_slice(&packet.encode(v3::IN_ID)?);
+            }
+        }
+        Ok(n)
+    }
+}
+#[test]
+fn peer_lease_expiry_does_not_fail_an_active_measurement() {
+    use input_protocol::v3::{self, Packet};
+    let cancel = Cancellation::default();
+    let mut session = Session::new(PeerExpiryFake {
+        inner: BinaryFake(Default::default()),
+        failsafe: 0,
+        tx_errors: 0,
+        hid_errors: 0,
+    });
+    session.synchronize(&cancel).unwrap();
+    let before = session.status(&cancel).unwrap();
+    let own_id = session.binary.as_ref().unwrap().session;
+    session.transport.inner.0.reads.push_back(
+        Packet {
+            opcode: v3::EVENT,
+            flags: 0,
+            session: own_id.wrapping_add(1),
+            sequence: 3,
+            payload: vec![5],
+        }
+        .encode(v3::IN_ID)
+        .unwrap(),
+    );
+    session.transport.failsafe = 1;
+    session.finish(&cancel).unwrap();
+    let after = session.status(&cancel).unwrap();
+    assert_eq!(after.count("fs"), before.count("fs") + 1);
+    after.check_transport_since(&before).unwrap();
+    assert!(session.is_valid());
+
+    // Shared transport errors and an own-session lease fault still fail.
+    session.transport.tx_errors = 1;
+    assert!(
+        session
+            .status(&cancel)
+            .unwrap()
+            .check_transport_since(&before)
+            .is_err()
+    );
+    session.transport.tx_errors = 0;
+    session.transport.hid_errors = 1;
+    assert!(
+        session
+            .status(&cancel)
+            .unwrap()
+            .check_transport_since(&before)
+            .is_err()
+    );
+    session.transport.inner.0.fault(5);
+    assert!(session.status(&cancel).is_err());
+    assert!(!session.is_valid());
+}
+
 struct Unsupported;
 impl HidTransport for Unsupported {
     fn write(&mut self, _: &[u8]) -> Result<usize> {

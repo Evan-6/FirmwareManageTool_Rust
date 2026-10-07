@@ -332,7 +332,7 @@ impl App {
         ui.add_enabled_ui(!self.busy,|ui| {
             ui.horizontal(|ui| {ui.label("測試輪數");ui.add(egui::DragValue::new(&mut self.settings.latency.rounds).range(1..=10000));});
             egui::ComboBox::from_id_salt("latency-mode").selected_text(self.settings.latency.mode.label()).show_ui(ui,|ui| {for mode in [Mode::Normal,Mode::HighPrecision,Mode::Extreme] {ui.selectable_value(&mut self.settings.latency.mode,mode,mode.label());}});
-            if self.settings.latency.mode==Mode::Extreme {ui.label("極限模式在獨立子程序使用 REALTIME／TIME_CRITICAL，每輪有 1 秒期限；GUI 維持一般優先權。");}
+            if self.settings.latency.mode==Mode::Extreme {ui.label("極限模式只在送出指令時使用 REALTIME／TIME_CRITICAL；等待按鍵時改用高精度優先權，讓 Windows 處理輸入。每階段期限 1 秒。");}
             ui.label("請先放開 A，測試期間不要操作實體鍵盤，並保持 Windows 互動桌面可用。");
             if ui.add_enabled(self.connected.is_some(),egui::Button::new("開始測試")).clicked(){self.rounds.clear();self.report=None;let _=self.settings.save();self.submit(AppCommand::Latency(self.settings.latency.clone()));}
         });
@@ -340,12 +340,18 @@ impl App {
             let stats = report.statistics();
             ui.separator();
             ui.label(format!(
-                "成功 {} / 要求 {} • 失敗 {} • timeout {} • 成功率 {:.1}%",
+                "成功 {} / 已執行 {} • 要求 {} • 未執行 {} • 失敗 {} • timeout {} • 成功率 {:.1}%",
                 stats.successful,
+                stats.attempted,
                 report.config.rounds,
+                stats.unattempted,
                 stats.failed,
                 stats.timeouts,
-                stats.successful as f64 / report.config.rounds as f64 * 100.
+                if stats.attempted == 0 {
+                    0.
+                } else {
+                    stats.successful as f64 / stats.attempted as f64 * 100.
+                }
             ));
             egui::Grid::new("latency-statistics")
                 .num_columns(4)

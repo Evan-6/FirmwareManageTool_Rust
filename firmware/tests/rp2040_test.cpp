@@ -237,6 +237,39 @@ void testConcurrentFaultAndLease() {
         assert(binary::find(43));
     }
 }
+void testReleasedGuiLeaseDuringLatencyWorker() {
+    fresh();
+    open(); // GUI session, released before handing off to the worker process.
+    send(binary::Release, 2);
+    tick(12);
+    openPeer(43);
+    const uint16_t failsafe = binary_failsafe_count;
+    const uint16_t hid = binary_hid_errors, tx = binary_tx_errors;
+    test_time += 1500;
+    send(binary::Heartbeat, 2, {}, 43);
+    test_time += 501;
+    Firmware::loop();
+    tick(12);
+    assert(!binary::find(42) && binary::find(43));
+    assert(binary_failsafe_count == uint16_t(failsafe + 1));
+    assert(binary_hid_errors == hid && binary_tx_errors == tx);
+    assert(responseFor(42, binary::Event, 2, 5));
+    assert(!responseFor(43, binary::Event, 2, 5));
+    send(binary::Key, 3, {7, 0, 4, 0, 1}, 43);
+    tick(8);
+    assert(output.completed.keys[0] == 16);
+    send(binary::Key, 4, {7, 0, 4, 0, 0}, 43);
+    send(binary::Barrier, 5, {}, 43);
+    tick(12);
+    assert(!output.completed.held() && responseFor(43, binary::Barrier | 128, 5));
+    send(binary::Status, 6, {}, 43);
+    tick(5);
+    assert(responseFor(43, binary::Status | 128, 6));
+    for (const auto &r : test_reports)
+        if (r.id == 13 && r.data[1] == (binary::Status | 128) &&
+            binary::read32(r.data.data() + 4) == 43)
+            assert(binary::read16(r.data.data() + 30) == uint16_t(failsafe + 1));
+}
 void testConcurrentQueuedWork() {
     for (uint8_t scenario : {0, 1}) {
         fresh();
@@ -329,6 +362,7 @@ void testSessionCapacityAndBootloader() {
 int main() {
     testConcurrentStateAndRelease();
     testConcurrentFaultAndLease();
+    testReleasedGuiLeaseDuringLatencyWorker();
     testConcurrentQueuedWork();
     testSessionCapacityAndBootloader();
     testRelativeMouseOnly();
