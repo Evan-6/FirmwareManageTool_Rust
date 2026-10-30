@@ -30,7 +30,7 @@ lto = "thin"
 strip = "debuginfo"
 
 [workspace]
-members = ["shared/input-protocol"]
+members = ["shared/input-protocol", "firmware/engine"]
 
 [dev-dependencies]
 input-protocol = { path = "shared/input-protocol", features = ["test-support"] }

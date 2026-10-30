@@ -1,0 +1,9 @@
+[package]
+name = "firmware-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Portable Vendor HID v3 device engine for the Seeed XIAO RP2040 firmware"
+
+[lib]
+path = "src/lib.rs"

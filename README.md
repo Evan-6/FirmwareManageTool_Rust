@@ -60,6 +60,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 python3 scripts/sync-input-protocol.py --check
 bash scripts/test-rp2040.sh
+cargo build -p firmware-engine --release --target thumbv6m-none-eabi
 ```
 
 Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。

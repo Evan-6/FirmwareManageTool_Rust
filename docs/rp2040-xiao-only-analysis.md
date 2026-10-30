@@ -89,7 +89,7 @@ HID 存取其實只需 `HidD_GetFeature`／`ReadFile`／`WriteFile`，同一份 
 
 ## 3. 可以用原生 Rust 撰寫的部分
 
-### A. 韌體引擎移植成 `no_std` crate（最高價值、最低風險）
+### A. 韌體引擎移植成 `no_std` crate（最高價值、最低風險）— 移植已完成，C++ 尚未移除
 
 現況：engine 已經**不依賴** Arduino／TinyUSB／Pico SDK，`scripts/test-rp2040.sh` 的 `engine-test`
 就是把 `src/input/*.cpp` 直接連結到主機執行檔。這證明它的介面本來就是純邏輯。
@@ -105,6 +105,31 @@ HID 存取其實只需 `HidD_GetFeature`／`ReadFile`／`WriteFile`，同一份 
 
 可刪除：C++ engine 992 行、`firmware/common` 遺留概念、`vectors_generated.h`、PowerShell v3 client 的封包實作。
 風險：`uint32` 時間、u16 計數 wrap、固定陣列索引的邊界行為必須一一對齊（測試已涵蓋大部分）。
+
+#### A 實作結果（2026-10-31）
+
+`firmware/engine/` 已建立並與 C++ 並存，`firmware/boards/rp2040` 仍照原樣燒錄。
+
+| 項目 | 結果 |
+| --- | --- |
+| 模組 | `state`／`wire`／`session`／`scheduler`／`engine`／`boot_gate`／`led`／`config`，對應 C++ 的 992 行 |
+| 記憶體模型 | `#![no_std]` + `#![forbid(unsafe_code)]`、無 heap、固定陣列；`InputState` 有 31-byte 靜態斷言 |
+| 時間 | 所有 `now_ms` 運算改用 `wrapping_sub/add`（C++ 靠 unsigned 溢位，Rust debug 會 panic） |
+| 生成物 | `keys_generated.rs`（按鍵 bitmap／Consumer 表）與 `tests/data/vectors_generated.rs` 由同步腳本產生 |
+| `no_std` 目標 | `cargo build -p firmware-engine --release --target thumbv6m-none-eabi` 通過（RP2040 = Cortex-M0+） |
+| 行為測試 | 11 個案例逐條對應 `firmware/tests/rp2040_engine_test.cpp` |
+| 跨語言 wire | `tests/golden.rs` 用 `vectors.json` 的 64-byte 主機封包驅動引擎，檢查 NKRO／Consumer bits 與 OPEN／BARRIER 回覆 |
+| 逐位元組 A/B | `firmware/tests/engine_trace.cpp` 與 `tests/trace.rs` 同一腳本輸出 37 行 trace（含 50／51 ms 邊界），內容完全相同 |
+| 突變驗證 | 故意把鍵盤 report 長度 29→28、`STALE_MS` 50→49，A/B 分別在第 1／23 行失敗 |
+
+移植時確認的 C++ 細節（容易誤解的兩點，已在 Rust 保留）：
+
+1. `open()` 之後測試 harness 已 tick 12 ms，初始 state job 早已排空，所以 motion 的合併從 `count == 0` 起算；
+   九次 1024 位移剛好落在 ±8192 上限，第 10 次才故障。
+2. modifer usage `0xE0..=0xE7` 必須先走 `modifiers` 分支，否則 `keys[usage / 8]` 會越界（usage 224–231）。
+
+尚未移植：TinyUSB 傳輸層、core 1 的 NeoPixel 渲染、`FirmwareRuntime` 主迴圈與 `#![no_mangle]` 橋接。
+要把 Rust 引擎接上實機，下一步是這些平台層與 runtime（即 3.B 的前半段），而非再改引擎本身。
 
 ### B. 整個韌體改 Rust（`embassy-rp` 或 `rp2040-hal` + `usb-device`）
 
@@ -161,7 +186,8 @@ descriptor 與 Feature 佈局必須逐 byte 對上 `firmware/tests/Rp2040UsbGold
 | 步驟 | 可回收 | 風險 | 驗證方式 |
 | --- | --- | --- | --- |
 | 1. XIAO-only 清理 | 已回收 14,420 行 | 無 | 本文件第 1 節 |
-| 2. engine → `no_std` Rust crate，與 C++ 並存 A/B | 992 行 C++、測試替身 | 低（現有 vectors 與 245 行 engine test） | `cargo test` + 逐位元組比對 vectors |
+| 2. ~~engine → `no_std` Rust crate，與 C++ 並存 A/B~~ **已完成** | 尚未刪除任何 C++（等切換後才回收） | 低 | 11 行為測試 + vectors + 37 行 trace 逐位元組一致 |
+| 2b. runtime／USB／LED 接上 Rust 引擎，C++ 引擎退役 | 992 行 C++、測試替身、PowerShell 封包實作 | 中高（completion、雙核、NeoPixel、BOOTSEL） | 現有 C++ runtime 測試改寫為 Rust + 實機 |
 | 3. USB／LED／reboot 改 Rust，engine 接到 `usb-device` | TinyUSB 與 Arduino 相關全部、arduino-cli 佈建 | 中高（completion、雙核、NeoPixel、BOOTSEL） | golden bytes + 實機列舉／延遲量測 |
 | 4. 拿掉 arduino-cli／winget／sketch 複製 | 約 260 行 + 使用者首次燒錄的網路依賴 | 低 | `cargo build` + UF2 複製流程 |
 | 5. hidapi → windows-sys | C 依賴 | 中（列舉、timeout） | 實機列舉／延遲測試對照 |

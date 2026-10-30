@@ -18,6 +18,13 @@ sources=("$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root"/
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} "$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root/firmware/boards/rp2040/src/platform/StatusIndicator.cpp" "$project_root/firmware/tests/rp2040_engine_test.cpp" -o "$test_dir/engine-test"
 "$test_dir/engine-test"
 
+# The shipping C++ engine and the Rust port (firmware/engine) run the same
+# script; before the port replaces the C++ engine, their traces must match byte
+# for byte. CRLF from a Windows host is normalised away.
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} "$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root/firmware/tests/engine_trace.cpp" -o "$test_dir/engine-trace"
+"$test_dir/engine-trace" > "$test_dir/engine-trace.txt"
+diff --strip-trailing-cr -u "$project_root/firmware/tests/engine_trace.golden" "$test_dir/engine-trace.txt"
+
 # Each header compiles on its own. Two translation units include every header
 # and link against the actual modules to catch hidden state/ODR dependencies.
 headers=("$project_root"/firmware/boards/rp2040/src/input/*.h "$project_root"/firmware/boards/rp2040/src/platform/*.h "$project_root"/firmware/boards/rp2040/src/runtime/*.h)

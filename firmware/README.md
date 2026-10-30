@@ -17,6 +17,7 @@ firmware/
   tests/               ← 主機端模擬測試（Arduino／TinyUSB／Pico SDK stubs）
   tools/
     vendor_hid_bootloader.ps1  ← 透過 Vendor HID 送指令（含 enter_bootloader）
+  engine/              ← 引擎的 no_std Rust 移植（與 C++ 並存、A/B 驗證中，見 engine/README.md）
   boards/
     rp2040/            ← XIAO RP2040 專用 sketch（arduino-pico 6.2.0 + Adafruit TinyUSB）
       rp2040.ino, Firmware.cpp/.h
@@ -25,7 +26,8 @@ firmware/
       src/runtime/     ← FirmwareRuntime 協調
 ```
 
-`src/input/` 與 `src/platform/Usb*` 是唯一來源，沒有生成副本；
+`src/input/` 與 `src/platform/Usb*` 是唯一來源，沒有生成副本；`firmware/engine/` 是同一份引擎的 Rust 移植，
+以 `scripts/test-rp2040.sh` 的 A/B trace 與 C++ 逐位元組比對；
 `src/input/KeyCatalog.h` 由 `shared/input-protocol/keys.json` 產生，請透過 `scripts/sync-input-protocol.py` 更新。
 
 ## 建置與燒錄
