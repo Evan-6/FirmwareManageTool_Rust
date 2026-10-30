@@ -32,6 +32,9 @@ jobs:
       - run: cargo test --locked --workspace --no-default-features
       - run: python3 scripts/sync-input-protocol.py --check
       - run: bash scripts/test-rp2040.sh
+      # Keeps the Rust engine honest: it must build for the RP2040 core without std.
+      - run: rustup target add thumbv6m-none-eabi
+      - run: cargo build --locked -p firmware-engine --release --target thumbv6m-none-eabi
 
   rp2040:
     runs-on: ubuntu-latest
