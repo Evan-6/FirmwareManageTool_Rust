@@ -92,8 +92,16 @@ impl Backend {
 impl Drop for Backend {
     fn drop(&mut self) {
         self.shutdown();
-        if self.join.as_ref().is_some_and(|h| h.is_finished()) {
-            let _ = self.join.take().unwrap().join();
+        if let Some(join) = self.join.take() {
+            // Wait for the worker's final cleanup instead of detaching it,
+            // matching the GUI close grace period.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !join.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if join.is_finished() {
+                let _ = join.join();
+            }
         }
     }
 }

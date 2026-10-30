@@ -260,6 +260,9 @@ impl Job {
                 "AssignProcessToJobObject：{}",
                 std::io::Error::last_os_error()
             );
+            // TH32CS_SNAPTHREAD always snapshots every system thread; the pid
+            // argument is ignored for this flag (MSDN), so the
+            // th32OwnerProcessID filter below is what restricts enumeration.
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             ensure!(snapshot != INVALID_HANDLE_VALUE, "無法列舉子程序執行緒");
             let mut entry: THREADENTRY32 = std::mem::zeroed();

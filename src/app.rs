@@ -2,7 +2,7 @@ use crate::{
     backend::{AppCommand, AppEvent, Backend},
     firmware::Board,
     hid::Device,
-    latency::{Mode, Report, Round},
+    latency::{Mode, Report, Round, Statistics},
     mouse::MouseAction,
     protocol::{Hello, Status},
     settings::Settings,
@@ -35,6 +35,7 @@ pub struct App {
     choices: Vec<String>,
     cleanup: Option<bool>,
     report: Option<Report>,
+    stats: Option<Statistics>,
     rounds: Vec<Round>,
     x: i32,
     y: i32,
@@ -119,6 +120,7 @@ impl App {
             choices: Vec::new(),
             cleanup: None,
             report: None,
+            stats: None,
             rounds: Vec::new(),
             x: 0,
             y: 0,
@@ -197,7 +199,9 @@ impl App {
                     } else {
                         "測試完成".into()
                     };
-                    self.rounds = report.rounds.clone();
+                    // Statistics are computed once here; the page must not
+                    // re-sort up to 10000 samples on every repaint.
+                    self.stats = Some(report.statistics());
                     self.report = Some(report);
                 }
                 AppEvent::Upload(outcome) => {
@@ -334,16 +338,15 @@ impl App {
             egui::ComboBox::from_id_salt("latency-mode").selected_text(self.settings.latency.mode.label()).show_ui(ui,|ui| {for mode in [Mode::Normal,Mode::HighPrecision,Mode::Extreme] {ui.selectable_value(&mut self.settings.latency.mode,mode,mode.label());}});
             if self.settings.latency.mode==Mode::Extreme {ui.label("極限模式只在送出指令時使用 REALTIME／TIME_CRITICAL；等待按鍵時改用高精度優先權，讓 Windows 處理輸入。每階段期限 1 秒。");}
             ui.label("請先放開 A，測試期間不要操作實體鍵盤，並保持 Windows 互動桌面可用。");
-            if ui.add_enabled(self.connected.is_some(),egui::Button::new("開始測試")).clicked(){self.rounds.clear();self.report=None;let _=self.settings.save();self.submit(AppCommand::Latency(self.settings.latency.clone()));}
+            if ui.add_enabled(self.connected.is_some(),egui::Button::new("開始測試")).clicked(){self.rounds.clear();self.report=None;self.stats=None;let _=self.settings.save();self.submit(AppCommand::Latency(self.settings.latency.clone()));}
         });
-        if let Some(report) = &self.report {
-            let stats = report.statistics();
+        if let Some(stats) = &self.stats {
             ui.separator();
             ui.label(format!(
                 "成功 {} / 已執行 {} • 要求 {} • 未執行 {} • 失敗 {} • timeout {} • 成功率 {:.1}%",
                 stats.successful,
                 stats.attempted,
-                report.config.rounds,
+                stats.attempted + stats.unattempted,
                 stats.unattempted,
                 stats.failed,
                 stats.timeouts,
@@ -385,18 +388,25 @@ impl App {
                 } else {
                     self.settings.csv_path.clone().into()
                 };
-                match report.export(&path) {
-                    Ok(()) => self.log(format!("CSV 已匯出：{}", path.display())),
-                    Err(e) => self.log(format!("CSV 匯出失敗：{e:#}")),
+                if let Some(report) = &self.report {
+                    match report.export(&path) {
+                        Ok(()) => self.log(format!("CSV 已匯出：{}", path.display())),
+                        Err(e) => self.log(format!("CSV 匯出失敗：{e:#}")),
+                    }
                 }
             }
         }
+        let rounds: &[Round] = self
+            .report
+            .as_ref()
+            .map(|report| &report.rounds)
+            .unwrap_or(&self.rounds);
         egui::ScrollArea::vertical()
             .id_salt("rounds")
             .max_height(180.)
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                for round in &self.rounds {
+                for round in rounds {
                     ui.monospace(format!(
                         "#{:<5} {:<12} {:?} {}",
                         round.round,
@@ -680,6 +690,8 @@ mod tests {
             cleanup_confirmed: true,
             terminal_error: Some("尚未驗證".into()),
         });
+        let stats = app.report.as_ref().unwrap().statistics();
+        app.stats = Some(stats);
         for page in [Page::Device, Page::Firmware, Page::Latency, Page::Mouse] {
             let mut output = context.run_ui(
                 egui::RawInput {
