@@ -19,14 +19,14 @@ firmware/
     vendor_hid_bootloader.ps1  ← 透過 Vendor HID 送指令（含 enter_bootloader）
   boards/
     rp2040/            ← XIAO RP2040 專用 sketch（arduino-pico 6.2.0 + Adafruit TinyUSB）
-      rp2040.ino, Firmware.cpp/.h, KeyCatalog.h
+      rp2040.ino, Firmware.cpp/.h
       src/input/       ← WireCodec、SessionTable、OutputScheduler、InputEngine、BootloaderGate
       src/platform/    ← USB descriptors／transport／callbacks、bootloader、LED
       src/runtime/     ← FirmwareRuntime 協調
 ```
 
 `src/input/` 與 `src/platform/Usb*` 是唯一來源，沒有生成副本；
-`KeyCatalog.h` 由 `shared/input-protocol/keys.json` 產生，請透過 `scripts/sync-input-protocol.py` 更新。
+`src/input/KeyCatalog.h` 由 `shared/input-protocol/keys.json` 產生，請透過 `scripts/sync-input-protocol.py` 更新。
 
 ## 建置與燒錄
 
