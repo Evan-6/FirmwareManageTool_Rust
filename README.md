@@ -1,18 +1,20 @@
 # FirmwareManageTool Rust
 
 以 Rust 2024、egui／eframe 0.36.2 與 Wgpu 重寫的 Windows 11 x64 GUI 工具。
-目標板只有 Seeed XIAO RP2040（arduino-pico、TinyUSB）。本分支已移除 Leonardo／AVR、Pico 與其他 arduino-pico 板型。
+目標板只有 Seeed XIAO RP2040，韌體是**純 Rust**（embassy-rp／embassy-usb）。本分支已移除 Leonardo／AVR、Pico、
+其他 arduino-pico 板型，以及整套 Arduino／TinyUSB／C++ 實作——不再需要 arduino-cli、Pico SDK 或 picotool。
 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
 
 ## Windows 使用
 
 解壓可攜式 ZIP，保留 `FirmwareManageTool.exe` 旁的 `firmware` 資料夾，執行 exe。
-不需要 Rust、Visual Studio 或額外的 HID driver。正式建置靜態連結 MSVC CRT。
+執行本身不需要 Rust、Visual Studio 或額外的 HID driver（只有「編譯並燒錄韌體」那一步需要 Rust 工具鏈）。
+正式建置靜態連結 MSVC CRT。
 
 1. 在「裝置」掃描並選取 Vendor HID，再連線。多裝置不自動取第一台。
-2. 在「韌體燒錄」直接開始編譯／上傳 XIAO 韌體（FQBN 固定）。缺少 arduino-cli 時透過
-   winget 自動安裝；Core／Library 也會按板型安裝，可選擇略過已準備的依賴。
-   沒有 winget 時可自行下載 arduino-cli.exe，指定完整路徑。
+2. 在「韌體燒錄」直接開始編譯／上傳 XIAO 韌體：管理工具會 `cargo build` 目標
+   `thumbv6m-none-eabi`、打包 UF2，再請裝置進 BOOTSEL 並複製檔案。需要已安裝的 Rust 工具鏈
+   （可選擇略過 `rustup target add`）；也可指定 cargo.exe 的完整路徑。
 3. 正常韌體沒有 COM 埠。無法由 HID 重啟時請按住 BOOTSEL 上電。
    可指定 UF2 磁碟；多候選由 GUI 選擇。
 4. 「鍵盤延遲」提供一般、高精度及可選的極限模式，並可匯出 CSV。
@@ -29,9 +31,9 @@ USB／共用佇列故障釋放所有 session。STATUS 的輸入與待送數只�
 需重新燒錄 3.1.0；第一次從舊韌體升級使用 BOOTSEL。
 序號取自 RP2040 unique ID。燒錄前關閉其他控制程式並等 2 秒。
 
-設定、Arduino CLI 設定／依賴、sketch 工作副本及建置產物儲存在
+設定與 UF2 建置產物儲存在
 `%LOCALAPPDATA%\FirmwareManageTool_Rust`。設定會於開始工作、保存設定及離開時保存。
-首度燒錄需要網路與 winget 可用；安裝失敗會終止後續流程。
+首度燒錄需要可用的 Rust 工具鏈與 `thumbv6m-none-eabi` target；缺少時會終止後續流程。
 
 ## Windows 開發與發行
 

@@ -1,9 +1,10 @@
 # `xiao-firmware` — pure-Rust XIAO RP2040 firmware (3.B)
 
-A second implementation of the same device, with no Arduino core, no TinyUSB and
-no C++: the protocol engine, the runtime loop, the USB device stack and the boot
-path are all Rust. The C++ sketch under `firmware/boards/rp2040/` stays as the
-reference oracle until this build passes hardware regression.
+The only implementation of this device on this branch: no Arduino core, no
+TinyUSB, no C++. The protocol engine, the runtime loop, the USB device stack and
+the boot path are all Rust. The C++ sketch that used to live in
+`firmware/boards/rp2040/` was deleted once this build passed the hardware
+regression; its behaviour survives as the recorded trace golden.
 
 ```
 USB host
@@ -25,16 +26,16 @@ rustup target add thumbv6m-none-eabi
 bash scripts/build-rust-firmware.sh
 ```
 
-That runs `scripts/gen-usb-descriptors.py --check`, builds the crate for
-`thumbv6m-none-eabi`, packages `xiao-firmware.uf2` with `scripts/elf2uf2.py` and
-prints the footprint with `scripts/elf-size.py`. Nothing in that chain needs
-`arduino-cli`, `arm-none-eabi-gcc` or `picotool`.
+That builds the crate for `thumbv6m-none-eabi`, packages `xiao-firmware.uf2`
+with `uf2pack` (the same Rust code the GUI runs) and prints the footprint with
+`scripts/elf-size.py`. Nothing in that chain needs `arduino-cli`,
+`arm-none-eabi-gcc` or `picotool`.
 
 Measured on the PoC (release, no LED, single core):
 
 | image | flash | RAM |
 | --- | --- | --- |
-| C++ sketch (arduino-pico 6.2.0, TinyUSB) | 90,792 B | 29,712 B |
+| C++ sketch (arduino-pico 6.2.0, TinyUSB — deleted) | 90,792 B | 29,712 B |
 | Rust `xiao-firmware` | 28,016 B | 17,804 B |
 
 RAM is dominated by the engine (`InputEngine` 12,564 B) and the 32-slot RX queue
@@ -83,8 +84,8 @@ end-to-end check of the OS side and is not automated yet.
   with boot2 at `0x10000000` (`.boot2` from embassy-rp, `BOOT_LOADER_W25Q080`)
   and produces a 110-block UF2, every block 256-byte aligned, first at
   `0x10000000`.
-- Report descriptors: `scripts/gen-usb-descriptors.py --check` compares the Rust
-  arrays against `UsbDescriptors.cpp` and the frozen golden bytes.
+- Report descriptors: `tests/descriptors.rs` pins the frozen bytes with a hash, so an
+  edit that changes what Windows sees fails the build instead of drifting.
 - Engine behaviour: `firmware-engine` carries the 37-line A/B trace that matches
   the C++ engine byte for byte.
 - On hardware: enumeration (both collections, same VID/PID/serial as the C++

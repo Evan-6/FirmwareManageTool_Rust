@@ -1,11 +1,12 @@
-//! Seeed XIAO RP2040 firmware PoC: two HID interfaces driven by the Rust engine.
+//! Seeed XIAO RP2040 firmware: two HID interfaces driven by the Rust engine.
 //!
 //! Interface 0 is the input HID (NKRO id 2, Consumer id 5, relative mouse id 3),
 //! interface 1 is the vendor channel (OUT 12 / IN 13 / Feature 14). The report
-//! descriptors come from `scripts/gen-usb-descriptors.py`, which refuses to emit
-//! anything unless they still match the shipping C++ sketch and the frozen golden.
+//! descriptors are frozen in `usb_descriptors.rs` and pinned by
+//! `tests/descriptors.rs`; Feature 14 must answer 64 bytes with the report id in
+//! `buf[0]`, or Windows rejects it as a short report.
 //!
-//! The main loop keeps the C++ stage order and the engine's callback contract:
+//! The main loop keeps the stage order the C++ runtime used to have:
 //! `Runtime::step` submits at most one report, and the awaited write reports its
 //! completion on the next pass, so "accepted" is never confused with "sent".
 

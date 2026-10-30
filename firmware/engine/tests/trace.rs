@@ -1,20 +1,20 @@
-//! A/B parity: the script below is byte-for-byte the one in
-//! `firmware/tests/engine_trace.cpp`. `scripts/test-rp2040.sh` re-runs the C++
-//! side and diffs it against the committed golden, so this test fails whenever
-//! the Rust port and the shipping engine disagree.
+//! Regression pin for the engine: the script below is the one that was compared
+//! byte for byte against the C++ engine before it was deleted. The golden is now
+//! the only record of that behaviour, so any change to the scheduling, the wire
+//! replies or the fault order shows up here first.
 
 mod common;
 
 use common::Harness;
 use firmware_engine::wire;
 
-const GOLDEN: &str = include_str!("../../tests/engine_trace.golden");
+const GOLDEN: &str = include_str!("data/engine_trace.golden");
 const A: u32 = 0x1111_1111;
 const B: u32 = 0x2222_2222;
 const C: u32 = 0x3333_3333;
 
 #[test]
-fn trace_matches_the_cpp_engine() {
+fn trace_matches_the_recorded_golden() {
     let mut h = Harness::new(0);
 
     h.send_as(wire::OPEN, 1, &[], A);

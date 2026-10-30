@@ -43,7 +43,7 @@ for v in vectors:
     eng_vectors.append('    [' + ', '.join(str(b) for b in v['bytes']) + '],')
 eng_vectors.append('];')
 eng_vectors = rustfmt_source(chr(10).join(eng_vectors) + chr(10))
-outputs={root/'firmware/engine/src/keys_generated.rs':eng, root/'firmware/engine/tests/data/vectors_generated.rs':eng_vectors, shared/'src/keys_generated.rs':rust,shared/'keys_generated.js':js,shared/'keys_generated.h':cpp,root/'firmware/boards/rp2040/src/input/KeyCatalog.h':cpp,shared/'vectors_generated.h':cpp_vectors,root/'firmware/tests/ProtocolVectors.h':cpp_vectors}
+outputs={root/'firmware/engine/src/keys_generated.rs':eng, root/'firmware/engine/tests/data/vectors_generated.rs':eng_vectors, shared/'src/keys_generated.rs':rust,shared/'keys_generated.js':js,shared/'keys_generated.h':cpp,shared/'vectors_generated.h':cpp_vectors}
 # The RP2040 sketch is the only firmware target: its input/ and platform/USB
 # sources are hand authored, so nothing else is generated per board.
 for path,content in outputs.items():

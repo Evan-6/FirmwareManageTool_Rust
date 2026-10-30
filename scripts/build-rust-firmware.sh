@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build the pure-Rust XIAO RP2040 firmware and package it as UF2.
 #
-# Nothing here needs the Arduino toolchain: the boot2 stage comes from
-# embassy-rp, the report descriptors come from scripts/gen-usb-descriptors.py,
-# and UF2 packaging is done by scripts/elf2uf2.py.
+# Nothing here needs the Arduino toolchain: boot2 comes from embassy-rp, the
+# report descriptors are pinned by firmware/app/tests/descriptors.rs, and UF2
+# packaging is the same Rust code the GUI uses (`uf2pack`).
 set -euo pipefail
 
 # Windows-native tools (python, cargo) do not understand MSYS paths, so resolve
@@ -21,15 +21,17 @@ for candidate in "${PYTHON:-}" python3 python; do
         break
     fi
 done
-[ -n "$python_bin" ] || { echo 'no working python interpreter found' >&2; exit 1; }
+[ -n "$python_bin" ] || echo 'no working python: 跳過 footprint 報告' >&2
 
-"$python_bin" "$root/scripts/gen-usb-descriptors.py" --check
 rustup target list --installed | grep -qx "$target" || rustup target add "$target"
 
 cargo build --manifest-path "$app/Cargo.toml" --$profile --target "$target" --features hardware
 
 elf="$app/target/$target/$profile/xiao-firmware"
 uf2="$app/target/$target/$profile/xiao-firmware.uf2"
-"$python_bin" "$root/scripts/elf2uf2.py" "$elf" "$uf2"
-"$python_bin" "$root/scripts/elf-size.py" "$elf"
+cargo run --quiet --manifest-path "$root/Cargo.toml" --$profile --no-default-features \
+    --bin uf2pack -- "$elf" "$uf2"
+if [ -n "$python_bin" ]; then
+    "$python_bin" "$root/scripts/elf-size.py" "$elf"
+fi
 echo "uf2: $uf2"

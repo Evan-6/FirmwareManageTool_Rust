@@ -31,7 +31,6 @@ jobs:
           components: rustfmt
       - run: cargo test --locked --workspace --no-default-features
       - run: python3 scripts/sync-input-protocol.py --check
-      - run: bash scripts/test-rp2040.sh
       # Keeps the Rust engine honest: it must build for the RP2040 core without std.
       - run: rustup target add thumbv6m-none-eabi
       - run: cargo build --locked -p firmware-engine --release --target thumbv6m-none-eabi
@@ -44,8 +43,6 @@ jobs:
         with:
           targets: thumbv6m-none-eabi
           components: rustfmt, clippy
-      - name: Report descriptors must still match the C++ sketch and the golden
-        run: python3 scripts/gen-usb-descriptors.py --check
       - name: Adapter tests (mock transport, host)
         run: cargo test --locked --manifest-path firmware/app/Cargo.toml
       - name: Lint the firmware for the real target
@@ -58,15 +55,3 @@ jobs:
         with:
           name: xiao-firmware-rust
           path: firmware/app/target/thumbv6m-none-eabi/release/*.uf2
-
-  rp2040:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
-      - name: Install the pinned core and library
-        run: |
-          arduino-cli core update-index --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
-          arduino-cli core install rp2040:rp2040@6.2.0 --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
-          arduino-cli lib install "Adafruit NeoPixel@1.15.5"
-      - run: arduino-cli compile --fqbn rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb firmware/boards/rp2040

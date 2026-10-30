@@ -15,6 +15,9 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Clippy failed.' }
         & cargo test --locked --workspace --target x86_64-pc-windows-msvc --all-targets
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
+        # firmware/app is its own workspace (no_std plus a thumbv6m binary).
+        & cargo test --locked --manifest-path firmware/app/Cargo.toml
+        if ($LASTEXITCODE -ne 0) { throw 'Firmware tests failed.' }
     }
     & cargo build --locked --release --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }

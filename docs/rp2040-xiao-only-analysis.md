@@ -275,3 +275,22 @@ Flash 差距主要是 Arduino core 與 TinyUSB 不再被連進來。**還沒有 
 | `arm-none-eabi-size` 依賴 | `scripts/elf-size.py`（純 Python） |
 | RP2040 沒有 atomic RMW | `AtomicU16::fetch_add` 在此 target 不存在，改 critical-section `Cell<Flags>` |
 | `Runtime::feature` 掛在泛型 struct 上 | 改呼叫 `wire::feature`，避免型別推導失敗 |
+
+## 7. C++ 全部移除（2026-10-31）
+
+實機驗證通過後，這個分支不再保留 C++：
+
+| 刪除 | 內容 |
+| --- | --- |
+| `firmware/boards/rp2040/` | 整個 sketch：`rp2040.ino`、`Firmware.cpp`、`src/input/`（引擎）、`src/platform/`（USB／LED／bootloader）、`src/runtime/` |
+| `firmware/tests/` | `rp2040_test.cpp`、`rp2040_engine_test.cpp`、`engine_trace.cpp`、`Rp2040UsbGolden.h`、`ProtocolVectors.h`、`stubs/`（A/B 用的 golden trace 移到 `firmware/engine/tests/data/`） |
+| `scripts/test-rp2040.sh` | 只跑 C++ 測試與 A/B diff |
+| `scripts/gen-usb-descriptors.py` | 唯一的用途是別和 C++ descriptor 漂移；descriptor 改由 `firmware/app/tests/descriptors.rs` 以雜湊釘住 |
+| `src/firmware.rs` 的 arduino-cli 路徑 | `ensure_cli`／`write_cli_config`／`copy_tree`／`find_uf2`／FQBN／CORE 全部移除，改為 `cargo build` + `uf2pack` |
+| CI `rp2040` job | arduino-cli core 安裝與 sketch 編譯 |
+
+連帶影響：
+
+- GUI 燒錄只要求 Rust 工具鏈（`cargo` + `thumbv6m-none-eabi`），不再需要 winget／arduino-cli／網路下載 core。
+- `UploadConfig.cli_path` 改名 `cargo_path`（保留 `cli_path` serde alias，舊設定仍可讀）。
+- UF2 打包只有一份實作：`src/uf2.rs`（GUI 與 `scripts/build-rust-firmware.sh` 共用），`scripts/elf2uf2.py` 刪除。

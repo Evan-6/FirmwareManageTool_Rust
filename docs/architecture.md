@@ -50,8 +50,10 @@ QPC 計時包含 Rust 主機送出命令的 session 處理、USB 寫入、韌體
 P95／P99 使用 nearest-rank；標準差使用 n−1，單樣本不計。
 
 燒錄先編譯再進 bootloader。自動重啟已選取 runtime 時，排除重啟前已存在的
-bootloader，避免自動選到另一台板子。GUI 直接呼叫 arduino-cli，不呼叫舊 PowerShell
-上傳腳本，也不依賴 runtime CDC touch。GUI 複製確切 sketch 的 UF2，任何 OS 複製錯誤保留為失敗，之後再驗證 runtime hello。
+bootloader，避免自動選到另一台板子。GUI 直接呼叫 `cargo build`（`firmware/app`，target
+`thumbv6m-none-eabi`），再用同一個 Rust 程式（`src/uf2.rs`）把 ELF 打包成 UF2，
+不呼叫舊 PowerShell 上傳腳本，也不依賴 runtime CDC touch。任何 OS 複製錯誤保留為失敗，
+之後再驗證 runtime hello。
 驗證排除傳輸前已存在的 runtime 裝置，避免別台板子的 hello 被當成此次燒錄成功。
 以 v3 能力查詢與 OPEN 驗證，board id 必須是 XIAO 的 2，其他板型映像一律視為不符。
 RP2040 使用 MCU unique ID 作為 USB 序號與能力識別，未提供映像 hash 或密碼學身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
@@ -70,10 +72,16 @@ USB 按鍵／Consumer／滑鼠按鈕取聯集，位移與滾輪依接收順序�
 STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共用。
 共用 USB／佇列故障才釋放全部來源。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
 
-輸出／RX／TX 佇列深度均為 32。USB 完成依 TinyUSB 主機 ACK；USB reset 後舊 boot 回覆不能被誤當完成。序號取自 RP2040 unique ID。
+輸出／RX／TX 佇列深度均為 32。USB 完成依 embassy-usb 的 IN transfer 完成事件；USB reset 後舊 boot 回覆不能被誤當完成。序號取自 flash unique id。
 
-`Firmware.cpp` 只組裝一個 FirmwareRuntime。InputEngine 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、scheduler、TX 與 BootloaderGate 位於 `firmware/boards/rp2040/src/input/`，descriptor 位於 `src/platform/`，都是唯一來源；Arduino 正常分檔編譯，主機測試也連結正式來源。
+韌體是純 Rust：`firmware/app/src/main.rs` 只組裝一個 embassy USB device 與一個 `Runtime`。
+`InputEngine` 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、
+scheduler、TX 與 BootloaderGate 位於 `firmware/engine/src/`，descriptor 凍結在
+`firmware/app/src/usb_descriptors.rs` 並由測試釘住，都是唯一來源；主機測試直接跑同一份引擎。
 
-平台層持有 TinyUSB／Pico RX queue／原子 callback 通知，core 1 只讀發布的 LED 狀態。重啟入口為 RP2040 watchdog reboot 到 BOOTSEL；gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
+`firmware/app/src/runtime.rs` 以 `Transport` trait 隔開 USB 與引擎：`Runtime::step` 依序處理
+reset／RX 故障、最多 4 個封包、最多 1 個輸入 report、vendor 完成與控制回覆、TX head、LED 與 boot gate。
+目前全部在 core 0（`Ticker::every(1 ms)`），LED 狀態已決定但尚未驅動 WS2812。
+重啟入口為 `reset_to_usb_boot`；gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
 
 InputConfig 固定 32／32／32 容量與 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。

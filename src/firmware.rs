@@ -1,8 +1,16 @@
+//! Firmware upload: build the Rust firmware with cargo, pack it into a UF2, hand
+//! it to the RP2040 bootloader drive and verify the device comes back.
+//!
+//! Nothing here needs the Arduino toolchain. The only external requirement is a
+//! Rust toolchain with the `thumbv6m-none-eabi` target; `skip_dependencies`
+//! avoids even the `rustup target add` when the machine already has it.
+
 use crate::{
     cancel::Cancellation,
     hid::{self, Device},
     platform,
     process::{ProcessLine, ProcessRunner, ProcessSpec},
+    uf2,
 };
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -12,18 +20,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The only supported firmware target: Seeed XIAO RP2040 (arduino-pico, TinyUSB).
-pub const SKETCH: &str = "rp2040";
-pub const FQBN: &str = "rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb";
-pub const CORE: &str = "rp2040:rp2040@6.2.0";
+/// Crate name of the firmware binary this path builds.
+pub const APP_CRATE: &str = "xiao-firmware";
+/// Only supported firmware target: Seeed XIAO RP2040 (Cortex-M0+).
+pub const TARGET: &str = "thumbv6m-none-eabi";
+/// Feature that turns on the embassy USB device; without it the crate is a lib.
+pub const FEATURES: &str = "hardware";
 /// Feature `board` id reported by the XIAO firmware build.
 pub const BOARD_ID: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UploadConfig {
-    pub cli_path: String,
+    /// Explicit `cargo.exe`; empty means "look on PATH".
+    #[serde(alias = "cli_path")]
+    pub cargo_path: String,
+    /// Firmware root (the folder that contains `app/`); empty means the shipped one.
     pub firmware_path: String,
+    /// Skip `rustup target add` when the target is known to be installed.
     pub skip_dependencies: bool,
     pub auto_bootloader: bool,
     pub boot_target: String,
@@ -31,7 +45,7 @@ pub struct UploadConfig {
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
-            cli_path: String::new(),
+            cargo_path: String::new(),
             firmware_path: String::new(),
             skip_dependencies: false,
             auto_bootloader: true,
@@ -40,15 +54,22 @@ impl Default for UploadConfig {
     }
 }
 impl UploadConfig {
-    pub fn fqbn(&self) -> &'static str {
-        FQBN
-    }
     pub fn sources(&self) -> PathBuf {
         if self.firmware_path.trim().is_empty() {
             platform::firmware_dir()
         } else {
             PathBuf::from(&self.firmware_path)
         }
+    }
+    pub fn app(&self) -> PathBuf {
+        self.sources().join("app")
+    }
+    pub fn elf(&self) -> PathBuf {
+        self.app()
+            .join("target")
+            .join(TARGET)
+            .join("release")
+            .join(APP_CRATE)
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,110 +92,121 @@ pub trait UploadObserver {
     fn progress(&mut self, stage: usize, message: &str);
     fn choose_target(&mut self, candidates: Vec<String>, cancel: &Cancellation) -> Result<String>;
 }
-struct Cli<'a, R: ProcessRunner> {
-    runner: &'a R,
-    program: PathBuf,
-    config: PathBuf,
+
+fn args(items: &[&str]) -> Vec<OsString> {
+    items.iter().map(OsString::from).collect()
 }
-impl<R: ProcessRunner> Cli<'_, R> {
-    fn run(
-        &self,
-        args: Vec<OsString>,
-        timeout: Duration,
-        cancel: &Cancellation,
-        observer: &mut dyn UploadObserver,
-    ) -> Result<String> {
-        let mut full = vec!["--config-file".into(), self.config.as_os_str().into()];
-        full.extend(args);
-        observer.log(format!(
-            "arduino-cli {}",
-            full.iter()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        let result = self.runner.run(
-            &ProcessSpec {
-                program: self.program.clone(),
-                args: full,
-                timeout,
-            },
-            cancel,
-            &mut |line: ProcessLine| observer.log(format!("{:?}: {}", line.stream, line.text)),
-        )?;
-        result.check()?;
-        Ok(result.stdout)
-    }
-}
-fn yaml_string(path: &Path) -> Result<String> {
-    let path = path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("路徑不是有效 Unicode"))?;
-    Ok(serde_json::to_string(path)?) // JSON quoted strings are valid YAML scalars.
-}
-pub fn write_cli_config(path: &Path, data: &Path, user: &Path) -> Result<()> {
-    let downloads = data.join("staging");
-    std::fs::create_dir_all(&downloads)?;
-    std::fs::write(
-        path,
-        format!(
-            "directories:\n  data: {}\n  downloads: {}\n  user: {}\nboard_manager:\n  additional_urls:\n    - https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json\n",
-            yaml_string(data)?,
-            yaml_string(&downloads)?,
-            yaml_string(user)?
-        ),
+
+fn run_tool<R: ProcessRunner>(
+    runner: &R,
+    program: &Path,
+    arguments: Vec<OsString>,
+    timeout: Duration,
+    cancel: &Cancellation,
+    observer: &mut dyn UploadObserver,
+) -> Result<String> {
+    observer.log(format!(
+        "{} {}",
+        program.display(),
+        arguments
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
+    ));
+    let result = runner.run(
+        &ProcessSpec {
+            program: program.to_path_buf(),
+            args: arguments,
+            timeout,
+        },
+        cancel,
+        &mut |line: ProcessLine| observer.log(format!("{:?}: {}", line.stream, line.text)),
     )?;
-    Ok(())
+    result.check()?;
+    Ok(result.stdout)
 }
-fn ensure_cli<R: ProcessRunner>(
+
+/// `cargo`, preferring an explicit setting.
+fn ensure_cargo(config: &UploadConfig) -> Result<PathBuf> {
+    if !config.cargo_path.trim().is_empty() {
+        let path = PathBuf::from(config.cargo_path.trim());
+        ensure!(path.is_file(), "指定的 cargo 不存在：{}", path.display());
+        return Ok(path);
+    }
+    #[cfg(windows)]
+    let name = "cargo.exe";
+    #[cfg(not(windows))]
+    let name = "cargo";
+    platform::locate_program(name)
+        .ok_or_else(|| anyhow::anyhow!("找不到 cargo；請安裝 Rust 工具鏈，或在設定指定 cargo 路徑"))
+}
+
+/// rustup normally sits beside cargo; without it the target cannot be added.
+fn rustup_beside(cargo: &Path) -> Option<PathBuf> {
+    let dir = cargo.parent()?;
+    #[cfg(windows)]
+    let name = "rustup.exe";
+    #[cfg(not(windows))]
+    let name = "rustup";
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Builds `firmware/app` for the RP2040 and writes the packed UF2 into `root`.
+fn build_firmware<R: ProcessRunner>(
     config: &UploadConfig,
     runner: &R,
     cancel: &Cancellation,
     observer: &mut dyn UploadObserver,
+    root: &Path,
 ) -> Result<PathBuf> {
-    if !config.cli_path.trim().is_empty() {
-        let path = PathBuf::from(config.cli_path.trim());
-        ensure!(path.is_file(), "指定的 arduino-cli 不存在");
-        return Ok(path);
+    let manifest = config.app().join("Cargo.toml");
+    ensure!(
+        manifest.is_file(),
+        "韌體資料夾不完整（缺 app/Cargo.toml）：{}",
+        config.sources().display()
+    );
+    observer.progress(1, "檢查 Rust 工具鏈");
+    let cargo = ensure_cargo(config)?;
+    if !config.skip_dependencies {
+        match rustup_beside(&cargo) {
+            Some(rustup) => {
+                run_tool(
+                    runner,
+                    &rustup,
+                    args(&["target", "add", TARGET]),
+                    Duration::from_secs(600),
+                    cancel,
+                    observer,
+                )?;
+            }
+            None => observer.log(format!(
+                "找不到 rustup，跳過 target 安裝（假設 {TARGET} 已安裝）"
+            )),
+        }
     }
-    if let Some(path) = platform::locate_program("arduino-cli.exe") {
-        return Ok(path);
-    }
-    let winget = platform::locate_program("winget.exe").ok_or_else(|| {
-        anyhow::anyhow!(
-            "找不到 arduino-cli 與 winget，請安裝 App Installer 或指定 arduino-cli 路徑"
-        )
-    })?;
-    observer.log("缺少 arduino-cli，正在透過 winget 自動安裝…".into());
-    let args = [
-        "install",
-        "--id",
-        "ArduinoSA.CLI",
-        "--exact",
-        "--silent",
-        "--accept-source-agreements",
-        "--accept-package-agreements",
-        "--disable-interactivity",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect();
-    runner
-        .run(
-            &ProcessSpec {
-                program: winget,
-                args,
-                timeout: Duration::from_secs(900),
-            },
-            cancel,
-            &mut |line| observer.log(line.text),
-        )?
-        .check()?;
-    platform::locate_program("arduino-cli.exe")
-        .ok_or_else(|| anyhow::anyhow!("安裝完成但找不到 arduino-cli；請在設定指定執行檔路徑"))
-}
-fn args(items: &[&str]) -> Vec<OsString> {
-    items.iter().map(OsString::from).collect()
+    observer.progress(2, "編譯 Rust 韌體");
+    let mut build = args(&["build", "--release", "--target", TARGET, "--manifest-path"]);
+    build.push(manifest.into_os_string());
+    build.extend(args(&["--features", FEATURES]));
+    run_tool(
+        runner,
+        &cargo,
+        build,
+        Duration::from_secs(900),
+        cancel,
+        observer,
+    )?;
+
+    let elf = config.elf();
+    ensure!(elf.is_file(), "編譯成功但找不到 ELF：{}", elf.display());
+    let image = uf2::pack(&std::fs::read(&elf)?)?;
+    observer.log(format!("UF2：{} 個區塊", uf2::blocks(&image)));
+    std::fs::create_dir_all(root)?;
+    let out = root.join("Firmware.uf2");
+    std::fs::write(&out, &image).with_context(|| format!("寫入 UF2 失敗：{}", out.display()))?;
+    Ok(out)
 }
 
 pub fn upload<R: ProcessRunner>(
@@ -220,58 +252,7 @@ fn transfer_at<R: ProcessRunner>(
     root: &Path,
 ) -> Result<Vec<String>> {
     cancel.check()?;
-    let sketch = config.sources().join("boards").join(SKETCH);
-    ensure!(
-        sketch.join(format!("{SKETCH}.ino")).is_file() && sketch.join("Firmware.cpp").is_file(),
-        "韌體資料夾不完整：{}",
-        sketch.display()
-    );
-    observer.progress(1, "檢查工具與安裝依賴");
-    let program = ensure_cli(config, runner, cancel, observer)?;
-    std::fs::create_dir_all(root)?;
-    // arduino-cli builds only inside a sketch folder, so the shipped sketch is
-    // copied to the work directory instead of being compiled in place.
-    let working = root.join("sketches").join(SKETCH);
-    copy_tree(&sketch, &working)?;
-    let cli_config = root.join(format!("arduino-{SKETCH}.yaml"));
-    write_cli_config(&cli_config, &root.join("ArduinoData"), &working)?;
-    let cli = Cli {
-        runner,
-        program,
-        config: cli_config,
-    };
-    let install_limit = Duration::from_secs(900);
-    if !config.skip_dependencies {
-        cli.run(
-            args(&["core", "update-index"]),
-            install_limit,
-            cancel,
-            observer,
-        )?;
-        cli.run(
-            args(&["core", "install", CORE]),
-            install_limit,
-            cancel,
-            observer,
-        )?;
-        if !working.join("libraries/Adafruit_NeoPixel").is_dir() {
-            cli.run(
-                args(&["lib", "install", "Adafruit NeoPixel"]),
-                install_limit,
-                cancel,
-                observer,
-            )?;
-        }
-    }
-    observer.progress(2, "編譯韌體");
-    let build = root.join("build").join(SKETCH);
-    std::fs::create_dir_all(&build)?;
-    let mut compile = args(&["compile", "--fqbn", FQBN, "--clean", "--build-path"]);
-    compile.push(build.as_os_str().into());
-    compile.push(working.as_os_str().into());
-    cli.run(compile, Duration::from_secs(600), cancel, observer)?;
-    // Resolve the exact sketch artifact before asking the device to reboot.
-    let uf2 = find_uf2(&build, SKETCH)?;
+    let uf2 = build_firmware(config, runner, cancel, observer, root)?;
     observer.progress(3, "進入並選擇 bootloader");
     let explicit = !config.boot_target.trim().is_empty();
     // If rebooting a selected runtime device, never auto-select a UF2 drive that
@@ -309,42 +290,21 @@ fn transfer_at<R: ProcessRunner>(
         wait_drives(cancel, observer, &previous_targets)?
     };
     cancel.check()?;
-    // Devices already in runtime at this point are unrelated to this bootloader transfer.
-    // Excluding them prevents an existing board's hello from falsely verifying another board.
+    // Devices already in runtime at this point are unrelated to this bootloader
+    // transfer. Excluding them prevents an existing board's hello from falsely
+    // verifying another board.
     let existing_paths = hid::enumerate()?.into_iter().map(|d| d.path).collect();
     observer.progress(4, "傳輸韌體");
-    let root = PathBuf::from(&target);
+    let drive = PathBuf::from(&target);
     ensure!(
-        root.join("INFO_UF2.TXT").is_file(),
+        drive.join("INFO_UF2.TXT").is_file(),
         "指定位置不是 UF2 bootloader 磁碟"
     );
-    copy_uf2(&uf2, &root.join("Firmware.uf2"), cancel)?;
+    copy_uf2(&uf2, &drive.join("Firmware.uf2"), cancel)?;
     observer.log("UF2 複製完成，等待 runtime 驗證".into());
     Ok(existing_paths)
 }
-fn copy_tree(source: &Path, target: &Path) -> Result<()> {
-    std::fs::create_dir_all(target)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        let dest = target.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_tree(&path, &dest)?;
-        } else if entry.file_type()?.is_file() {
-            std::fs::copy(path, dest)?;
-        }
-    }
-    Ok(())
-}
-pub fn find_uf2(build: &Path, sketch: &str) -> Result<PathBuf> {
-    let artifact = build.join(format!("{sketch}.ino.uf2"));
-    ensure!(
-        artifact.is_file(),
-        "找不到本次 sketch 的 UF2：{}",
-        artifact.display()
-    );
-    Ok(artifact)
-}
+
 pub fn copy_uf2(source: &Path, target: &Path, cancel: &Cancellation) -> Result<()> {
     use std::io::{Read, Write};
     let mut input = std::fs::File::open(source)?;
@@ -479,19 +439,15 @@ mod tests {
         assert!(verify_capability(3).is_err());
     }
     #[test]
-    fn there_is_exactly_one_fqbn_and_core() {
+    fn the_build_is_pinned_to_one_crate_and_target() {
         let config = UploadConfig::default();
-        assert_eq!(
-            config.fqbn(),
-            "rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb"
-        );
-        assert_eq!(CORE, "rp2040:rp2040@6.2.0");
-    }
-    #[test]
-    fn unicode_and_spaces_in_yaml() {
-        assert_eq!(
-            yaml_string(Path::new("C:\\中文 空白\\firmware")).unwrap(),
-            r#""C:\\中文 空白\\firmware""#
+        assert_eq!(TARGET, "thumbv6m-none-eabi");
+        assert_eq!(APP_CRATE, "xiao-firmware");
+        assert!(config.app().ends_with("firmware/app"));
+        assert!(
+            config
+                .elf()
+                .ends_with("firmware/app/target/thumbv6m-none-eabi/release/xiao-firmware")
         );
     }
     #[test]
@@ -566,32 +522,87 @@ mod tests {
         }
     }
     #[test]
-    fn dependency_and_compile_failures_stop_before_reboot_or_upload() {
-        for failure in ["core install", "compile"] {
-            let root = crate::test_support::Temp::new();
-            let config = UploadConfig {
-                cli_path: std::env::current_exe().unwrap().display().to_string(),
-                ..Default::default()
-            };
-            let runner = FakeRunner {
-                fail_on: failure.into(),
+    fn a_failing_build_leaves_no_uf2_behind() {
+        let root = crate::test_support::Temp::new();
+        let config = UploadConfig {
+            cargo_path: std::env::current_exe().unwrap().display().to_string(),
+            firmware_path: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("firmware")
+                .display()
+                .to_string(),
+            ..Default::default()
+        };
+        let runner = FakeRunner {
+            fail_on: "--features".into(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let result = build_firmware(
+            &config,
+            &runner,
+            &Cancellation::default(),
+            &mut FakeObserver::default(),
+            &root.0,
+        );
+        assert!(result.is_err());
+        assert!(!root.0.join("Firmware.uf2").exists());
+        let calls = runner.calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|args| args.iter().any(|a| a == "build")),
+            "the build must be attempted"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|args| args.iter().any(|a| a == "--features"))
+                .all(|args| args.iter().any(|a| a == "build")),
+            "only the build itself may carry --features"
+        );
+    }
+    #[test]
+    fn a_cargo_path_that_does_not_exist_is_rejected() {
+        let root = crate::test_support::Temp::new();
+        let config = UploadConfig {
+            cargo_path: root.0.join("no-cargo.exe").display().to_string(),
+            firmware_path: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("firmware")
+                .display()
+                .to_string(),
+            ..Default::default()
+        };
+        let error = build_firmware(
+            &config,
+            &FakeRunner {
+                fail_on: String::new(),
                 calls: std::sync::Mutex::new(Vec::new()),
-            };
-            let result = transfer_at(
-                &config,
-                None,
-                &runner,
-                &Cancellation::default(),
-                &mut FakeObserver::default(),
-                &root.0,
-            );
-            assert!(result.is_err());
-            let calls = runner.calls.lock().unwrap();
-            assert!(!calls.iter().any(|args| args.iter().any(|a| a == "upload")));
-            if failure == "core install" {
-                assert!(!calls.iter().any(|args| args.iter().any(|a| a == "compile")));
-            }
-        }
+            },
+            &Cancellation::default(),
+            &mut FakeObserver::default(),
+            &root.0,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("找不到") || format!("{error:#}").contains("不存在"));
+    }
+    #[test]
+    fn a_missing_firmware_folder_is_reported_before_building() {
+        let root = crate::test_support::Temp::new();
+        let config = UploadConfig {
+            cargo_path: std::env::current_exe().unwrap().display().to_string(),
+            firmware_path: root.0.join("nowhere").display().to_string(),
+            ..Default::default()
+        };
+        let error = transfer_at(
+            &config,
+            None,
+            &FakeRunner {
+                fail_on: String::new(),
+                calls: std::sync::Mutex::new(Vec::new()),
+            },
+            &Cancellation::default(),
+            &mut FakeObserver::default(),
+            &root.0,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("app/Cargo.toml"));
     }
     #[test]
     fn uf2_destination_error_retains_os_error_and_cancel_does_not_report_success() {

@@ -1,5 +1,7 @@
 # 驗證紀錄
 
+> **2026-10-31：** 這份文件的 C++／Arduino／TinyUSB 章節現在全部是歷史紀錄。`firmware/boards/rp2040/` 與 `firmware/tests/` 已從 `rp2040-xiao-only` 分支刪除，現行韌體是 `firmware/app`（純 Rust）＋`firmware/engine`，驗證方式見 `firmware/app/README.md`。
+
 日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 RP2040 或 Windows USB 實機。
 
 > 分支 `rp2040-xiao-only` 只保留 Seeed XIAO RP2040。以下 Leonardo／Pico／`firmware/common/` 的紀錄是移除前的歷史驗證，不代表目前建置內容；XIAO 相關結論仍適用。

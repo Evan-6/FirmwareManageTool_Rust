@@ -1,6 +1,7 @@
 # firmware-engine（XIAO RP2040 引擎的 Rust 移植）
 
-`firmware/boards/rp2040/src/input/` 的 C++ 引擎的逐行為移植，供最終取代 C++ 實作。
+原本是 `firmware/boards/rp2040/src/input/` 那個 C++ 引擎的逐行為移植；那個 C++ 實作連同整個
+Arduino sketch 已經在這個分支刪除，這裡就是唯一引擎。
 `no_std`、無 heap、無浮點、`#![forbid(unsafe_code)]`，時間一律由呼叫端傳入 `now_ms`。
 
 ## 模組對照
@@ -25,33 +26,32 @@
 ```sh
 cargo test -p firmware-engine                                  # 主機行為測試
 cargo build -p firmware-engine --release --target thumbv6m-none-eabi   # no_std 目標（RP2040 = Cortex-M0+）
-bash scripts/test-rp2040.sh                                   # C++ 引擎測試 + A/B trace diff
+cargo test -p firmware-engine --test trace                     # golden trace
 ```
 
 三層證據：
 
-1. **行為**：`tests/behaviour.rs` 的 11 個案例逐條對應
-   `firmware/tests/rp2040_engine_test.cpp`（獨立實例、租約／過期邊界、計數 wrap、TX／位移溢位、
-   boot generation、peer release、LED、boot gate、notices）。
+1. **行為**：`tests/behaviour.rs` 的 11 個案例（獨立實例、租約／過期邊界、計數 wrap、TX／位移溢位、
+   boot generation、peer release、LED、boot gate、notices）；原始案例是逐條照被刪除的 C++ 引擎測試寫的。
 2. **跨語言 wire**：`tests/golden.rs` 把 `shared/input-protocol/vectors.json` 的主機封包
    （含 report id 12 的完整 64 bytes）餵給 Rust 引擎，檢查接受的封包、NKRO／Consumer 輸出位元、
    OPEN／BARRIER 回覆。
-3. **逐位元組 A/B**：`firmware/tests/engine_trace.cpp` 與 `tests/trace.rs` 執行同一份腳本
-   （2 個 session、按鍵／位移／按鈕、屏障、STATUS、RELEASE、50/51 ms 過期邊界、全域故障、
-   boot 請求、租約到期），輸出 `I`／`R`／`S` 行並比對 `firmware/tests/engine_trace.golden`。
-   腳本故意破壞測試驗證過：把鍵盤 report 長度 29 → 28、或 `STALE_MS` 50 → 49，都會在第 1／23 行失敗。
+3. **golden trace**：`tests/trace.rs` 執行一段固定腳本（2 個 session、按鍵／位移／按鈕、屏障、STATUS、
+   RELEASE、50/51 ms 過期邊界、全域故障、boot 請求、租約到期），輸出 `I`／`R`／`S` 行並比對
+   `tests/data/engine_trace.golden`。這份 golden 就是 C++ 引擎被刪除前逐位元組相同的那一份，
+   因此它同時是回歸測試與歷史紀錄。腳本故意破壞測試驗證過：鍵盤 report 長度 29 → 28、
+   或 `STALE_MS` 50 → 49，都會在第 1／23 行失敗。
 
 ### 更新 golden
 
-只有**刻意的行為變更**才可重生 golden，且必須同時更新 C++ 與 Rust 的腳本：
+只有**刻意的行為變更**才可重生 golden，而且要在 commit message 說明為什麼舊行為是錯的：
 
 ```sh
-c++ -std=c++17 -Ifirmware/tests/stubs firmware/boards/rp2040/src/input/*.cpp \
-    firmware/tests/engine_trace.cpp -o /tmp/engine-trace && /tmp/engine-trace > firmware/tests/engine_trace.golden
+cargo test -p firmware-engine --test trace -- --nocapture > /tmp/trace.txt
+diff -u firmware/engine/tests/data/engine_trace.golden /tmp/trace.txt
 ```
 
-`scripts/test-rp2040.sh` 會重建 C++ 端並以 `diff --strip-trailing-cr` 比對，確保 golden 沒有被
-單邊修改。
+C++ 端已經不存在，沒有「兩邊一起改」這回事；golden 異動就代表裝置行為改變。
 
 ## 記憶體
 
@@ -69,9 +69,12 @@ Rust 用 `tests/sizes.rs`）：
 Sketch 目前總靜態 RAM 為 29,712 bytes（含 Arduino／TinyUSB），所以引擎層的記憶體風險已排除；
 換成 Rust USB 時要重新量的是 USB stack 與 async futures，不是引擎。
 
-## 尚未移植
+## 已經接上的部分
 
-- USB 傳輸層（TinyUSB、Pico SDK queue、callback 橋接）：仍在 `src/platform/`。
-- NeoPixel 渲染（core 1）：仍在 `src/platform/StatusLedRenderer.cpp`。
-- 韌體入口與 `FirmwareRuntime` 主迴圈：目前仍由 C++ 組裝；若要直接跑 Rust 引擎，
-  需要一個 `#[no_mangle] extern "C"` 薄層或把 runtime 一併移植。
+- USB 傳輸層與韌體入口：`firmware/app`（embassy-rp／embassy-usb，`src/main.rs`）。
+- runtime 主迴圈：`firmware/app/src/runtime.rs` 的 `Transport` trait + `Runtime::step`，
+  與原本 C++ `FirmwareRuntime::loop` 同一個階段順序。
+
+## 尚未接上的部分
+
+- NeoPixel 渲染（原本在 C++ 的 core 1）：`LedState` 已由引擎產生，但沒有人驅動 WS2812。

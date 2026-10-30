@@ -309,16 +309,16 @@ impl App {
     }
     fn firmware_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("韌體燒錄");
-        ui.label("固定目標：Seeed XIAO RP2040（arduino-pico、TinyUSB、Vendor HID v3）。");
+        ui.label("固定目標：Seeed XIAO RP2040（純 Rust：embassy USB、Vendor HID v3）。");
         ui.add_enabled_ui(!self.busy, |ui| {
             text_field(
                 ui,
-                "arduino-cli 路徑（空白＝自動偵測／安裝）",
-                &mut self.settings.upload.cli_path,
+                "cargo 路徑（空白＝從 PATH 找）",
+                &mut self.settings.upload.cargo_path,
             );
             text_field(
                 ui,
-                "firmware 路徑（空白＝隨附資料夾）",
+                "firmware 根目錄（空白＝隨附資料夾，需含 app/）",
                 &mut self.settings.upload.firmware_path,
             );
             text_field(
@@ -332,11 +332,15 @@ impl App {
             );
             ui.checkbox(
                 &mut self.settings.upload.skip_dependencies,
-                "跳過 Core／Library 安裝（依賴已準備好）",
+                "跳過 rustup target 安裝（已安裝 thumbv6m-none-eabi）",
             );
-            ui.monospace(format!("FQBN: {}", self.settings.upload.fqbn()));
+            ui.monospace(format!(
+                "{} ({}) ← firmware/app",
+                crate::firmware::TARGET,
+                crate::firmware::APP_CRATE
+            ));
             ui.label("無法由 HID 進入下載模式時，請按住 BOOTSEL 再上電。");
-            if ui.button("開始編譯並燒錄").clicked() {
+            if ui.button("編譯並燒錄").clicked() {
                 let _ = self.settings.save();
                 self.submit(AppCommand::Upload(self.settings.upload.clone()));
             }

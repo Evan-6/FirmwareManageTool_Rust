@@ -10,6 +10,7 @@ pub mod platform;
 pub mod process;
 pub mod protocol;
 pub mod settings;
+pub mod uf2;
 
 #[cfg(test)]
 pub(crate) mod test_support {
