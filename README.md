@@ -67,6 +67,7 @@ Linux 開發執行原始碼檢查、測試及 XIAO 韌體編譯，不產生 Wind
 Linux GUI 字型使用系統 Noto CJK；Windows 使用系統 Microsoft JhengHei。
 
 架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。
+本分支的冗餘盤點與原生 Rust 遷移評估見 [docs/rp2040-xiao-only-analysis.md](docs/rp2040-xiao-only-analysis.md)。
 
 Linux 離線介面預覽（尚未連接硬體）：
 
