@@ -187,7 +187,7 @@ descriptor 與 Feature 佈局必須逐 byte 對上 `firmware/tests/Rp2040UsbGold
 | --- | --- | --- | --- |
 | 1. XIAO-only 清理 | 已回收 14,420 行 | 無 | 本文件第 1 節 |
 | 2. ~~engine → `no_std` Rust crate，與 C++ 並存 A/B~~ **已完成** | 尚未刪除任何 C++（等切換後才回收） | 低 | 11 行為測試 + vectors + 37 行 trace 逐位元組一致 |
-| 2b. runtime／USB／LED 接上 Rust 引擎，C++ 引擎退役 | 992 行 C++、測試替身、PowerShell 封包實作 | 中高（completion、雙核、NeoPixel、BOOTSEL） | 現有 C++ runtime 測試改寫為 Rust + 實機 |
+| 2b. runtime／USB／LED 接上 Rust 引擎，C++ 引擎退役 **進行中（engine＋runtime＋USB 已可編譯出 UF2）** | 992 行 C++、測試替身、PowerShell 封包實作 | 中高（completion、雙核、NeoPixel、BOOTSEL） | 現有 C++ runtime 測試改寫為 Rust（5 個 adapter 測試已綠） + 實機 |
 | 3. USB／LED／reboot 改 Rust，engine 接到 `usb-device` | TinyUSB 與 Arduino 相關全部、arduino-cli 佈建 | 中高（completion、雙核、NeoPixel、BOOTSEL） | golden bytes + 實機列舉／延遲量測 |
 | 4. 拿掉 arduino-cli／winget／sketch 複製 | 約 260 行 + 使用者首次燒錄的網路依賴 | 低 | `cargo build` + UF2 複製流程 |
 | 5. hidapi → windows-sys | C 依賴 | 中（列舉、timeout） | 實機列舉／延遲測試對照 |
@@ -200,3 +200,54 @@ descriptor 與 Feature 佈局必須逐 byte 對上 `firmware/tests/Rp2040UsbGold
 - 本機 `arduino-cli` 的 rp2040 core 是 6.2.0、NeoPixel 1.15.5、ARM GCC 由 core 提供；版本組合與
   `docs/validation.md` 歷史紀錄相同，但 Flash／RAM 數字有差異（見第 1 節註記），尚未釐清。
 - GUI 燒錄流程只用假 `ProcessRunner` 測過（相依／編譯失敗會在上傳前停止），沒有真的走完「編譯→BOOTSEL→複製 UF2→hello 驗證」。
+
+## 6. 3.B 進度：純 Rust firmware 已可編譯、尚未上機
+
+`firmware/app/`（crate `xiao-firmware`）把 engine、runtime、USB device、boot2 與 UF2 打包全部換成 Rust，
+產出物不含 Arduino core、TinyUSB 或任何 C++。
+
+```
+USB host
+  ├─ interface 0: input HID  (NKRO id 2 / consumer 5 / mouse 3)
+  └─ interface 1: vendor HID (OUT 12 / IN 13 / Feature 14)
+       ↓ embassy-usb（HID class，64-byte，1 ms poll）
+  Runtime::step（六階段，與 C++ `FirmwareRuntime::loop` 同序）
+       ↓
+  firmware-engine（no_std、無 heap、固定容量）
+```
+
+### 6.1 量測（release，無 LED、單核）
+
+| 映像 | Flash | RAM |
+| --- | --- | --- |
+| C++ sketch（arduino-pico 6.2.0 + TinyUSB） | 90,792 B | 29,712 B |
+| Rust `xiao-firmware` | 28,008 B | 17,804 B |
+
+RAM 幾乎都是 engine（`InputEngine` 12,564 B）加 32 槽 RX 佇列（2,016 B）。
+Flash 差距主要是 Arduino core 與 TinyUSB 不再被連進來。**還沒有 NeoPixel 與 core 1**，這兩項會各吃掉一些。
+
+### 6.2 已驗證（可重跑）
+
+- `cargo test`：5 個 adapter 測試（RX 每輪 4 包上限、input report 被拒 → HID fault、
+  bus reset → failsafe + 丟棄殘留 RX、framing fault 帶錯誤數、BOOTLOADER → 120 ms gate → reboot）。
+- `cargo clippy --all-targets -D warnings`（host 與 `thumbv6m-none-eabi` 各一次）、`cargo fmt --check`。
+- `bash scripts/build-rust-firmware.sh`：descriptor `--check` → build → UF2（111 塊，首塊 `0x10000000`）→ footprint。
+- `scripts/elf2uf2.py`：picotool 因 Rust ELF 缺 `.bi_entries` ABI 而拒絕轉檔，故自己讀 program header 產 UF2；
+  `.boot2`（embassy-rp 的 W25Q080 版本）確實落在 `0x10000000`。
+
+### 6.3 尚未驗證（不要當成完成）
+
+- **沒有上機**：列舉、兩個 interface、1 ms IN 輪詢、Feature 14 讀取、LED `set_report`、BOOTSEL 重啟、
+  Windows 端延遲，全部沒測。
+- NeoPixel、core 1 尚未接；目前全在 core 0，`Ticker::every(1 ms)` 驅動。
+- 序號改由 `Flash::blocking_unique_id` 取得（與 C++ `pico_get_unique_board_id` 同源），但未在同一塊板上比對兩者輸出。
+
+### 6.4 這一輪順手清掉的冗餘
+
+| 項目 | 處理 |
+| --- | --- |
+| `grep` 才能確認的 descriptor 漂移 | `scripts/gen-usb-descriptors.py --check` 進 build 前置 |
+| picotool 對 Rust ELF 的 ABI 檢查 | `scripts/elf2uf2.py` 直接讀 ELF program header |
+| `arm-none-eabi-size` 依賴 | `scripts/elf-size.py`（純 Python） |
+| RP2040 沒有 atomic RMW | `AtomicU16::fetch_add` 在此 target 不存在，改 critical-section `Cell<Flags>` |
+| `Runtime::feature` 掛在泛型 struct 上 | 改呼叫 `wire::feature`，避免型別推導失敗 |
