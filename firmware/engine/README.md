@@ -53,6 +53,22 @@ c++ -std=c++17 -Ifirmware/tests/stubs firmware/boards/rp2040/src/input/*.cpp \
 `scripts/test-rp2040.sh` 會重建 C++ 端並以 `diff --strip-trailing-cr` 比對，確保 golden 沒有被
 單邊修改。
 
+## 記憶體
+
+靜態用量與 C++ 引擎幾乎相同（`arm-none-eabi-g++ -mcpu=cortex-m0plus -Os` 量 `sizeof`，
+Rust 用 `tests/sizes.rs`）：
+
+| 型別 | C++ | Rust |
+| --- | ---: | ---: |
+| InputState | 31 | 31 |
+| Session | 60 | 56 |
+| OutputScheduler | 10,072 | — |
+| InputEngine | 12,600 | 12,564 |
+
+`tests/sizes.rs` 會把這些值固定成斷言，結構長大就會讓 `cargo test` 失敗。
+Sketch 目前總靜態 RAM 為 29,712 bytes（含 Arduino／TinyUSB），所以引擎層的記憶體風險已排除；
+換成 Rust USB 時要重新量的是 USB stack 與 async futures，不是引擎。
+
 ## 尚未移植
 
 - USB 傳輸層（TinyUSB、Pico SDK queue、callback 橋接）：仍在 `src/platform/`。
