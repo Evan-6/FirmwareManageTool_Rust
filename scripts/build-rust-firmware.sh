@@ -12,7 +12,16 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && { pwd -W 2>/dev/null || pwd; }
 app="$root/firmware/app"
 target=thumbv6m-none-eabi
 profile=release
-python_bin="${PYTHON:-$(command -v python3 || command -v python)}"
+python_bin=""
+for candidate in "${PYTHON:-}" python3 python; do
+    [ -n "$candidate" ] || continue
+    # The Microsoft Store `python3` shim exits 0 without running anything.
+    if "$candidate" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+        python_bin="$candidate"
+        break
+    fi
+done
+[ -n "$python_bin" ] || { echo 'no working python interpreter found' >&2; exit 1; }
 
 "$python_bin" "$root/scripts/gen-usb-descriptors.py" --check
 rustup target list --installed | grep -qx "$target" || rustup target add "$target"

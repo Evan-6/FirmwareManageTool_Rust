@@ -235,12 +235,36 @@ Flash 差距主要是 Arduino core 與 TinyUSB 不再被連進來。**還沒有 
 - `scripts/elf2uf2.py`：picotool 因 Rust ELF 缺 `.bi_entries` ABI 而拒絕轉檔，故自己讀 program header 產 UF2；
   `.boot2`（embassy-rp 的 W25Q080 版本）確實落在 `0x10000000`。
 
-### 6.3 尚未驗證（不要當成完成）
+### 6.3 實機結果（2026-10-31，XIAO RP2040，序號 4250304B38353817）
 
-- **沒有上機**：列舉、兩個 interface、1 ms IN 輪詢、Feature 14 讀取、LED `set_report`、BOOTSEL 重啟、
-  Windows 端延遲，全部沒測。
+`examples/probe.rs` 走的是 GUI 相同的主機路徑，四種模式全過：
+
+| 模式 | 結果 |
+| --- | --- |
+| 預設 | Feature 14（board=2、fw=3.1.0、lease=2000 ms、poll=1 ms）→ OPEN → STATUS → 3 s HEARTBEAT → BARRIER |
+| `--keys` | 注入 `a`：`keys="a"`、`completed` 2→4、`p=1`；放開後 `keys=""`、`p=0` |
+| `--lease` | 閒置 2000 ms 後裝置回 EVENT `[5]`，session 失效 |
+| `--bootloader` | 1 秒內進入 BOOTSEL（`RPI-RP2`），重新燒錄後再列舉為 `fs=0` |
+
+對照：C++ firmware 燒錄前 `fs` 已累積到 31（其他工具留下的過期 session），Rust 版本重開機後
+`fs=0`、`hid=0`、`rx=0`、`tx=0`。
+
+實機抓到並修掉的兩個缺陷：
+
+1. **Feature 14 回 63 bytes，Windows 判為短報告**。embassy 的 `get_report` 回多少就送多少，
+   但 Windows 期待「report id + 63 bytes = 64」，因此在 `buf[0]` 寫入 id 並回傳 64；
+   TinyUSB 由堆疊補上，所以 C++ 版本沒踩到。
+2. **UF2 區塊位址未對齊 256 bytes**，RP2040 BOOTSEL 直接忽略整個檔案（檔案留在磁碟上不動）。
+   `scripts/elf2uf2.py` 改成先攤平成一張 256-byte 對齊影像再切塊。
+
+### 6.3a 尚未驗證（不要當成完成）
+
+- HID LED `set_report`（lock key）目前接受後丟棄，沒有觀察 Windows 是否真的送。
+- Windows 端延遲未與 C++ 版本對照量測。
 - NeoPixel、core 1 尚未接；目前全在 core 0，`Ticker::every(1 ms)` 驅動。
-- 序號改由 `Flash::blocking_unique_id` 取得（與 C++ `pico_get_unique_board_id` 同源），但未在同一塊板上比對兩者輸出。
+- 序號改由 `Flash::blocking_unique_id` 取得，這塊板上與 C++ 相同（4250304B38353817），但只有一個樣本。
+- Windows 拒絕對 keyboard collection 做 `ReadFile`（`ERROR_ACCESS_DENIED`），
+  輸入路徑是用裝置端計數（`keys`／`completed`）證明，沒有自動驗證「文字真的打進視窗」。
 
 ### 6.4 這一輪順手清掉的冗餘
 

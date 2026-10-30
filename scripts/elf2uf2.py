@@ -35,14 +35,21 @@ def loadable_segments(elf: bytes):
 
 
 def blocks(elf: bytes):
-    chunks = []
-    # Program headers are not guaranteed to be address-ordered; boot2 in
-    # particular can come last, so sort before emitting blocks.
-    for address, data in sorted(loadable_segments(elf), key=lambda segment: segment[0]):
-        for offset in range(0, len(data), PAYLOAD):
-            chunks.append((address + offset, data[offset:offset + PAYLOAD]))
-    if not chunks:
+    # The RP2040 BOOTSEL bootloader only consumes 256-byte aligned blocks, so
+    # flatten the flash segments into one aligned image instead of emitting each
+    # segment's own (possibly unaligned) runs. Gaps stay erased (0xFF).
+    segments = sorted(loadable_segments(elf), key=lambda segment: segment[0])
+    if not segments:
         raise SystemExit('no flash segments found; is this an RP2040 build?')
+    start = segments[0][0] & ~(PAYLOAD - 1)
+    end = max(address + len(data) for address, data in segments)
+    end = (end + PAYLOAD - 1) & ~(PAYLOAD - 1)
+    image = bytearray(bytes([0xFF]) * (end - start))
+    for address, data in segments:
+        image[address - start:address - start + len(data)] = data
+
+    chunks = [(start + offset, bytes(image[offset:offset + PAYLOAD]))
+              for offset in range(0, len(image), PAYLOAD)]
     total = len(chunks)
     for number, (address, payload) in enumerate(chunks):
         block = struct.pack('<IIIIIIII', UF2_MAGIC_START0, UF2_MAGIC_START1,
