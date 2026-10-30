@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 if (-not $IsWindows) { function chcp { param($CodePage) } }
 
-foreach ($relative in @('firmware/tools/vendor_hid_bootloader.ps1', 'firmware/boards/leonardo_avr/upload.ps1', 'firmware/boards/rp2040/upload.ps1')) {
+foreach ($relative in @('firmware/tools/vendor_hid_bootloader.ps1', 'firmware/boards/rp2040/upload.ps1')) {
     $tokens = $null
     $parseErrors = $null
     [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $projectRoot $relative), [ref]$tokens, [ref]$parseErrors) | Out-Null

@@ -1,8 +1,8 @@
 # FirmwareManageTool Rust
 
 以 Rust 2024、egui／eframe 0.36.2 與 Wgpu 重寫的 Windows 11 x64 GUI 工具。
-支援 Leonardo AVR、Seeed XIAO RP2040、Pico 及其他 arduino-pico 板型。
-Leonardo 與 RP2040 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
+目標板只有 Seeed XIAO RP2040（arduino-pico、TinyUSB）。本分支已移除 Leonardo／AVR、Pico 與其他 arduino-pico 板型。
+韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
 
 ## Windows 使用
 
@@ -10,12 +10,11 @@ Leonardo 與 RP2040 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支�
 不需要 Rust、Visual Studio 或額外的 HID driver。正式建置靜態連結 MSVC CRT。
 
 1. 在「裝置」掃描並選取 Vendor HID，再連線。多裝置不自動取第一台。
-2. 在「韌體燒錄」選實際板型，開始編譯／上傳。缺少 arduino-cli 時透過
+2. 在「韌體燒錄」直接開始編譯／上傳 XIAO 韌體（FQBN 固定）。缺少 arduino-cli 時透過
    winget 自動安裝；Core／Library 也會按板型安裝，可選擇略過已準備的依賴。
    沒有 winget 時可自行下載 arduino-cli.exe，指定完整路徑。
-3. 正常韌體沒有 COM 埠。Leonardo 只有 Caterina bootloader 使用 COM；
-   無法由 HID 重啟時按實體 reset。RP2040 請按住 BOOTSEL 上電。
-   可指定 bootloader COM／UF2 磁碟；多候選由 GUI 選擇。
+3. 正常韌體沒有 COM 埠。無法由 HID 重啟時請按住 BOOTSEL 上電。
+   可指定 UF2 磁碟；多候選由 GUI 選擇。
 4. 「鍵盤延遲」提供一般、高精度及可選的極限模式，並可匯出 CSV。
    測試 A 鍵，請勿操作實體鍵盤。極限量測使用獨立子程序，GUI 維持一般優先權。
 5. 「滑鼠測試」包含擬人化／原始移動、拖曳、點擊、五鍵與雙軸滾輪。
@@ -27,8 +26,8 @@ Leonardo 與 RP2040 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支�
 釋放／屏障等待 USB 傳送完成，再由 STATUS 確認。拔線後顯示未知，重連建立自己的空狀態。
 每 500ms 續租，租約 2 秒。個別釋放、協議故障與租約到期保留其他程式；
 USB／共用佇列故障釋放所有 session。STATUS 的輸入與待送數只屬於查詢者。
-兩種板子均需重新燒錄 3.1.0；第一次從舊韌體升級使用實體 reset／BOOTSEL。
-Leonardo 序號固定為 HP-KB-0024，RP2040 使用唯一板號。燒錄前關閉其他控制程式並等 2 秒。
+需重新燒錄 3.1.0；第一次從舊韌體升級使用 BOOTSEL。
+序號取自 RP2040 unique ID。燒錄前關閉其他控制程式並等 2 秒。
 
 設定、Arduino CLI 設定／依賴、sketch 工作副本及建置產物儲存在
 `%LOCALAPPDATA%\FirmwareManageTool_Rust`。設定會於開始工作、保存設定及離開時保存。
@@ -61,11 +60,10 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 python3 scripts/sync-input-protocol.py --check
 bash scripts/test-rp2040.sh
-bash scripts/test-leonardo.sh
 ```
 
 Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。
-Linux 開發執行原始碼檢查、測試及 AVR／RP2040 韌體編譯，不產生 Windows EXE 或 ZIP。
+Linux 開發執行原始碼檢查、測試及 XIAO 韌體編譯，不產生 Windows EXE 或 ZIP。
 Linux GUI 字型使用系統 Noto CJK；Windows 使用系統 Microsoft JhengHei。
 
 架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。

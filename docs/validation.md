@@ -1,6 +1,8 @@
 # 驗證紀錄
 
-日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 Leonardo／RP2040 或 Windows USB 實機。
+日期：2026-10-07（Asia/Taipei）。開發主機為 Linux，沒有連接 RP2040 或 Windows USB 實機。
+
+> 分支 `rp2040-xiao-only` 只保留 Seeed XIAO RP2040。以下 Leonardo／Pico／`firmware/common/` 的紀錄是移除前的歷史驗證，不代表目前建置內容；XIAO 相關結論仍適用。
 
 ## 韌體 3.1.0（重構前產物）
 
@@ -148,7 +150,7 @@ manifest 記錄 sketch 來源指紋、產物 SHA256、固定工具／核心與�
 
 基準 `d9d8ef7`。共用正式來源為 `firmware/common/input/`（引擎與 BootloaderGate）及
 `firmware/common/usb/`（descriptor），同步為兩板可獨立編譯的 `.h/.cpp`。
-規格見 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md)；前一節記錄的是 RP2040 第一階段。
+原共用重構規格已隨本分支移除；前一節記錄的是 RP2040 第一階段。
 
 - 共用來源以 RP2040 與 AVR 容量配置，不帶板級 SDK 跑同一套引擎測試。
 - 兩板 runtime 測試、各 header 獨立編譯與兩個 TU 連結通過；Leonardo 測試不再 include Firmware.cpp。

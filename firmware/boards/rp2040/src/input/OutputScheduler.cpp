@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/OutputScheduler.cpp; do not edit this copy.
 #include "OutputScheduler.h"
 namespace hidfw {
 uint8_t OutputScheduler::pending(uint32_t session) const {

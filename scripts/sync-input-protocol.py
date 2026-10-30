@@ -25,26 +25,9 @@ js='// Generated from keys.json; physical KeyboardEvent.code identities.\nconst 
 js+='const HID_KEY_TOKEN_MAP = '+json.dumps({t:{'p':r['page'],'u':r['usage']} for r in rows for t in [r['token']]+r['aliases']},indent=2)+';\n'
 vectors=json.loads((shared/'vectors.json').read_text())
 cpp_vectors='// Golden wire vectors from shared/input-protocol/vectors.json.\n#pragma once\nconstexpr uint8_t WireVectors[][64] = {\n'+''.join('{'+','.join(str(b) for b in v['bytes'])+'},\n' for v in vectors)+'};\n'
-outputs={shared/'src/keys_generated.rs':rust,shared/'keys_generated.js':js,shared/'keys_generated.h':cpp,root/'firmware/boards/rp2040/KeyCatalog.h':cpp,root/'firmware/boards/leonardo_avr/KeyCatalog.h':cpp,shared/'vectors_generated.h':cpp_vectors,root/'firmware/tests/ProtocolVectors.h':cpp_vectors}
-# One canonical implementation; each standalone sketch receives normal .h/.cpp.
-outputs[root/'firmware/common/input/KeyCatalog.h'] = cpp
-for board in ['rp2040', 'leonardo_avr']:
-    target = root/'firmware/boards'/board/'src/input'
-    for source in (root/'firmware/common/input').glob('*'):
-        if source.suffix in ('.h', '.cpp') and source.name != 'KeyCatalog.h':
-            outputs[target/source.name] = '// Generated from firmware/common/input/'+source.name+'; do not edit this copy.\n'+source.read_text()
-    outputs[target/'KeyCatalog.h'] = cpp
-    for source in (root/'firmware/common/usb').glob('*'):
-        if source.suffix in ('.h', '.cpp'):
-            outputs[root/'firmware/boards'/board/'src/platform'/source.name] = '// Generated from firmware/common/usb/'+source.name+'; do not edit this copy.\n'+source.read_text()
-# A retired generated translation unit must not silently remain in a sketch.
-for board in ['rp2040', 'leonardo_avr']:
-    for path in (root/'firmware/boards'/board/'src/input').glob('*'):
-        if path.suffix in ('.h', '.cpp') and path not in outputs:
-            if a.check: raise SystemExit('Unexpected generated source: '+str(path))
-            if not path.read_text().startswith('// Generated from '):
-                raise SystemExit('Refusing to remove manually authored input source: '+str(path))
-            path.unlink()
+outputs={shared/'src/keys_generated.rs':rust,shared/'keys_generated.js':js,shared/'keys_generated.h':cpp,root/'firmware/boards/rp2040/KeyCatalog.h':cpp,shared/'vectors_generated.h':cpp_vectors,root/'firmware/tests/ProtocolVectors.h':cpp_vectors}
+# The RP2040 sketch is the only firmware target: its input/ and platform/USB
+# sources are hand authored, so nothing else is generated per board.
 for path,content in outputs.items():
     if a.check:
         if not path.exists() or path.read_text()!=content:raise SystemExit('Stale generated file: '+str(path))

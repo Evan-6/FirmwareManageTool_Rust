@@ -1,6 +1,6 @@
 // Link the production engine without Arduino, TinyUSB or Pico SDK headers.
-#include "../common/input/InputEngine.h"
-#include "../common/input/BootloaderGate.h"
+#include "../boards/rp2040/src/input/InputEngine.h"
+#include "../boards/rp2040/src/input/BootloaderGate.h"
 #include "../boards/rp2040/src/platform/StatusIndicator.h"
 #include <assert.h>
 #include <stdio.h>

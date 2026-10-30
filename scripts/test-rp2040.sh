@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 project_root=$(cd "$(dirname "$0")/.." && pwd)
+# A native (non-MSYS) mingw c++ rejects /d/... paths, so prefer the drive-letter
+# form where pwd supports -W. On Linux -W fails and the POSIX path is kept.
+project_root=$( (cd "$project_root" && pwd -W 2>/dev/null) || echo "$project_root" )
 test_dir=$(mktemp -d)
+test_dir=$( (cd "$test_dir" && pwd -W 2>/dev/null) || echo "$test_dir" )
 trap 'rm -rf "$test_dir"' EXIT
 sources=("$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root"/firmware/boards/rp2040/src/platform/*.cpp "$project_root"/firmware/boards/rp2040/src/runtime/*.cpp)
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -I"$project_root/firmware/tests/stubs" "${sources[@]}" "$project_root/firmware/tests/rp2040_test.cpp" -o "$test_dir/rp2040-test"
@@ -9,10 +13,11 @@ sources=("$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root"/
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -DARDUINO_SEEED_XIAO_RP2040 -I"$project_root/firmware/tests/stubs" "${sources[@]}" "$project_root/firmware/tests/rp2040_test.cpp" -o "$test_dir/xiao-test"
 "$test_dir/xiao-test"
 
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} "$project_root"/firmware/common/input/*.cpp "$project_root/firmware/boards/rp2040/src/platform/StatusIndicator.cpp" "$project_root/firmware/tests/rp2040_engine_test.cpp" -o "$test_dir/engine-test"
+# The engine alone, without Arduino/TinyUSB/Pico SDK, keeps the protocol and
+# scheduling coverage independent of the runtime wiring.
+"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} "$project_root"/firmware/boards/rp2040/src/input/*.cpp "$project_root/firmware/boards/rp2040/src/platform/StatusIndicator.cpp" "$project_root/firmware/tests/rp2040_engine_test.cpp" -o "$test_dir/engine-test"
 "$test_dir/engine-test"
-"${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} -DARDUINO_ARCH_AVR "$project_root"/firmware/common/input/*.cpp "$project_root/firmware/boards/rp2040/src/platform/StatusIndicator.cpp" "$project_root/firmware/tests/rp2040_engine_test.cpp" -o "$test_dir/small-engine-test"
-"$test_dir/small-engine-test"
+
 # Each header compiles on its own. Two translation units include every header
 # and link against the actual modules to catch hidden state/ODR dependencies.
 headers=("$project_root"/firmware/boards/rp2040/src/input/*.h "$project_root"/firmware/boards/rp2040/src/platform/*.h "$project_root"/firmware/boards/rp2040/src/runtime/*.h)

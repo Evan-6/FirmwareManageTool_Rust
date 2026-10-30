@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/SessionTable.h; do not edit this copy.
 #pragma once
 #include "InputState.h"
 namespace hidfw {

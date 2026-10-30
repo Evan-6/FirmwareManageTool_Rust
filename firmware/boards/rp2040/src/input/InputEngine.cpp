@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/InputEngine.cpp; do not edit this copy.
 #include "InputEngine.h"
 namespace hidfw {
 using namespace wire;

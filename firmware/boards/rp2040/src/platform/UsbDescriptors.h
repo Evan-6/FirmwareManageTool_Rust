@@ -1,4 +1,3 @@
-// Generated from firmware/common/usb/UsbDescriptors.h; do not edit this copy.
 #pragma once
 #include <stdint.h>
 namespace hidfw::board {

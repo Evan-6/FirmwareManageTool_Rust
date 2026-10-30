@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/BootloaderGate.cpp; do not edit this copy.
 #include "BootloaderGate.h"
 #include "InputConfig.h"
 namespace hidfw {

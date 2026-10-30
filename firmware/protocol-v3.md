@@ -1,11 +1,11 @@
 # Vendor HID protocol 3
 
-本檔與 `shared/input-protocol/keys.json`、`vectors.json` 為跨 C++／Rust／JavaScript 的規範。韌體 3.1.0 僅提供 Vendor HID v3；已移除 v2 report、文字解析與回退。VID/PID 與 Vendor usage 不變，USB bcdDevice 為 0x0310。RP2040 使用唯一序號，Leonardo 固定為 HP-KB-0024。
+本檔與 `shared/input-protocol/keys.json`、`vectors.json` 為跨 C++／Rust／JavaScript 的規範。韌體 3.1.0 僅提供 Vendor HID v3；已移除 v2 report、文字解析與回退。VID/PID 與 Vendor usage 不變，USB bcdDevice 為 0x0310。USB 序號取自 RP2040 unique ID，不能視為密碼學身分證明。
 
 ## 能力與 framing
 
 - OUT id 12、IN id 13、Feature id 14。所有 report 含 id 為 64 bytes。TinyUSB callback 的 id=0 形式含首 byte report id；非零形式僅有 63-byte payload。
-- Feature 14 只讀、不取得 ownership。63-byte payload：`FMT3[4]`、protocol u8、board u8（1=Pico/其他，2=XIAO，3=Leonardo）、fw major/minor/patch 三個 u8、lease u16、reserved u16（新韌體寫零；主機忽略，以維持既有 v3 欄位位置）、poll_ms u8、capabilities u32、keyboard bitmap[28]、modifiers mask u8、consumer mask u8、device id[8]（Leonardo 是固定型號識別，不能作為唯一身分）、reserved[7]。capabilities 位元 0=NKRO、1=Consumer、2=relative mouse、3=absolute mouse（3.0.2 起固定為零）、4=concurrent v3 sessions（3.0.3 起）；目前 flags=23。
+- Feature 14 只讀、不取得 ownership。63-byte payload：`FMT3[4]`、protocol u8、board u8（本專案 XIAO 為 2）、fw major/minor/patch 三個 u8、lease u16、reserved u16（新韌體寫零；主機忽略，以維持既有 v3 欄位位置）、poll_ms u8、capabilities u32、keyboard bitmap[28]、modifiers mask u8、consumer mask u8、device id[8]（RP2040 unique ID）、reserved[7]。capabilities 位元 0=NKRO、1=Consumer、2=relative mouse、3=absolute mouse（3.0.2 起固定為零）、4=concurrent v3 sessions（3.0.3 起）；目前 flags=23。
 - OUT/IN 的 63-byte payload 標頭為 `version:u8, opcode:u8, length:u8, flags:u8, session:u32, sequence:u32`。資料最多 51 bytes。整數 little-endian，flags 與未使用尾端 byte 必須為零，不另加 CRC（USB 提供傳輸校驗）。
 - `KeyId` 為 page u16 + usage u16；僅接受按鍵表中定義的 usage。
 - 31-byte input snapshot：modifiers u8 + keyboard bitmap[28] + consumer u8 + buttons u8。bitmap bit `u` 代表 Keyboard usage `u`，E0–E7 放在 modifiers bit 0–7。未支援／保留 bit 必須為零。
@@ -39,13 +39,13 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 ## 完成與租約
 
 - 只有一個相對滑鼠 HID top-level collection，report id 3 同時輸出位移、五鍵與雙軸滾輪。沒有絕對 HID report id 4、座標快取或絕對輸出。目標位置／路徑在主機端計算並換算相對位移，韌體不處理螢幕座標。
-- 一般輸入沒有 ACK；主機 I/O 寫入成功表示已提交，不能作為 USB 完成證明。需要可靠完成的階段送 BARRIER，等待此前所有輸出由 USB 完成確認（RP2040 為 TinyUSB callback，AVR 為 endpoint bank 已被主機 ACK）。
+- 一般輸入沒有 ACK；主機 I/O 寫入成功表示已提交，不能作為 USB 完成證明。需要可靠完成的階段送 BARRIER，等待此前所有輸出由 USB 完成確認（RP2040 為 TinyUSB callback）。
 - RELEASE_ALL 取消該 session 先前未執行輸入，釋放其 Keyboard／Consumer／滑鼠按鈕持有狀態；保留其他 session 的狀態與排程，USB 完成後才回覆。session 保留，可再輸入或續租。BOOTLOADER 若有其他 session 則回 busy；成功時再等待回覆 USB 傳送完成後重啟。仍不保證目標應用程式處理時間。
-- RP2040 output queue 32 項；Leonardo 2 項、RX 1 筆、TX 8 筆，最舊待送超過 50ms 或 queue overflow 即失效、清除及釋放。鍵盤與按鈕短按順序保留；相鄰待送同類移動可合併，但不跨按鈕、snapshot 或 barrier。相對／滾輪累加每軸上限 ±8192，超限亦失效。
-- 同來源最後一筆排程可承載 BARRIER 完成序號，避免單次 down/up/barrier 額外佔用 AVR 佇列；完成仍等待所有先前 USB 輸出。
+- output／RX／TX 佇列各 32 項，最舊待送超過 50ms 或 queue overflow 即失效、清除及釋放。鍵盤與按鈕短按順序保留；相鄰待送同類移動可合併，但不跨按鈕、snapshot 或 barrier。相對／滾輪累加每軸上限 ±8192，超限亦失效。
+- 同來源最後一筆排程可承載 BARRIER 完成序號，避免單次 down/up/barrier 額外佔用佇列；完成仍等待所有先前 USB 輸出。
 - v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。
 - 同時的 v3 session 各自持有 31-byte 狀態，USB 鍵盤／Consumer／按鈕輸出為位元聯集。相同按鍵須所有持有者都放開才放開；snapshot 只替換自己的狀態。不同 session 的相對位移與滾輪按接收順序作用於同一支游標，不能互相覆寫。BARRIER 回覆使用該 session 的序號，不能用另一 session 的完成序號代替。
-- RP2040 非阻塞排程由 core 0 擁有，core 1 只處理 LED；Leonardo 在主迴圈排程。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
+- 非阻塞排程由 core 0 擁有，core 1 只處理 LED。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
 
 ## 同步與測試
 
@@ -56,7 +56,6 @@ python3 scripts/sync-input-protocol.py --peer ../EvanRemote --mscv-rust ../MSCV_
 python3 scripts/sync-input-protocol.py --check --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV
 cargo test --locked --workspace --no-default-features
 bash scripts/test-rp2040.sh
-bash scripts/test-leonardo.sh
 ```
 
-同步腳本產生本地 Rust／C++／JavaScript 按鍵表、C++ wire vectors，並將 `firmware/common/input/` 的共用引擎及 `firmware/common/usb/` 的 descriptor 同步到兩板 sketch 的 `src/`。兩板正常編譯相同 `.cpp`，平台層只處理 USB／同步／板型身分／重啟與 LED 差異。生成物需提交；手改副本、缺少來源或多餘的舊引擎來源會被 `--check` 拒絕。共享 wire 規格與三個主機使用端的同步方式不變。
+同步腳本產生本地 Rust／C++／JavaScript 按鍵表與 C++ wire vectors；`firmware/boards/rp2040/src/` 的引擎與 descriptor 是唯一來源、不再生成副本。生成物需提交，`--check` 會拒絕漂移。共享 wire 規格與三個主機使用端的同步方式不變。

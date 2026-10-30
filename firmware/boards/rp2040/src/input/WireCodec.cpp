@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/WireCodec.cpp; do not edit this copy.
 #include "WireCodec.h"
 namespace hidfw::wire {
 uint16_t read16(const uint8_t *p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }

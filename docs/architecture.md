@@ -26,8 +26,6 @@ failsafe 計數是全裝置共用，其他 session 的租約到期也會增加�
 | 按下／放開 A | 每階段 1 秒 |
 | 安裝依賴 | 每個子程序 15 分鐘 |
 | 編譯 | 10 分鐘 |
-| AVR 上傳 | 2 分鐘 |
-| AVR bootloader | 10 秒 |
 | RP2040 bootloader | 15 秒 |
 | runtime 握手驗證 | 15 秒的偵測窗口，加上正在進行的有期限 HID 握手 |
 | 極限子程序取消 | 2 秒後強制終止，再嘗試重新連線 reset |
@@ -53,17 +51,16 @@ P95／P99 使用 nearest-rank；標準差使用 n−1，單樣本不計。
 
 燒錄先編譯再進 bootloader。自動重啟已選取 runtime 時，排除重啟前已存在的
 bootloader，避免自動選到另一台板子。GUI 直接呼叫 arduino-cli，不呼叫舊 PowerShell
-上傳腳本，也不依賴 runtime CDC touch。AVR 以 upload --verify 傳輸；RP2040
-複製確切 sketch 的 UF2，任何 OS 複製錯誤保留為失敗。兩者都再驗證 runtime hello。
+上傳腳本，也不依賴 runtime CDC touch。GUI 複製確切 sketch 的 UF2，任何 OS 複製錯誤保留為失敗，之後再驗證 runtime hello。
 驗證排除傳輸前已存在的 runtime 裝置，避免別台板子的 hello 被當成此次燒錄成功。
-AVR／RP2040 均以 v3 能力查詢與 OPEN 驗證，檢查 board id（Leonardo=3、Pico=1、XIAO=2）。
+以 v3 能力查詢與 OPEN 驗證，board id 必須是 XIAO 的 2，其他板型映像一律視為不符。
 RP2040 使用 MCU unique ID 作為 USB 序號與能力識別，未提供映像 hash 或密碼學身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
 
 擬人化軌跡以主螢幕實體像素計算 minimum-jerk／Bézier，保留低振幅偏移、
 重複像素省略及精確最後目標。排程遲到跳過過期節點，不補送所有舊點。
 原始相對移動及滾輪以 ±1024 拆指令，8-bit USB report 拆分由韌體排程執行。
 點擊／拖曳有釋放 guard，閒置時也每 500ms 續租。
-斷線回報釋放狀態未知，重新連線先清空。兩種板子租約均為 2 秒。
+斷線回報釋放狀態未知，重新連線先清空。租約為 2 秒。
 RP2040 的 32 項輸出佇列保留按鍵／按鈕順序；滿載或等待超過 50ms 時停止 session 並優先釋放。
 
 韌體 3.1.0 最多八個 v3 session 可同時控制，各自保存序號、租約與輸入狀態；
@@ -73,10 +70,10 @@ USB 按鍵／Consumer／滑鼠按鈕取聯集，位移與滾輪依接收順序�
 STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共用。
 共用 USB／佇列故障才釋放全部來源。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
 
-Leonardo 共用 firmware/common 引擎，輸出／RX／TX 佇列深度為 2／1／8；RP2040 為 32／32／32。AVR USB packet API 不阻塞或發送尾端 ZLP，完成依主機 ACK 的 endpoint bank；USB reset 不允許舊 boot 回覆被誤當完成。Leonardo 固定序號 HP-KB-0024，不可視為唯一身分。
+輸出／RX／TX 佇列深度均為 32。USB 完成依 TinyUSB 主機 ACK；USB reset 後舊 boot 回覆不能被誤當完成。序號取自 RP2040 unique ID。
 
-兩板的 `Firmware.cpp` 均只組裝一個 FirmwareRuntime。InputEngine 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、scheduler、TX 與 BootloaderGate 的唯一來源為 `firmware/common/input/`，descriptor 為 `firmware/common/usb/`；同步腳本產生兩板 `src/` 的相同 `.h/.cpp`，Arduino 正常分檔編譯，測試也正常連結正式來源。
+`Firmware.cpp` 只組裝一個 FirmwareRuntime。InputEngine 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、scheduler、TX 與 BootloaderGate 位於 `firmware/boards/rp2040/src/input/`，descriptor 位於 `src/platform/`，都是唯一來源；Arduino 正常分檔編譯，主機測試也連結正式來源。
 
-RP2040 平台層持有 TinyUSB／Pico RX queue／原子 callback 通知，core 1 只讀發布的 LED 狀態。Leonardo 平台層持有 PluggableUSB／單筆 RX／AVR 原子區段，以 USB core reset generation 與 endpoint bank ACK 判定完成。重啟入口分別為 BOOTSEL 與 Caterina watchdog；共用 gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
+平台層持有 TinyUSB／Pico RX queue／原子 callback 通知，core 1 只讀發布的 LED 狀態。重啟入口為 RP2040 watchdog reboot 到 BOOTSEL；gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
 
-共用 InputConfig 以建置目標選擇 AVR 的 2／1／8 或 RP2040 的 32／32／32 容量，兩板均為 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。規格見 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md)。
+InputConfig 固定 32／32／32 容量與 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。

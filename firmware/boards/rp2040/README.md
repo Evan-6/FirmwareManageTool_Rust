@@ -1,6 +1,6 @@
 # RP2040 韌體 3.1.0
 
-目標為 Raspberry Pi Pico、Seeed XIAO RP2040 與相容板。建置固定使用 arduino-pico **6.2.0**、內附 Adafruit TinyUSB；XIAO 另需 Adafruit NeoPixel。對外提供共用鍵盤／Consumer／單一相對滑鼠 HID，以及 Vendor HID，合計兩個介面，沒有 CDC／COM。
+目標為 Seeed XIAO RP2040（本分支唯一板型）。建置固定使用 arduino-pico **6.2.0**、內附 Adafruit TinyUSB；XIAO 另需 Adafruit NeoPixel。對外提供共用鍵盤／Consumer／單一相對滑鼠 HID，以及 Vendor HID，合計兩個介面，沒有 CDC／COM。
 
 ## 協定與按鍵
 
@@ -37,7 +37,7 @@ BOOTLOADER 在其他 v3 session 存在時回 busy；燒錄前關閉其他控制�
 
 core 0 持有全部輸入、排程與 LED 狀態決策，core 1 只讀原子發布的 LED 狀態並渲染。USB callbacks 只交付 RX、完成／失敗及 reset 通知，Feature 使用初始化後的唯讀資料。RX 保留 Pico SDK queue，TX 改由 engine 的固定陣列持有，容量仍為 32。
 
-`src/input/` 是 `firmware/common/input/` 的生成副本；兩板編譯相同的協議／session／scheduler／boot gate 實作，descriptor 來自 `firmware/common/usb/`。修改共用來源後執行同步腳本，不能手改副本。詳見 [共用重構規格](../../../docs/shared-firmware-refactor-spec.md)。
+`src/input/` 與 `src/platform/Usb*.cpp` 是本 sketch 的唯一來源，已無生成副本；`KeyCatalog.h` 仍由按鍵表腳本產生。共用 wire 規格與 Rust host codec 見 `shared/input-protocol/`。
 
 - USB callback 只接收封包或通知完成；不執行輸入命令，也不等待 endpoint。
 - 鍵盤與按鈕轉換保持順序；32 項輸出佇列，50ms 過期／溢位停止 session 並優先釋放。
@@ -50,7 +50,6 @@ core 0 持有全部輸入、排程與 LED 狀態決策，core 1 只讀原子發�
 arduino-cli core update-index --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
 arduino-cli core install rp2040:rp2040@6.2.0 --additional-urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
 arduino-cli lib install "Adafruit NeoPixel"
-arduino-cli compile --fqbn rp2040:rp2040:rpipico:usbstack=tinyusb firmware/boards/rp2040
 arduino-cli compile --fqbn rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb firmware/boards/rp2040
 ```
 
@@ -60,4 +59,4 @@ Windows 可使用管理工具或 `upload.ps1`，bootloader 入口也只接受 v3
 
 ## 驗證狀態
 
-2026-10-07 已在 Linux 編譯 Pico 與 XIAO，並用模擬 USB 執行實際韌體邏輯測試（包含八個 session 與隔離釋放）。**新版尚未完成實體 RP2040／Windows USB 驗收。** 詳見 [驗證紀錄](../../../docs/validation.md)。需要確認列舉、NKRO／Consumer 支援、短按、鎖定鍵、舊設備拒絕、拔線與 bootloader；編譯成功不等同實機運作。
+2026-10-07 已在 Linux 編譯 XIAO，並用模擬 USB 執行實際韌體邏輯測試（包含八個 session 與隔離釋放）。**新版尚未完成實體 RP2040／Windows USB 驗收。** 詳見 [驗證紀錄](../../../docs/validation.md)。需要確認列舉、NKRO／Consumer 支援、短按、鎖定鍵、舊設備拒絕、拔線與 bootloader；編譯成功不等同實機運作。

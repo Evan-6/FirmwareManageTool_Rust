@@ -1,4 +1,3 @@
-// Generated from firmware/common/usb/UsbDescriptors.cpp; do not edit this copy.
 #include "UsbDescriptors.h"
 #include "../input/WireCodec.h"
 #if defined(ARDUINO_ARCH_AVR)

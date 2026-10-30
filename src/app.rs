@@ -1,6 +1,5 @@
 use crate::{
     backend::{AppCommand, AppEvent, Backend},
-    firmware::Board,
     hid::Device,
     latency::{Mode, Report, Round, Statistics},
     mouse::MouseAction,
@@ -310,18 +309,37 @@ impl App {
     }
     fn firmware_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("韌體燒錄");
-        ui.label("選擇實際板型；現有 USB 識別資訊無法區分 AVR 與 RP2040。");
-        ui.add_enabled_ui(!self.busy,|ui| {
-            egui::ComboBox::from_id_salt("board").selected_text(self.settings.upload.board.label()).show_ui(ui,|ui| {for board in [Board::Leonardo,Board::XiaoRp2040,Board::Pico,Board::CustomRp2040] {ui.selectable_value(&mut self.settings.upload.board,board,board.label());}});
-            if self.settings.upload.board==Board::CustomRp2040 {text_field(ui,"arduino-pico 板卡代號",&mut self.settings.upload.custom_board);ui.checkbox(&mut self.settings.upload.custom_neopixel,"需要 Adafruit NeoPixel");}
-            text_field(ui,"arduino-cli 路徑（空白＝自動偵測／安裝）",&mut self.settings.upload.cli_path);
-            text_field(ui,"firmware 路徑（空白＝隨附資料夾）",&mut self.settings.upload.firmware_path);
-            text_field(ui,"bootloader COM／磁碟（空白＝自動偵測）",&mut self.settings.upload.boot_target);
-            ui.checkbox(&mut self.settings.upload.auto_bootloader,"透過選取的 HID 裝置自動進入 bootloader");
-            ui.checkbox(&mut self.settings.upload.skip_dependencies,"跳過 Core／Library 安裝（依賴已準備好）");
-            if let Ok(fqbn)=self.settings.upload.fqbn() {ui.monospace(format!("FQBN: {fqbn}"));}
-            ui.label("全新或無法連線的板子：Leonardo 按 reset；RP2040 按住 BOOTSEL 上電。COM 僅用於 AVR bootloader。");
-            if ui.button("開始編譯並燒錄").clicked(){let _=self.settings.save();self.submit(AppCommand::Upload(self.settings.upload.clone()));}
+        ui.label("固定目標：Seeed XIAO RP2040（arduino-pico、TinyUSB、Vendor HID v3）。");
+        ui.add_enabled_ui(!self.busy, |ui| {
+            text_field(
+                ui,
+                "arduino-cli 路徑（空白＝自動偵測／安裝）",
+                &mut self.settings.upload.cli_path,
+            );
+            text_field(
+                ui,
+                "firmware 路徑（空白＝隨附資料夾）",
+                &mut self.settings.upload.firmware_path,
+            );
+            text_field(
+                ui,
+                "UF2 磁碟（空白＝自動偵測）",
+                &mut self.settings.upload.boot_target,
+            );
+            ui.checkbox(
+                &mut self.settings.upload.auto_bootloader,
+                "透過選取的 HID 裝置自動進入 bootloader",
+            );
+            ui.checkbox(
+                &mut self.settings.upload.skip_dependencies,
+                "跳過 Core／Library 安裝（依賴已準備好）",
+            );
+            ui.monospace(format!("FQBN: {}", self.settings.upload.fqbn()));
+            ui.label("無法由 HID 進入下載模式時，請按住 BOOTSEL 再上電。");
+            if ui.button("開始編譯並燒錄").clicked() {
+                let _ = self.settings.save();
+                self.submit(AppCommand::Upload(self.settings.upload.clone()));
+            }
         });
         if self.progress > 0 {
             ui.add(

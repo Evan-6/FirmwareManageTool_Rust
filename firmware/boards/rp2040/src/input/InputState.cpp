@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/InputState.cpp; do not edit this copy.
 #include "InputState.h"
 namespace hidfw {
 bool InputState::set(uint16_t page, uint16_t usage, bool down) {

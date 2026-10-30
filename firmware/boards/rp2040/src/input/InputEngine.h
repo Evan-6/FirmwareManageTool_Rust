@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/InputEngine.h; do not edit this copy.
 #pragma once
 #include "OutputScheduler.h"
 #include "SessionTable.h"

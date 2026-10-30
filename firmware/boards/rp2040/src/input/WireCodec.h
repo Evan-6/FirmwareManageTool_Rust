@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/WireCodec.h; do not edit this copy.
 #pragma once
 #include "InputState.h"
 namespace hidfw::wire {

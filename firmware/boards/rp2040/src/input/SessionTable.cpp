@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/SessionTable.cpp; do not edit this copy.
 #include "SessionTable.h"
 namespace hidfw {
 Session *SessionTable::find(uint32_t id) {

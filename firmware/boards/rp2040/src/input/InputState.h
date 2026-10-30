@@ -1,4 +1,3 @@
-// Generated from firmware/common/input/InputState.h; do not edit this copy.
 #pragma once
 #include <stdint.h>
 #include <string.h>

@@ -12,33 +12,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Board {
-    Leonardo,
-    #[default]
-    XiaoRp2040,
-    Pico,
-    CustomRp2040,
-}
-impl Board {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Leonardo => "Leonardo / AVR",
-            Self::XiaoRp2040 => "Seeed XIAO RP2040",
-            Self::Pico => "Raspberry Pi Pico",
-            Self::CustomRp2040 => "其他 RP2040",
-        }
-    }
-    pub fn is_avr(self) -> bool {
-        self == Self::Leonardo
-    }
-}
+/// The only supported firmware target: Seeed XIAO RP2040 (arduino-pico, TinyUSB).
+pub const SKETCH: &str = "rp2040";
+pub const FQBN: &str = "rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb";
+pub const CORE: &str = "rp2040:rp2040@6.2.0";
+/// Feature `board` id reported by the XIAO firmware build.
+pub const BOARD_ID: u8 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UploadConfig {
-    pub board: Board,
-    pub custom_board: String,
-    pub custom_neopixel: bool,
     pub cli_path: String,
     pub firmware_path: String,
     pub skip_dependencies: bool,
@@ -48,9 +31,6 @@ pub struct UploadConfig {
 impl Default for UploadConfig {
     fn default() -> Self {
         Self {
-            board: Board::default(),
-            custom_board: "rpipico".into(),
-            custom_neopixel: false,
             cli_path: String::new(),
             firmware_path: String::new(),
             skip_dependencies: false,
@@ -60,24 +40,8 @@ impl Default for UploadConfig {
     }
 }
 impl UploadConfig {
-    pub fn fqbn(&self) -> Result<String> {
-        if self.board.is_avr() {
-            return Ok("goosedevil:avr:keyboard".into());
-        }
-        let id = match self.board {
-            Board::XiaoRp2040 => "seeed_xiao_rp2040",
-            Board::Pico => "rpipico",
-            _ => self.custom_board.trim(),
-        };
-        ensure!(
-            !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'),
-            "板卡代號僅允許英數與底線"
-        );
-        Ok(format!("rp2040:rp2040:{id}:usbstack=tinyusb"))
-    }
-    pub fn needs_neopixel(&self) -> bool {
-        self.board == Board::XiaoRp2040
-            || (self.board == Board::CustomRp2040 && self.custom_neopixel)
+    pub fn fqbn(&self) -> &'static str {
+        FQBN
     }
     pub fn sources(&self) -> PathBuf {
         if self.firmware_path.trim().is_empty() {
@@ -224,13 +188,7 @@ pub fn upload<R: ProcessRunner>(
         Err(e) => UploadOutcome::TransferFailed(format!("{e:#}")),
         Ok(existing_paths) => {
             observer.progress(5, "等待 runtime HID 重新列舉與 hello 驗證");
-            match verify_runtime(
-                config.board,
-                selected,
-                cancel,
-                Duration::from_secs(15),
-                &existing_paths,
-            ) {
+            match verify_runtime(selected, cancel, Duration::from_secs(15), &existing_paths) {
                 Ok(message) => UploadOutcome::Verified(message),
                 Err(e) => UploadOutcome::TransferredUnverified(format!("{e:#}")),
             }
@@ -262,31 +220,20 @@ fn transfer_at<R: ProcessRunner>(
     root: &Path,
 ) -> Result<Vec<String>> {
     cancel.check()?;
-    let fqbn = config.fqbn()?;
-    let sources = config.sources();
-    let name = if config.board.is_avr() {
-        "leonardo_avr"
-    } else {
-        "rp2040"
-    };
-    let sketch = sources.join("boards").join(name);
+    let sketch = config.sources().join("boards").join(SKETCH);
     ensure!(
-        sketch.join(format!("{name}.ino")).is_file() && sketch.join("Firmware.cpp").is_file(),
+        sketch.join(format!("{SKETCH}.ino")).is_file() && sketch.join("Firmware.cpp").is_file(),
         "韌體資料夾不完整：{}",
         sketch.display()
     );
-    if config.board.is_avr() {
-        ensure!(
-            sketch.join("hardware/goosedevil/avr/boards.txt").is_file(),
-            "缺少 Leonardo 自訂 board package"
-        );
-    }
     observer.progress(1, "檢查工具與安裝依賴");
     let program = ensure_cli(config, runner, cancel, observer)?;
     std::fs::create_dir_all(root)?;
-    let working = root.join("sketches").join(name);
+    // arduino-cli builds only inside a sketch folder, so the shipped sketch is
+    // copied to the work directory instead of being compiled in place.
+    let working = root.join("sketches").join(SKETCH);
     copy_tree(&sketch, &working)?;
-    let cli_config = root.join(format!("arduino-{name}.yaml"));
+    let cli_config = root.join(format!("arduino-{SKETCH}.yaml"));
     write_cli_config(&cli_config, &root.join("ArduinoData"), &working)?;
     let cli = Cli {
         runner,
@@ -302,20 +249,12 @@ fn transfer_at<R: ProcessRunner>(
             observer,
         )?;
         cli.run(
-            args(&[
-                "core",
-                "install",
-                if config.board.is_avr() {
-                    "arduino:avr@1.8.8"
-                } else {
-                    "rp2040:rp2040@6.2.0"
-                },
-            ]),
+            args(&["core", "install", CORE]),
             install_limit,
             cancel,
             observer,
         )?;
-        if config.needs_neopixel() && !working.join("libraries/Adafruit_NeoPixel").is_dir() {
+        if !working.join("libraries/Adafruit_NeoPixel").is_dir() {
             cli.run(
                 args(&["lib", "install", "Adafruit NeoPixel"]),
                 install_limit,
@@ -325,40 +264,23 @@ fn transfer_at<R: ProcessRunner>(
         }
     }
     observer.progress(2, "編譯韌體");
-    let build = root.join("build").join(name);
+    let build = root.join("build").join(SKETCH);
     std::fs::create_dir_all(&build)?;
-    let mut compile = args(&["compile", "--fqbn", &fqbn, "--clean", "--build-path"]);
+    let mut compile = args(&["compile", "--fqbn", FQBN, "--clean", "--build-path"]);
     compile.push(build.as_os_str().into());
     compile.push(working.as_os_str().into());
     cli.run(compile, Duration::from_secs(600), cancel, observer)?;
     // Resolve the exact sketch artifact before asking the device to reboot.
-    let uf2 = if config.board.is_avr() {
-        None
-    } else {
-        Some(find_uf2(&build, name)?)
-    };
+    let uf2 = find_uf2(&build, SKETCH)?;
     observer.progress(3, "進入並選擇 bootloader");
     let explicit = !config.boot_target.trim().is_empty();
-    // If rebooting a selected runtime device, never auto-select another board that
-    // was already in bootloader before that command.
+    // If rebooting a selected runtime device, never auto-select a UF2 drive that
+    // was already mounted before that command.
     let previous_targets = if config.auto_bootloader && !explicit && selected.is_some() {
-        if config.board.is_avr() {
-            let json = cli.run(
-                args(&["board", "list", "--format", "json"]),
-                Duration::from_secs(2),
-                cancel,
-                observer,
-            )?;
-            parse_ports(&json)?
-                .into_iter()
-                .map(|p| p.address)
-                .collect::<Vec<_>>()
-        } else {
-            platform::boot_drives()?
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect()
-        }
+        platform::boot_drives()?
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect()
     } else {
         Vec::new()
     };
@@ -378,13 +300,11 @@ fn transfer_at<R: ProcessRunner>(
             }
             drop(session);
         } else {
-            observer.log("未選取 runtime HID，請使用實體 reset / BOOTSEL 進入下載模式".into());
+            observer.log("未選取 runtime HID，請使用實體 BOOTSEL 進入下載模式".into());
         }
     }
     let target = if explicit {
         config.boot_target.trim().to_owned()
-    } else if config.board.is_avr() {
-        wait_ports(&cli, cancel, observer, &previous_targets)?
     } else {
         wait_drives(cancel, observer, &previous_targets)?
     };
@@ -393,38 +313,13 @@ fn transfer_at<R: ProcessRunner>(
     // Excluding them prevents an existing board's hello from falsely verifying another board.
     let existing_paths = hid::enumerate()?.into_iter().map(|d| d.path).collect();
     observer.progress(4, "傳輸韌體");
-    if config.board.is_avr() {
-        ensure!(
-            target.to_ascii_uppercase().starts_with("COM")
-                && target[3..].chars().all(|c| c.is_ascii_digit())
-                && target.len() > 3,
-            "請選擇 bootloader COM 埠"
-        );
-        let mut upload = args(&[
-            "upload",
-            "-p",
-            &target,
-            "--fqbn",
-            &fqbn,
-            "--verify",
-            "--upload-property",
-            "upload.use_1200bps_touch=false",
-            "--upload-property",
-            "upload.wait_for_upload_port=false",
-            "--build-path",
-        ]);
-        upload.push(build.as_os_str().into());
-        upload.push(working.as_os_str().into());
-        cli.run(upload, Duration::from_secs(120), cancel, observer)?;
-    } else {
-        let root = PathBuf::from(&target);
-        ensure!(
-            root.join("INFO_UF2.TXT").is_file(),
-            "指定位置不是 UF2 bootloader 磁碟"
-        );
-        copy_uf2(uf2.as_ref().unwrap(), &root.join("Firmware.uf2"), cancel)?;
-        observer.log("UF2 複製完成，等待 runtime 驗證".into());
-    }
+    let root = PathBuf::from(&target);
+    ensure!(
+        root.join("INFO_UF2.TXT").is_file(),
+        "指定位置不是 UF2 bootloader 磁碟"
+    );
+    copy_uf2(&uf2, &root.join("Firmware.uf2"), cancel)?;
+    observer.log("UF2 複製完成，等待 runtime 驗證".into());
     Ok(existing_paths)
 }
 fn copy_tree(source: &Path, target: &Path) -> Result<()> {
@@ -470,105 +365,6 @@ pub fn copy_uf2(source: &Path, target: &Path, cancel: &Cancellation) -> Result<(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BootPort {
-    pub address: String,
-    pub recognized: bool,
-}
-pub fn parse_ports(json: &str) -> Result<Vec<BootPort>> {
-    let value: serde_json::Value = serde_json::from_str(json)?;
-    let entries = value
-        .as_array()
-        .or_else(|| value.get("detected_ports").and_then(|v| v.as_array()))
-        .ok_or_else(|| anyhow::anyhow!("board list JSON 沒有 detected_ports"))?;
-    let mut result = Vec::new();
-    for entry in entries {
-        let port = entry.get("port").unwrap_or(entry);
-        let Some(address) = port.get("address").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if !address.to_ascii_uppercase().starts_with("COM") {
-            continue;
-        }
-        let recognized = [entry, port].iter().any(|object| {
-            let boards_match = ["matching_boards", "boards"].iter().any(|key| {
-                object
-                    .get(key)
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|boards| {
-                        boards.iter().any(|b| {
-                            ["name", "fqbn"].iter().any(|field| {
-                                b.get(field).and_then(|v| v.as_str()).is_some_and(|s| {
-                                    let s = s.to_ascii_lowercase();
-                                    s.contains("leonardo") || s.contains("arduino micro")
-                                })
-                            })
-                        })
-                    })
-            });
-            let label_match = object
-                .get("label")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| s.to_ascii_lowercase().contains("leonardo"));
-            boards_match || label_match
-        });
-        result.push(BootPort {
-            address: address.into(),
-            recognized,
-        });
-    }
-    result.sort_by(|a, b| a.address.cmp(&b.address));
-    result.dedup_by(|a, b| a.address == b.address);
-    Ok(result)
-}
-fn select_ports(
-    ports: &[BootPort],
-    cancel: &Cancellation,
-    observer: &mut dyn UploadObserver,
-) -> Result<Option<String>> {
-    let recognized: Vec<_> = ports.iter().filter(|p| p.recognized).collect();
-    if recognized.len() == 1 {
-        return Ok(Some(recognized[0].address.clone()));
-    }
-    if ports.is_empty() {
-        return Ok(None);
-    }
-    let candidates = if recognized.is_empty() {
-        ports.iter().collect::<Vec<_>>()
-    } else {
-        recognized
-    };
-    Ok(Some(observer.choose_target(
-        candidates.iter().map(|p| p.address.clone()).collect(),
-        cancel,
-    )?))
-}
-fn wait_ports<R: ProcessRunner>(
-    cli: &Cli<'_, R>,
-    cancel: &Cancellation,
-    observer: &mut dyn UploadObserver,
-    previous_targets: &[String],
-) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-        cancel.check()?;
-        let json = cli.run(
-            args(&["board", "list", "--format", "json"]),
-            remaining.min(Duration::from_secs(2)),
-            cancel,
-            observer,
-        )?;
-        let ports = parse_ports(&json)?
-            .into_iter()
-            .filter(|p| !previous_targets.contains(&p.address))
-            .collect::<Vec<_>>();
-        if let Some(port) = select_ports(&ports, cancel, observer)? {
-            return Ok(port);
-        }
-        cancel.sleep(Duration::from_millis(250))?;
-    }
-    bail!("10 秒內未偵測到 bootloader；請實體 reset，並指定 bootloader COM 後重試")
-}
 fn wait_drives(
     cancel: &Cancellation,
     observer: &mut dyn UploadObserver,
@@ -595,7 +391,6 @@ fn wait_drives(
     bail!("15 秒內未偵測到 RP2040 UF2 磁碟；請 BOOTSEL 上電後重試")
 }
 fn verify_runtime(
-    board: Board,
     selected: Option<&Device>,
     cancel: &Cancellation,
     timeout: Duration,
@@ -611,23 +406,17 @@ fn verify_runtime(
             let mut session = hid::open(device)?;
             session.synchronize(token)?;
             if let Some(caps) = session.capabilities() {
-                verify_board_capability(board, caps.board)?;
+                verify_capability(caps.board)?;
             }
             let hello = session.hello(token)?;
             Ok(hello.raw)
         },
     )
 }
-fn verify_board_capability(board: Board, reported: u8) -> Result<()> {
-    let expected = match board {
-        Board::XiaoRp2040 => Some(2),
-        Board::Pico => Some(1),
-        Board::Leonardo => Some(3),
-        _ => None,
-    };
+fn verify_capability(reported: u8) -> Result<()> {
     ensure!(
-        expected.is_none_or(|id| id == reported),
-        "重新列舉的板型不符：{reported}"
+        reported == BOARD_ID,
+        "重新列舉的板型不符：{reported}（預期 {BOARD_ID}）"
     );
     Ok(())
 }
@@ -683,35 +472,20 @@ where
 mod tests {
     use super::*;
     #[test]
-    fn flashed_capability_must_match_board() {
-        assert!(verify_board_capability(Board::XiaoRp2040, 2).is_ok());
-        assert!(verify_board_capability(Board::Pico, 2).is_err());
-        assert!(verify_board_capability(Board::Leonardo, 3).is_ok());
-        assert!(verify_board_capability(Board::Leonardo, 1).is_err());
-        assert!(verify_board_capability(Board::CustomRp2040, 2).is_ok());
+    fn flashed_capability_must_be_the_xiao_board_id() {
+        assert!(verify_capability(BOARD_ID).is_ok());
+        // board=1 (Pico) and board=3 (AVR) builds must not verify as a XIAO.
+        assert!(verify_capability(1).is_err());
+        assert!(verify_capability(3).is_err());
     }
     #[test]
-    fn board_variants() {
-        let mut config = UploadConfig::default();
-        assert!(config.fqbn().unwrap().contains("seeed_xiao_rp2040"));
-        assert!(config.needs_neopixel());
-        config.board = Board::Pico;
-        assert!(!config.needs_neopixel());
-        config.board = Board::CustomRp2040;
-        config.custom_board = "rpipico:usb=bad".into();
-        assert!(config.fqbn().is_err());
-    }
-    #[test]
-    fn multiple_and_old_json_ports() {
-        let ports = parse_ports(r#"{"detected_ports":[{"port":{"address":"COM3"},"matching_boards":[{"name":"Arduino Leonardo"}]},{"port":{"address":"COM5"},"matching_boards":[{"fqbn":"arduino:avr:leonardo"}]}]}"#).unwrap();
-        assert_eq!(ports.len(), 2);
-        assert!(ports.iter().all(|p| p.recognized));
+    fn there_is_exactly_one_fqbn_and_core() {
+        let config = UploadConfig::default();
         assert_eq!(
-            parse_ports(r#"[{"address":"COM7","boards":[{"name":"Arduino Leonardo"}]}]"#).unwrap()
-                [0]
-            .address,
-            "COM7"
+            config.fqbn(),
+            "rp2040:rp2040:seeed_xiao_rp2040:usbstack=tinyusb"
         );
+        assert_eq!(CORE, "rp2040:rp2040@6.2.0");
     }
     #[test]
     fn unicode_and_spaces_in_yaml() {
@@ -796,9 +570,7 @@ mod tests {
         for failure in ["core install", "compile"] {
             let root = crate::test_support::Temp::new();
             let config = UploadConfig {
-                board: Board::Leonardo,
                 cli_path: std::env::current_exe().unwrap().display().to_string(),
-                boot_target: "COM3".into(),
                 ..Default::default()
             };
             let runner = FakeRunner {
@@ -820,32 +592,6 @@ mod tests {
                 assert!(!calls.iter().any(|args| args.iter().any(|a| a == "compile")));
             }
         }
-    }
-    #[test]
-    fn multiple_or_unrecognized_bootloaders_require_selection() {
-        let token = Cancellation::default();
-        let mut observer = FakeObserver::default();
-        let ports = vec![
-            BootPort {
-                address: "COM3".into(),
-                recognized: true,
-            },
-            BootPort {
-                address: "COM5".into(),
-                recognized: true,
-            },
-        ];
-        assert_eq!(
-            select_ports(&ports, &token, &mut observer).unwrap(),
-            Some("COM5".into())
-        );
-        assert_eq!(observer.choices, 1);
-        let ports = vec![BootPort {
-            address: "COM9".into(),
-            recognized: false,
-        }];
-        select_ports(&ports, &token, &mut observer).unwrap();
-        assert_eq!(observer.choices, 2);
     }
     #[test]
     fn uf2_destination_error_retains_os_error_and_cancel_does_not_report_success() {
