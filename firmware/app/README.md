@@ -35,7 +35,7 @@ Measured on the PoC (release, no LED, single core):
 | image | flash | RAM |
 | --- | --- | --- |
 | C++ sketch (arduino-pico 6.2.0, TinyUSB) | 90,792 B | 29,712 B |
-| Rust `xiao-firmware` | 28,008 B | 17,804 B |
+| Rust `xiao-firmware` | 28,016 B | 17,804 B |
 
 RAM is dominated by the engine (`InputEngine` 12,564 B) and the 32-slot RX queue
 (2,016 B); the flash difference is the Arduino core and TinyUSB that are no
@@ -44,6 +44,32 @@ longer linked in.
 Flashing: put the board in BOOTSEL mode and copy the UF2 to the `RPI-RP2` drive,
 or `cargo run --release --features hardware` (the `runner` in
 `.cargo/config.toml` is `probe-rs run --chip RP2040`).
+
+## Hardware test
+
+`examples/probe.rs` drives the same host path the GUI uses, and
+`examples/boot.rs` can reboot the board with raw vendor reports when Feature 14
+is broken:
+
+```bash
+cargo run --release --no-default-features --example probe                # Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER
+cargo run --release --no-default-features --example probe -- --keys      # inject 'a', watch the keyboard report complete
+cargo run --release --no-default-features --example probe -- --lease     # idle past lease_ms, device must drop the session
+cargo run --release --no-default-features --example probe -- --bootloader  # reboot into BOOTSEL and check it leaves the bus
+cargo run --release --no-default-features --example boot                 # fallback BOOTSEL without touching Feature 14
+```
+
+Results on a XIAO RP2040 (serial `4250304B38353817`, 2026-10-31): all four modes
+pass. `--keys` shows `keys="a"`, `completed` advancing 2 → 4 and `p=1`, then
+`keys=""` and `p=0` after release — i.e. the keyboard report actually completes
+on the bus, not merely "accepted". `--lease` reports fault `[5]` after 2000 ms
+and the host session is invalidated. `--bootloader` produces the `RPI-RP2` drive
+within a second, and the reflashed image enumerates again with `fs=0`.
+
+Windows refuses a raw `ReadFile` on the keyboard collection (`ERROR_ACCESS_DENIED`)
+because it owns that collection, so the input path is proven from the device side:
+STATUS counters plus report completion. Typing into a focused window is the only
+end-to-end check of the OS side and is not automated yet.
 
 ## What is verified
 
@@ -55,24 +81,28 @@ or `cargo run --release --features hardware` (the `runner` in
   `thumbv6m-none-eabi`, `cargo fmt --check`.
 - `cargo build --release --target thumbv6m-none-eabi --features hardware` links
   with boot2 at `0x10000000` (`.boot2` from embassy-rp, `BOOT_LOADER_W25Q080`)
-  and produces a 111-block UF2 whose first block targets `0x10000000`.
+  and produces a 110-block UF2, every block 256-byte aligned, first at
+  `0x10000000`.
 - Report descriptors: `scripts/gen-usb-descriptors.py --check` compares the Rust
   arrays against `UsbDescriptors.cpp` and the frozen golden bytes.
 - Engine behaviour: `firmware-engine` carries the 37-line A/B trace that matches
   the C++ engine byte for byte.
+- On hardware: enumeration (both collections, same VID/PID/serial as the C++
+  build), Feature 14, OPEN/STATUS/HEARTBEAT/BARRIER, key injection with report
+  completion, lease expiry, BOOTSEL reboot, and reflashing by copying the UF2.
 
 ## What is NOT verified
 
-- **No hardware run yet.** USB enumeration, both interfaces, the 1 ms IN
-  polling, Feature 14 reads, the HID LED `set_report` path, BOOTSEL reboot,
-  and Windows-side latency are all untested on a real XIAO RP2040.
+- HID LED `set_report` (lock keys) is accepted and ignored, but nothing observes
+  whether Windows actually sends those reports.
+- Windows-side latency has not been measured against the C++ build.
 - NeoPixel status indication is not wired: the engine produces `LedState`
   transitions, but nothing drives the WS2812 yet (the C++ build uses core 1).
 - All work runs on core 0. The C++ runtime splits LED rendering onto core 1;
   that is a deliberate deferral, not an oversight.
-- The serial number now comes from the flash unique id via
-  `Flash::blocking_unique_id`; the C++ build uses the same source, but the two
-  hashes have not been compared on one board.
+- The serial number comes from the flash unique id via
+  `Flash::blocking_unique_id`; it matches the C++ build on this board
+  (`4250304B38353817`), but that was a single sample.
 
 ## Layout
 

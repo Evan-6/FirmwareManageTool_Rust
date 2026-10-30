@@ -104,9 +104,13 @@ struct VendorRequests;
 impl RequestHandler for VendorRequests {
     fn get_report(&mut self, id: ReportId, buf: &mut [u8]) -> Option<usize> {
         match id {
-            ReportId::Feature(14) if buf.len() >= 63 => {
-                buf[..63].copy_from_slice(&FEATURE.lock(|cell| cell.get()));
-                Some(63)
+            // Windows hands back the report ID as byte 0 for reports that declare
+            // one, so the 63-byte payload has to be shifted by one and the total
+            // length stays 64 (a 63-byte reply is rejected as a short report).
+            ReportId::Feature(14) if buf.len() >= 64 => {
+                buf[0] = 14;
+                buf[1..64].copy_from_slice(&FEATURE.lock(|cell| cell.get()));
+                Some(64)
             }
             _ => None,
         }
