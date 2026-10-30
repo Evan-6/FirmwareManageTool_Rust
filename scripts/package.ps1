@@ -21,6 +21,9 @@ try {
     foreach ($name in @('firmware', 'shared', 'docs', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $name) -Destination $stage -Recurse
     }
+    # firmware/app is its own workspace, so its target/ is not covered by the root ignore.
+    $firmwareTarget = Join-Path $stage 'firmware/app/target'
+    if (Test-Path -LiteralPath $firmwareTarget) { Remove-Item -LiteralPath $firmwareTarget -Recurse -Force }
     $licenses = Join-Path $stage 'ThirdPartyLicenses'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
     foreach ($package in $metadata.packages) {

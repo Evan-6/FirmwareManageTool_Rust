@@ -33,7 +33,8 @@ def main():
     for name in ("firmware", "shared", "docs", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"):
         path = root / name
         if path.is_dir():
-            shutil.copytree(path, stage / name)
+            # firmware/app is its own workspace; do not ship its build artifacts.
+            shutil.copytree(path, stage / name, ignore=shutil.ignore_patterns("target"))
         else:
             shutil.copy2(path, stage / name)
     licenses = stage / "ThirdPartyLicenses"
