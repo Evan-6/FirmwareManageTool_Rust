@@ -45,7 +45,7 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 - 同來源最後一筆排程可承載 BARRIER 完成序號，避免單次 down/up/barrier 額外佔用佇列；完成仍等待所有先前 USB 輸出。
 - v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。
 - 同時的 v3 session 各自持有 31-byte 狀態，USB 鍵盤／Consumer／按鈕輸出為位元聯集。相同按鍵須所有持有者都放開才放開；snapshot 只替換自己的狀態。不同 session 的相對位移與滾輪按接收順序作用於同一支游標，不能互相覆寫。BARRIER 回覆使用該 session 的序號，不能用另一 session 的完成序號代替。
-- 非阻塞排程由 core 0 擁有，core 1 只處理 LED。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
+- 非阻塞排程由 core 0 擁有（`Ticker::every(1 ms)`），LED 狀態機也在同一核心但目前沒有驅動 WS2812。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
 
 ## 同步與測試
 
@@ -55,7 +55,8 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 python3 scripts/sync-input-protocol.py --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV
 python3 scripts/sync-input-protocol.py --check --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV
 cargo test --locked --workspace --no-default-features
-bash scripts/test-rp2040.sh
+cargo test --manifest-path firmware/app/Cargo.toml
+bash scripts/build-rust-firmware.sh
 ```
 
 同步腳本產生本地 Rust／JavaScript 按鍵表與 Rust wire vectors；`firmware/engine/src/` 是唯一引擎實作，USB report descriptor 凍結在 `firmware/app/src/usb_descriptors.rs` 並由 `tests/descriptors.rs` 釘住。生成物需提交，`--check` 會拒絕漂移。共享 wire 規格與三個主機使用端的同步方式不變。
