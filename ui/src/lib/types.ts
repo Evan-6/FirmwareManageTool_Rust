@@ -99,7 +99,6 @@ export interface UploadConfig {
 export interface Settings {
   upload: UploadConfig;
   latency: LatencyConfig;
-  csv_path: string;
 }
 
 export type MouseAction =

@@ -152,7 +152,6 @@ pub fn run() {
             crate::commands::mouse,
             crate::commands::choose_target,
             crate::commands::cancel,
-            crate::commands::export_report_csv,
             crate::commands::settings_load,
             crate::commands::settings_save,
         ])

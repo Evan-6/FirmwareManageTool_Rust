@@ -8,7 +8,6 @@ import type {
   AppInfo,
   Device,
   LatencyConfig,
-  LatencyReport,
   MouseAction,
   Settings,
   UiEvent,
@@ -27,7 +26,6 @@ export interface Commands {
   mouse: { args: { action: MouseAction }; result: null };
   choose_target: { args: { target: string }; result: null };
   cancel: { args: Record<string, never>; result: null };
-  export_report_csv: { args: { report: LatencyReport; path?: string | null }; result: string };
   settings_load: { args: Record<string, never>; result: Settings };
   settings_save: { args: { settings: Settings }; result: null };
 }

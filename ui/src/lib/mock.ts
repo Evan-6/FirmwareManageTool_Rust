@@ -44,7 +44,6 @@ const settings: Settings = {
     boot_target: "",
   },
   latency: { rounds: 50, mode: "Normal" },
-  csv_path: "",
 };
 
 function emit(event: UiEvent) {

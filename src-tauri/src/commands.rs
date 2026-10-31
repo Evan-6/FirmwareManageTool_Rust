@@ -3,17 +3,9 @@
 
 use crate::dto::{AppInfo, DeviceDto};
 use crate::shell::State;
-use std::path::PathBuf;
-
 use firmware_manage_tool::{
-    backend::AppCommand,
-    firmware,
-    firmware::UploadConfig,
-    hid,
-    latency::{LatencyConfig, Report as LatencyReport},
-    mouse::MouseAction,
-    platform,
-    settings::Settings,
+    backend::AppCommand, firmware, firmware::UploadConfig, hid, latency::LatencyConfig,
+    mouse::MouseAction, settings::Settings,
 };
 use tauri::State as TauriState;
 
@@ -91,29 +83,6 @@ pub fn choose_target(state: TauriState<'_, State>, target: String) -> Result<(),
 pub fn cancel(state: TauriState<'_, State>) -> Result<(), String> {
     state.cancel();
     Ok(())
-}
-
-/// Writes the latency report as the CSV the egui build used to produce. The
-/// report arrives from the UI so the worker does not have to retain it.
-#[tauri::command]
-pub fn export_report_csv(report: LatencyReport, path: Option<String>) -> Result<String, String> {
-    let path = match path.as_deref().map(str::trim) {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs())
-                .unwrap_or_default();
-            platform::application_dir()
-                .map_err(err)?
-                .join(format!("latency-{stamp}.csv"))
-        }
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(err)?;
-    }
-    report.export(&path).map_err(err)?;
-    Ok(path.display().to_string())
 }
 
 #[tauri::command]

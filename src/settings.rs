@@ -8,7 +8,6 @@ use std::path::PathBuf;
 pub struct Settings {
     pub upload: UploadConfig,
     pub latency: LatencyConfig,
-    pub csv_path: String,
 }
 impl Settings {
     fn path() -> Result<PathBuf> {
