@@ -33,7 +33,6 @@ pub const BOARD_ID: u8 = 2;
 #[serde(default)]
 pub struct UploadConfig {
     /// Explicit `cargo.exe`; empty means "look on PATH".
-    #[serde(alias = "cli_path")]
     pub cargo_path: String,
     /// Firmware root (the folder that contains `app/`); empty means the shipped one.
     pub firmware_path: String,
@@ -368,8 +367,14 @@ fn verify_runtime(
             if let Some(caps) = session.capabilities() {
                 verify_capability(caps.board)?;
             }
-            let hello = session.hello(token)?;
-            Ok(hello.raw)
+            let caps = session
+                .capabilities()
+                .ok_or_else(|| anyhow::anyhow!("重新列舉後沒有 v3 能力"))?
+                .clone();
+            Ok(format!(
+                "board={}, fw={}, lease={} ms",
+                caps.board, caps.firmware, caps.lease_ms
+            ))
         },
     )
 }

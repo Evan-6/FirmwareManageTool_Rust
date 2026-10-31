@@ -119,10 +119,6 @@ impl<T: HidTransport> Session<T> {
             firmware: c.firmware.clone(),
             lease_ms: c.lease_ms.into(),
             mouse: c.flags & 4 != 0,
-            raw: format!(
-                "protocol=3,board={},fw={},lease_ms={},flags={},consumer={:02X},device={:02X?}",
-                c.board, c.firmware, c.lease_ms, c.flags, c.consumer, c.device_id
-            ),
         })
     }
     pub fn status(&mut self, cancel: &Cancellation) -> Result<Status> {

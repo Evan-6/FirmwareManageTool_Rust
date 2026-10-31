@@ -136,8 +136,7 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
           firmware: "3.1.0",
           lease_ms: 2000,
           mouse: true,
-          raw: "mock hello",
-        },
+          },
       });
       emit({ kind: "status", status: status() });
       emit({ kind: "ext", ext: ext() });

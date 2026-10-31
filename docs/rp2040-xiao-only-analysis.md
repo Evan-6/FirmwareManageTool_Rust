@@ -67,10 +67,10 @@
 | --- | --- |
 | `firmware/boards/rp2040/src/platform/BoardConfig.h` | VID `0x03F0`、PID `0x0024`、`BoardId = 2`、USB 字串 |
 | `src/firmware.rs` | `FQBN`、`BOARD_ID = 2` |
-| `src/protocol.rs:3` | `IDENTITIES = [(0x03f0,0x0024),(0x6666,0x6666)]` |
+| `src/protocol.rs:3` | `IDENTITIES` 曾同時列出 `0x03f0:0x0024` 與舊身分（已移除，現為單一 `IDENTITY`） |
 | `shared/input-protocol` | 協議常數、Feature 佈局 |
 
-`0x6666/0x6666` 是舊裝置身分，目前仍留在列舉白名單中；XIAO-only 之後是否還需要，取決於是否要偵測舊板並顯示「不支援」。
+舊裝置身分已從白名單移除：那個身分只會講舊協議，硬連上去只會出現看不懂的錯誤，不如掃不到。
 
 ### R6 同一份按鍵表有四種表示
 

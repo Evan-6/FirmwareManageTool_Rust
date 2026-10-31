@@ -17,7 +17,6 @@ export interface Hello {
   firmware: string;
   lease_ms: number;
   mouse: boolean;
-  raw: string;
 }
 
 export interface Status {
@@ -32,6 +31,7 @@ export interface Status {
   held: number;
   buttons: number;
   keys: string[];
+  /// Human-readable dump of the last STATUS frame (shown verbatim in the UI).
   raw: string;
 }
 

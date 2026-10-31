@@ -47,7 +47,7 @@ export function DevicePage() {
         }
       >
         {state.devices.length === 0 ? (
-          <p className="muted">找不到 Vendor HID（03F0:0024 或 6666:6666，usage FF60:0061）。插上板子後按「重新掃描」。</p>
+          <p className="muted">找不到 Vendor HID（03F0:0024，usage FF60:0061）。插上板子後按「重新掃描」。</p>
         ) : (
           <table className="table">
             <thead>

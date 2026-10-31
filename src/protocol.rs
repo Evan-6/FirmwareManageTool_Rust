@@ -1,8 +1,11 @@
-//! Vendor HID v3 identity and UI status models. No legacy wire codec.
+//! Vendor HID v3 identity and UI status models.
 pub use input_protocol::{KeyId, v3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub const IDENTITIES: [(u16, u16); 2] = [(0x03f0, 0x0024), (0x6666, 0x6666)];
+/// The only identity this tool talks to. Older boards used a different one and are
+/// deliberately not recognised: they speak the old protocol, so connecting to them
+/// would only produce confusing failures.
+pub const IDENTITY: (u16, u16) = (0x03f0, 0x0024);
 pub const USAGE_PAGE: u16 = 0xff60;
 pub const USAGE: u16 = 0x61;
 
@@ -14,7 +17,6 @@ pub struct Hello {
     pub firmware: String,
     pub lease_ms: u64,
     pub mouse: bool,
-    pub raw: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {

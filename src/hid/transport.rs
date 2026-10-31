@@ -30,7 +30,7 @@ pub fn enumerate() -> Result<Vec<Device>> {
         Ok(api
             .device_list()
             .filter(|d| {
-                protocol::IDENTITIES.contains(&(d.vendor_id(), d.product_id()))
+                (d.vendor_id(), d.product_id()) == protocol::IDENTITY
                     && d.usage_page() == protocol::USAGE_PAGE
                     && d.usage() == protocol::USAGE
             })
