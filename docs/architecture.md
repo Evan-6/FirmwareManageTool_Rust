@@ -103,3 +103,22 @@ InputConfig 固定 32／32／32 容量與 8 個 session。SourceView 僅在排�
 
 `src-tauri` 在編譯期把 `ui/dist` 嵌進執行檔（`custom-protocol` feature），所以 release 只有一支 exe；
 少了這個 feature，執行檔會去連 dev server，關掉後就是白畫面。
+
+## 建置產物放在哪裡
+
+cargo 會依「profile」和「有沒有指定 `--target`」分開放產物。在 Windows 上 host triple 本來就是
+`x86_64-pc-windows-msvc`，一旦明寫 `--target`，build script／proc macro 這些 host-only 單元留在
+`target/<profile>`，其餘留在 `target/<triple>/<profile>`——同一套依賴編兩份。舊腳本正是這樣寫的，
+`target/` 曾經到 **17 GB**（11 GB `target/debug`、4.3 GB 重複的 `target/release`、1.5 GB triple）。
+現在所有腳本都不加 `--target`：`build.ps1` 改成檢查預設 toolchain 的 host 是不是 MSVC，不是就報錯。
+
+| 位置 | 內容 | 處置 |
+| --- | --- | --- |
+| `target/release` | 應用程式（唯一正式產物） | 保留 |
+| `target/thumbv6m-none-eabi` | `firmware-engine` 的嵌入式建置 | 保留（<1 MB） |
+| `firmware/app/target/thumbv6m-none-eabi` | 韌體 ELF 與 UF2 | 保留（要燒錄） |
+| `target/debug` | 測試與 clippy 的 dev 產物（含 incremental） | 可刪，下次跑測試重建 |
+| `target/x86_64-pc-windows-msvc` | 舊腳本留下的重複 triple 樹 | 可刪 |
+| `firmware/app/target/(debug|release)` | 韌體 host 測試的 dev 產物 | 可刪 |
+
+`scripts/prune.ps1` 列出上述可重建的樹，`-Apply` 才真的刪。清完後整份 repo 約 **2.1 GB**。

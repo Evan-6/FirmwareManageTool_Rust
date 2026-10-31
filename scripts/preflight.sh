@@ -2,6 +2,12 @@
 # Everything that must pass before a commit. The Tauri shell embeds ui/dist, so
 # the frontend is built first; skipping that makes every later cargo command fail
 # on a fresh clone.
+#
+# Do NOT pass --target here. On Windows the host already IS
+# x86_64-pc-windows-msvc, and cargo keeps host-only units (build scripts, proc
+# macros) in target/<profile> while target units go to target/<triple>/<profile> —
+# so passing the host triple builds every dependency twice and that is how target/
+# reached 17 GB. One convention, one tree: plain cargo, target/debug + target/release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

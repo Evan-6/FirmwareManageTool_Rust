@@ -4,7 +4,7 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     throw 'Windows EXE/ZIP packaging must run on Windows using a natively built MSVC executable.'
 }
 $projectRoot = Split-Path $PSScriptRoot -Parent
-if (-not $BinaryPath) { $BinaryPath = Join-Path $projectRoot 'target\x86_64-pc-windows-msvc\release\firmware-manage-tool-app.exe' }
+if (-not $BinaryPath) { $BinaryPath = Join-Path $projectRoot 'target/release/firmware-manage-tool-app.exe' }
 if (-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)) { throw 'Build the Windows MSVC release executable first.' }
 Push-Location $projectRoot
 try {

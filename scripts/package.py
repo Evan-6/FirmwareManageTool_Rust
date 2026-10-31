@@ -18,7 +18,7 @@ def main():
     if sys.platform != "win32":
         parser.error("Windows EXE/ZIP packaging must run on Windows. Use scripts/build.ps1 or scripts/package.ps1 on Windows.")
     root = Path(__file__).resolve().parent.parent
-    binary = options.binary or root / "target/x86_64-pc-windows-msvc/release/firmware-manage-tool-app.exe"
+    binary = options.binary or root / "target/release/firmware-manage-tool-app.exe"
     if not binary.is_file():
         parser.error("Build the Windows MSVC executable first.")
     metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1"], cwd=root))

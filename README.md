@@ -77,8 +77,18 @@ STATUS 的輸入與待送數只屬於查詢者。
  development with C++」及 Windows SDK。於 PowerShell 執行：
 
 ```powershell
-cargo run --locked
+cargo run --locked --target x86_64-pc-windows-msvc
 ./scripts/build.ps1
+```
+
+不要加 `--target x86_64-pc-windows-msvc`。在 Windows 上 host 本來就是這個 triple，而 cargo 會把
+build script／proc macro 這類 host-only 產物放在 `target/<profile>`、目標產物放在
+`target/<triple>/<profile>`；明寫 triple 等於把整套依賴編兩次（本專案曾因此累積到 17 GB）。
+維持一種慣例：不加 `--target`，只有 `target/debug` 與 `target/release`。要清掉可重建的樹：
+
+```powershell
+./scripts/prune.ps1          # 只列大小，不動檔案
+./scripts/prune.ps1 -Apply   # 刪除 target/debug、firmware/app/target/debug 等
 ```
 
 `build.ps1` 執行 fmt、Clippy、測試與 MSVC Release 建置，然後輸出
