@@ -43,7 +43,7 @@ pub enum AppEvent {
     Connected(Device, Hello),
     Disconnected,
     Status(Status),
-    /// STATUS_EXT block; absent on firmware older than 3.1.0+build-hash.
+    /// STATUS_EXT block; absent when the device did not answer the query.
     Ext(input_protocol::v3::StatusExt),
     /// SESSION_LIST: one entry per connected owner.
     Sessions(Vec<input_protocol::v3::SessionInfo>),

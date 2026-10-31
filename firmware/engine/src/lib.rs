@@ -1,9 +1,8 @@
 //! Portable Vendor HID v3 device engine.
 //!
-//! This is a line-by-line port of the C++ engine that the XIAO sketch compiles
-//! today (`firmware/boards/rp2040/src/input/`). It owns sessions, output
-//! scheduling, TX replies, fault handling and the bootloader gate, and it takes
-//! `now_ms` from the caller: it never reads a clock, USB state or an LED.
+//! It owns sessions, output scheduling, TX replies, fault handling and the
+//! bootloader gate, and it takes `now_ms` from the caller: it never reads a
+//! clock, USB state or an LED.
 //!
 //! No heap, no floating point, no `std`. The only generated input is
 //! `keys_generated.rs`, which comes from `shared/input-protocol/keys.json`.

@@ -6,7 +6,6 @@
 //! cargo run --release --no-default-features --example probe -- --lease
 //! cargo run --release --no-default-features --example probe -- --bootloader
 //! cargo run --release --no-default-features --example probe -- --ext
-//! cargo run --release --no-default-features --example probe -- --ping 20
 //! ```
 //!
 //! It walks the exact path the GUI uses: enumerate the vendor collection, read
@@ -14,8 +13,7 @@
 //! and close with BARRIER. `--lease` sits idle past `lease_ms` and expects the
 //! device to drop the session; `--bootloader` asks the device to reboot into
 //! BOOTSEL and waits for it to leave the bus. Exit code 0 means every step
-//! answered; the printed counters are what you diff between the C++ firmware and
-//! the Rust build.
+//! answered; the printed counters are what you diff between runs.
 
 use std::time::{Duration, Instant};
 
@@ -38,15 +36,6 @@ fn main() -> anyhow::Result<()> {
     let enter_bootloader = args.iter().any(|arg| arg == "--bootloader");
     let keys_check = args.iter().any(|arg| arg == "--keys");
     let ext_check = args.iter().any(|arg| arg == "--ext");
-    let brightness = args
-        .windows(2)
-        .find(|pair| pair[0] == "--brightness")
-        .and_then(|pair| pair[1].parse::<u8>().ok());
-    let settings_check = args.iter().any(|arg| arg == "--settings");
-    let ping_count = args
-        .windows(2)
-        .find(|pair| pair[0] == "--ping")
-        .and_then(|pair| pair[1].parse::<u32>().ok());
 
     let devices = hid::enumerate()?;
     if devices.is_empty() {
@@ -96,36 +85,11 @@ fn main() -> anyhow::Result<()> {
     let first = session.status(&cancel)?;
     println!("status: {}", first.raw);
 
-    if let Some(level) = brightness {
-        session.set_brightness(level, &cancel)?;
-        let saved = session.settings(&cancel)?;
-        println!(
-            "settings: brightness={} flags={} boots={}",
-            saved.brightness, saved.flags, saved.boot_count
-        );
-        anyhow::ensure!(saved.brightness == level.min(64), "亮度沒有寫入");
-        println!("settings ok: {} 已持久化（重開機後應保留）", level.min(64));
-        session.finish(&cancel)?;
-        session.close(&cancel)?;
-        return Ok(());
-    }
-
-    if settings_check {
-        let saved = session.settings(&cancel)?;
-        println!(
-            "settings: brightness={} flags={} boots={}",
-            saved.brightness, saved.flags, saved.boot_count
-        );
-        session.finish(&cancel)?;
-        session.close(&cancel)?;
-        return Ok(());
-    }
-
     if ext_check {
         for _ in 0..2 {
             let ext = session.status_ext(&cancel)?;
             println!(
-                "ext: uptime={}ms late_max={}us out={} rx={} tx={} sessions={} last_fault={} age={:?} reset={} boots={} locks={:#04b} build={:08x}",
+                "ext: uptime={}ms late_max={}us out={} rx={} tx={} sessions={} last_fault={} age={:?} reset={} boots={} build={:08x}",
                 ext.uptime_ms,
                 ext.late_max_us,
                 ext.out_depth,
@@ -136,7 +100,6 @@ fn main() -> anyhow::Result<()> {
                 ext.last_fault_age_ms,
                 ext.reset_reason,
                 ext.boot_count,
-                ext.lock_keys,
                 ext.build
             );
             anyhow::ensure!(ext.sessions >= 1, "STATUS_EXT 應顯示至少一個 session");
@@ -148,23 +111,6 @@ fn main() -> anyhow::Result<()> {
             cancel.sleep(Duration::from_millis(20))?;
         }
         println!("ext ok: STATUS_EXT 回報 uptime／佇列水位／reset reason／build hash");
-    }
-
-    if let Some(count) = ping_count {
-        let mut best = u32::MAX;
-        let mut total = 0u64;
-        for index in 0..count.max(1) {
-            let token = [index as u8, 0x5a, 0xc3, 0x01];
-            let rtt = session.ping(token, &cancel)?;
-            best = best.min(rtt);
-            total += u64::from(rtt);
-            cancel.sleep(Duration::from_millis(2))?;
-        }
-        let mean = total / u64::from(count.max(1));
-        println!(
-            "ping {}x: min={best}us mean={mean}us（裝置往返，含 USB 排程）",
-            count.max(1)
-        );
     }
 
     if keys_check {

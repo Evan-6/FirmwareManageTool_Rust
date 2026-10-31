@@ -1,5 +1,5 @@
 use super::*;
-use input_protocol::v3::{DeviceSettings, Packet, SessionInfo, StatusExt};
+use input_protocol::v3::{Packet, SessionInfo, StatusExt};
 use input_protocol::{KeyId, v3::Command};
 impl<T: HidTransport> Session<T> {
     pub(super) fn v3_pump(&mut self, timeout: i32) -> Result<()> {
@@ -43,7 +43,7 @@ impl<T: HidTransport> Session<T> {
         self.v3_exchange(command, cancel).map(|_| ())
     }
     /// Same handshake, but hands back the reply packet so typed queries
-    /// (STATUS_EXT, PING) can parse the payload themselves.
+    /// (STATUS_EXT, SESSION_LIST) can parse the payload themselves.
     pub fn query(&mut self, command: Command, cancel: &Cancellation) -> Result<Packet> {
         cancel.check()?;
         self.v3_exchange(&command, cancel)?
@@ -92,32 +92,6 @@ impl<T: HidTransport> Session<T> {
         Ok(input_protocol::v3::parse_session_list(&reply.payload))
     }
 
-    /// Persisted settings as the device has them right now.
-    pub fn settings(&mut self, cancel: &Cancellation) -> Result<DeviceSettings> {
-        let reply = self.query(Command::SettingsGet, cancel)?;
-        DeviceSettings::parse(&reply.payload)
-    }
-
-    /// Persists the brightness (0..=64) so it survives a power cycle.
-    pub fn set_brightness(&mut self, brightness: u8, cancel: &Cancellation) -> Result<()> {
-        let reply = self.query(
-            Command::SettingsSet {
-                brightness: brightness.min(64),
-                flags: 0,
-            },
-            cancel,
-        )?;
-        ensure!(reply.payload.first() == Some(&0), "裝置拒絕儲存設定");
-        Ok(())
-    }
-
-    /// Round-trip time in microseconds for a 4-byte echo.
-    pub fn ping(&mut self, token: [u8; 4], cancel: &Cancellation) -> Result<u32> {
-        let started = Instant::now();
-        let reply = self.query(Command::Ping(token.to_vec()), cancel)?;
-        ensure!(reply.payload == token, "PING 回音內容不符");
-        Ok(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32)
-    }
     pub fn input(&mut self, command: Command, cancel: &Cancellation) -> Result<()> {
         self.v3_send(&command, cancel)
     }

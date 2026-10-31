@@ -6,32 +6,24 @@
 use crate::state::keyboard_supported;
 
 pub const OPEN: u8 = 1;
-pub const HEARTBEAT: u8 = 2;
-pub const STATUS: u8 = 3;
+/// Explicit teardown: frees the owner slot without counting a failsafe.
+pub const CLOSE: u8 = 2;
+pub const HEARTBEAT: u8 = 3;
 pub const BARRIER: u8 = 4;
 pub const RELEASE: u8 = 5;
-pub const BOOTLOADER: u8 = 6;
-/// Explicit teardown: frees the owner slot without counting a failsafe.
-pub const CLOSE: u8 = 7;
-/// Fixed 24-byte diagnostic block (uptime, queue depths, last fault, reset info).
-pub const STATUS_EXT: u8 = 8;
-/// Echo up to 8 bytes so the host can measure a true device round trip.
-pub const PING: u8 = 9;
-/// Persisted device settings (LED brightness, lifetime counters).
-pub const SETTINGS_GET: u8 = 10;
-pub const SETTINGS_SET: u8 = 11;
+pub const STATUS: u8 = 6;
+/// Fixed 23-byte diagnostic block (uptime, queue depths, last fault, reset info).
+pub const STATUS_EXT: u8 = 7;
 /// Per-session snapshot: eight fixed entries of six bytes.
-pub const SESSION_LIST: u8 = 15;
+pub const SESSION_LIST: u8 = 8;
 pub const SESSION_ENTRY: usize = 6;
 pub const SESSION_LIST_BYTES: usize = SESSION_ENTRY * crate::config::SESSIONS;
-// 12..=14 stay reserved for a future in-application firmware update; the ROM
-// bootloader flow owns updates today, so nothing here claims those opcodes yet.
+pub const BOOTLOADER: u8 = 9;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
-pub const MOVE: u8 = 32;
-pub const ABSOLUTE: u8 = 33;
-pub const BUTTONS: u8 = 34;
-pub const WHEEL: u8 = 35;
+pub const MOVE: u8 = 18;
+pub const BUTTONS: u8 = 19;
+pub const WHEEL: u8 = 20;
 pub const EVENT: u8 = 127;
 
 pub const KEYBOARD_REPORT_ID: u8 = 2;
@@ -53,7 +45,7 @@ pub struct DeviceInfo {
 }
 
 /// Fixed size of the STATUS_EXT payload.
-pub const EXT_BYTES: usize = 24;
+pub const EXT_BYTES: usize = 23;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,13 +98,11 @@ pub fn write32(p: &mut [u8], v: u32) {
 /// Payload length required by each opcode; `None` means the opcode is unknown.
 fn shape(op: u8, n: u8) -> Option<bool> {
     let expected = match op {
-        OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER | CLOSE | STATUS_EXT => n == 0,
-        SETTINGS_GET | SESSION_LIST => n == 0,
-        SETTINGS_SET => n == 4,
-        PING => n <= 8,
+        OPEN | CLOSE | HEARTBEAT | BARRIER | RELEASE | STATUS | STATUS_EXT | SESSION_LIST
+        | BOOTLOADER => n == 0,
         KEY => n == 5,
         SNAPSHOT => n == 31,
-        MOVE | ABSOLUTE | WHEEL => n == 4,
+        MOVE | WHEEL => n == 4,
         BUTTONS => n == 1,
         _ => return None,
     };
@@ -141,18 +131,20 @@ pub fn reply(op: u8, session: u32, seq: u32, data: &[u8]) -> Report {
     report
 }
 
-/// Feature 14 payload. Firmware version is fixed at 3.1.0, capabilities 23,
-/// lease 2000 ms, one poll per millisecond.
+/// Feature 14 payload. Firmware version is 3.2.0, capabilities 15
+/// (NKRO, Consumer, relative mouse, concurrent sessions), lease 2000 ms, one
+/// poll per millisecond.
 pub fn feature(info: &DeviceInfo) -> [u8; REPORT_BYTES] {
     let mut b = [0u8; REPORT_BYTES];
     b[..4].copy_from_slice(b"FMT3");
     b[4] = VERSION;
     b[5] = info.board;
     b[6] = 3;
-    b[7] = 1;
+    b[7] = 2;
+    b[8] = 0;
     write16(&mut b[9..], 2000);
     b[13] = 1;
-    write32(&mut b[14..], 23);
+    write32(&mut b[14..], 15);
     for usage in 4..crate::state::KEYBOARD_END {
         if keyboard_supported(usage) {
             b[18 + usage as usize / 8] |= 1 << (usage % 8);

@@ -7,34 +7,26 @@ pub const FEATURE_ID: u8 = 14;
 pub const REPORT_SIZE: usize = 64;
 pub const PAYLOAD_SIZE: usize = 51;
 pub const OPEN: u8 = 1;
-pub const HEARTBEAT: u8 = 2;
-pub const STATUS: u8 = 3;
+/// Explicit teardown: frees the owner slot without counting a failsafe.
+pub const CLOSE: u8 = 2;
+pub const HEARTBEAT: u8 = 3;
 pub const BARRIER: u8 = 4;
 pub const RELEASE_ALL: u8 = 5;
-pub const BOOTLOADER: u8 = 6;
-/// Explicit teardown: frees the owner slot without counting a failsafe.
-pub const CLOSE: u8 = 7;
-/// Fixed 24-byte diagnostics block; separate from STATUS so the 51-byte payload
-/// that every existing host parses stays frozen.
-pub const STATUS_EXT: u8 = 8;
-/// Echo up to 8 bytes; the device answers with the same bytes.
-pub const PING: u8 = 9;
-/// Persisted device settings (LED brightness today, room for flags).
-pub const SETTINGS_GET: u8 = 10;
-pub const SETTINGS_SET: u8 = 11;
+pub const STATUS: u8 = 6;
+/// Fixed 23-byte diagnostics block, separate from the 51-byte STATUS payload.
+pub const STATUS_EXT: u8 = 7;
 /// Per-session snapshot (eight fixed six-byte entries).
-pub const SESSION_LIST: u8 = 15;
+pub const SESSION_LIST: u8 = 8;
 pub const SESSION_ENTRY: usize = 6;
 pub const SESSION_SLOTS: usize = 8;
 pub const SESSION_LIST_BYTES: usize = SESSION_ENTRY * SESSION_SLOTS;
-pub const STATUS_EXT_BYTES: usize = 24;
+pub const STATUS_EXT_BYTES: usize = 23;
+pub const BOOTLOADER: u8 = 9;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
-pub const MOUSE_MOVE: u8 = 32;
-/// Reserved removed absolute opcode; relative-only firmware rejects it.
-pub const MOUSE_ABS: u8 = 33;
-pub const MOUSE_BUTTONS: u8 = 34;
-pub const WHEEL: u8 = 35;
+pub const MOUSE_MOVE: u8 = 18;
+pub const MOUSE_BUTTONS: u8 = 19;
+pub const WHEEL: u8 = 20;
 pub const EVENT: u8 = 127;
 pub const CONSUMERS: [u16; 7] = [0xe2, 0xe9, 0xea, 0xcd, 0xb5, 0xb6, 0xb7];
 
@@ -223,17 +215,14 @@ impl Capabilities {
 #[derive(Debug, Clone)]
 pub enum Command {
     Open,
+    Close,
     Heartbeat,
     Status,
     Barrier,
     ReleaseAll,
-    Bootloader,
-    Close,
     StatusExt,
-    Ping(Vec<u8>),
-    SettingsGet,
-    SettingsSet { brightness: u8, flags: u8 },
     SessionList,
+    Bootloader,
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
@@ -247,22 +236,14 @@ impl Command {
         }
         Ok(match self {
             Self::Open => (OPEN, vec![]),
+            Self::Close => (CLOSE, vec![]),
             Self::Heartbeat => (HEARTBEAT, vec![]),
             Self::Status => (STATUS, vec![]),
             Self::Barrier => (BARRIER, vec![]),
             Self::ReleaseAll => (RELEASE_ALL, vec![]),
-            Self::Bootloader => (BOOTLOADER, vec![]),
-            Self::Close => (CLOSE, vec![]),
             Self::StatusExt => (STATUS_EXT, vec![]),
-            Self::SettingsGet => (SETTINGS_GET, vec![]),
             Self::SessionList => (SESSION_LIST, vec![]),
-            Self::SettingsSet { brightness, flags } => {
-                (SETTINGS_SET, vec![*brightness, *flags, 0, 0])
-            }
-            Self::Ping(data) => {
-                ensure!(data.len() <= 8, "PING payload 最多 8 bytes");
-                (PING, data.clone())
-            }
+            Self::Bootloader => (BOOTLOADER, vec![]),
             Self::Key(k, d) => {
                 ensure!(k.valid(), "不支援的按鍵");
                 let mut p = pair(k.usage_page.to_le_bytes(), k.usage.to_le_bytes());
@@ -297,16 +278,13 @@ impl Command {
         matches!(
             self,
             Self::Open
+                | Self::Close
                 | Self::Status
                 | Self::Barrier
                 | Self::ReleaseAll
-                | Self::Bootloader
-                | Self::Close
                 | Self::StatusExt
-                | Self::Ping(_)
-                | Self::SettingsGet
-                | Self::SettingsSet { .. }
                 | Self::SessionList
+                | Self::Bootloader
         )
     }
 }
@@ -373,26 +351,6 @@ pub fn parse_session_list(p: &[u8]) -> Vec<SessionInfo> {
     sessions
 }
 
-/// Echo of the persisted settings block.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DeviceSettings {
-    /// 0..=64; scales the NeoPixel brightness.
-    pub brightness: u8,
-    pub flags: u8,
-    pub boot_count: u16,
-}
-impl DeviceSettings {
-    pub fn parse(p: &[u8]) -> Result<Self> {
-        ensure!(p.len() == 8 && p[0] == 0, "無效的設定回應");
-        Ok(Self {
-            brightness: p[1],
-            flags: p[2],
-            boot_count: u16::from_le_bytes([p[5], p[6]]),
-        })
-    }
-}
-
 /// Diagnostics block from STATUS_EXT. Everything here is cheap for the device to
 /// report and expensive for the host to guess.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -412,8 +370,6 @@ pub struct StatusExt {
     /// 0 unknown, 1 software/forced, 2 watchdog, 3 power-on.
     pub reset_reason: u8,
     pub boot_count: u16,
-    /// 1 num lock, 2 caps lock, 4 scroll lock, as reported by the host.
-    pub lock_keys: u8,
     pub build: u32,
 }
 impl StatusExt {
@@ -434,8 +390,7 @@ impl StatusExt {
             last_fault_age_ms: if age == u32::MAX { None } else { Some(age) },
             reset_reason: p[16],
             boot_count: u16::from_le_bytes(p[17..19].try_into()?),
-            lock_keys: p[19],
-            build: u32::from_le_bytes(p[20..24].try_into()?),
+            build: u32::from_le_bytes(p[19..23].try_into()?),
         })
     }
 }
@@ -447,14 +402,12 @@ pub fn check_response(p: &Packet, session: u32, sequence: u32, opcode: u8) -> Re
     let length_ok = match opcode {
         STATUS => p.payload.len() == 51,
         STATUS_EXT => p.payload.len() == STATUS_EXT_BYTES,
-        SETTINGS_GET => p.payload.len() == 8,
         SESSION_LIST => p.payload.len() == SESSION_LIST_BYTES,
-        PING => p.payload.len() <= 8,
         _ => p.payload.len() == 1,
     };
     ensure!(length_ok, "控制回應長度錯誤");
-    if opcode == PING {
-        // PING echoes raw bytes: there is no result byte to inspect.
+    if opcode == SESSION_LIST {
+        // Raw eight-slot table: no result byte, the id lives in byte 0.
         return Ok(());
     }
     let code = *p.payload.first().ok_or_else(|| anyhow::anyhow!("空回應"))?;

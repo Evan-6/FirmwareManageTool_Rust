@@ -1,10 +1,9 @@
-//! Shared harness for the engine tests. It mirrors `firmware/tests/rp2040_engine_test.cpp`:
-//! `now` advances one millisecond per step, one input report is in flight at a
-//! time, and every queued vendor reply is drained immediately.
+//! Shared harness for the engine tests: `now` advances one millisecond per step,
+//! one input report is in flight at a time, and every queued vendor reply is
+//! drained immediately.
 #![allow(dead_code)]
 
 use firmware_engine::{InputEngine, InputReport, Report, wire};
-use std::fmt::Write as _;
 
 pub struct Harness {
     pub engine: InputEngine,
@@ -17,9 +16,6 @@ pub struct Harness {
     pub vendor_generation: u32,
     pub input: Vec<InputReport>,
     pub replies: Vec<Report>,
-    /// Text form of everything the platform could observe, used by the A/B test
-    /// against `firmware/tests/engine_trace.cpp`.
-    pub trace: String,
 }
 
 impl Harness {
@@ -34,7 +30,6 @@ impl Harness {
             vendor_generation: 0,
             input: Vec::new(),
             replies: Vec::new(),
-            trace: String::new(),
         };
         harness.tick(12);
         harness
@@ -62,15 +57,6 @@ impl Harness {
         ) {
             self.input.push(report);
             self.pending = report.id;
-            let _ = write!(
-                self.trace,
-                "I {} {} {} ",
-                self.now, report.id, report.length
-            );
-            for byte in &report.data[..report.length as usize] {
-                let _ = write!(self.trace, "{byte:02x}");
-            }
-            let _ = writeln!(self.trace);
         }
         if self.vendor_pending && self.acknowledge {
             self.engine.vendor_completed(self.vendor_generation);
@@ -79,19 +65,6 @@ impl Harness {
         self.engine.service_control(self.now);
         if let Some(reply) = self.engine.vendor_reply().copied() {
             self.replies.push(reply);
-            let _ = write!(
-                self.trace,
-                "R {} {} {} {} {} ",
-                self.now,
-                reply.bytes[1],
-                wire::read32(&reply.bytes[4..]),
-                wire::read32(&reply.bytes[8..]),
-                reply.bytes[2]
-            );
-            for byte in &reply.bytes[wire::HEADER..wire::HEADER + reply.bytes[2] as usize] {
-                let _ = write!(self.trace, "{byte:02x}");
-            }
-            let _ = writeln!(self.trace);
             if reply.bytes[1] == (wire::BOOTLOADER | 128) && reply.bytes[wire::HEADER] == 0 {
                 self.vendor_pending = true;
                 self.vendor_generation = self.engine.boot_generation();

@@ -46,7 +46,6 @@ export interface StatusExt {
   lastFaultAgeMs: number | null;
   resetReason: number;
   bootCount: number;
-  lockKeys: number;
   build: number;
 }
 

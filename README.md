@@ -1,11 +1,10 @@
 # FirmwareManageTool — XIAO RP2040 鍵盤／滑鼠管理工具
 
 Windows 桌面程式＋裝置韌體。程式透過 USB 對 Seeed XIAO RP2040 下指令，裝置以真正的
-HID 鍵盤／滑鼠身分送出輸入，延遲約 1.5–1.8 ms（1 ms poll，實測值）。沒有 COM 埠、沒有
-序列埠回退、沒有背景服務。
+HID 鍵盤／滑鼠身分送出輸入（1 ms poll）。沒有 COM 埠、沒有序列埠回退、沒有背景服務。
 
 - **圖形介面**：Tauri 2 + React 19 + TypeScript，單一 exe，不連網路。
-- **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，33.7 KiB flash／30.1 KiB RAM。
+- **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，32.7 KiB flash／30.0 KiB RAM。
 - **同時多程式**：最多八個控制程式（本工具、MSCV、EvanRemote 等）共用同一支裝置，各自獨立 session。
 - **輸入**：NKRO 鍵盤、Consumer 多媒體鍵、五鍵相對滑鼠（含雙軸滾輪）、擬人化移動、文字輸入、組合鍵、巨集。
 
@@ -51,7 +50,7 @@ cargo run --release -p firmware-manage-tool-app
 | 頁面 | 內容 |
 | --- | --- |
 | **裝置** | 掃描／連線／中斷、能力與身分（協定、韌體版本、build、租約、NKRO／多媒體／滑鼠）、目前按住的鍵、session 數、開機次數、reset 原因、全域熱鍵狀態 |
-| **即時狀態** | 150 ms 取樣的 STATUS 指標（received／completed／pending／剩餘租約／rx／tx／hid／failsafe）＋30 秒走勢、健康判定、`STATUS_EXT` 診斷（uptime、tick 遲到、佇列深度、上次故障、reset 原因、開機次數、鎖定鍵）、連線擁有者表格（`SESSION_LIST`：誰按著幾個鍵、剩餘租約、是否要求 BOOTSEL） |
+| **即時狀態** | 150 ms 取樣的 STATUS 指標（received／completed／pending／剩餘租約／rx／tx／hid／failsafe）＋30 秒走勢、健康判定、`STATUS_EXT` 診斷（uptime、tick 遲到、佇列深度、上次故障、reset 原因、開機次數）、連線擁有者表格（`SESSION_LIST`：誰按著幾個鍵、剩餘租約、是否要求 BOOTSEL） |
 | **韌體** | 韌體目錄與 `cargo` 路徑、建置進度、BOOTSEL 與複製進度、燒錄後驗證 |
 | **延遲** | 1–10000 輪、模式（一般／高精度／極限 REALTIME）、逐輪結果與統計 |
 | **滑鼠** | 擬人化參數（曲率、抖動、過衝、收尾停頓、最小步距、時間曲線）＋**實際軌跡預覽**、相對移動、點擊／拖曳／滾輪、文字輸入、組合鍵、巨集錄製與重播 |
@@ -83,11 +82,7 @@ cargo run --release --example probe
 cargo run --release --example probe -- --ext            # 讀 STATUS_EXT 診斷
 cargo run --release --example probe -- --keys           # 注入 'a'，確認鍵盤報告真的完成
 cargo run --release --example probe -- --lease          # 閒置超過租約，裝置應回收 session
-cargo run --release --example probe -- --ping 20        # 量裝置往返時間
-cargo run --release --example probe -- --settings       # 讀持久設定（亮度、開機次數）
-cargo run --release --example probe -- --brightness 8   # 設定 NeoPixel 亮度（0–64）
 cargo run --release --example probe -- --bootloader     # 請裝置進 BOOTSEL
-cargo run --release --example boot                      # 只用 raw report 進 BOOTSEL（Feature 14 壞掉時的救援）
 
 # 建置韌體＋打包 UF2＋印容量
 bash scripts/build-rust-firmware.sh
@@ -113,14 +108,16 @@ src-tauri/          Tauri 2 外殼：20 個命令、事件、視窗與熱鍵
 ui/                 React 19 + TypeScript + Vite（五頁）
 shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測試向量
 firmware/engine/    協議引擎（no_std、固定容量）：session、排程、狀態、LED
-firmware/app/       正式韌體：embassy-rp USB device、boot2、NeoPixel、flash 設定
-scripts/            建置、打包、preflight、清理、契約檢查、CDP 檢查
+firmware/app/       正式韌體：embassy-rp USB device、boot2、NeoPixel
+clients/            Rust／C++／Python 最小操作端（由協議常數產生）
+scripts/            建置、打包、preflight、清理、契約與客戶端檢查、CDP 檢查
 ```
 
 ## 規格
 
 - **線路協定（給要接裝置的人）**：[firmware/protocol-v3.md](firmware/protocol-v3.md)
-  — framing、opcode、STATUS／STATUS_EXT／SESSION_LIST 格式、錯誤碼、租約與完成語意。
+  — framing、opcode、STATUS／STATUS_EXT／SESSION_LIST 格式、錯誤碼、租約與完成語意，
+  以及 Rust／C++／Python 三個最小操作端的用法。
 - **內部架構**：[docs/architecture.md](docs/architecture.md) — 主機四層、韌體六階段、建置產物規則。
 - **韌體**：[firmware/README.md](firmware/README.md)、[firmware/app/README.md](firmware/app/README.md)。
 

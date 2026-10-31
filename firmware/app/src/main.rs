@@ -9,7 +9,6 @@
 //! The board also carries a watchdog, a NeoPixel status LED (GPIO12 data,
 //! GPIO11 power) and the diagnostics that feed STATUS_EXT.
 //!
-//! The main loop keeps the stage order the C++ runtime used to have:
 //! `Runtime::step` submits at most one report, and the awaited write reports its
 //! completion on the next pass, so "accepted" is never confused with "sent".
 
@@ -89,13 +88,9 @@ const TICK: Duration = Duration::from_millis(1);
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
 /// Written to watchdog scratch on boot so a cold start is distinguishable.
 const BOOT_MAGIC: u32 = 0xB007_10AD;
-/// Persisted settings live in the last flash sector, which the image never
-/// occupies: erasing it cannot touch running code.
-const SETTINGS_OFFSET: u32 = (FLASH_SIZE as u32) - 4096;
-const SETTINGS_MAGIC: &[u8; 4] = b"FSET";
-const SETTINGS_VERSION: u8 = 1;
-const LED_MAX: u8 = 64;
-const SETTINGS_BYTES: usize = 32;
+/// Fixed NeoPixel level: the status colours below are already dim enough for the
+/// 100 mA the descriptor asks for, and nothing scales them at runtime.
+const LED_LEVEL: u8 = 64;
 
 /// RP2040 (Cortex-M0+) has no atomic read-modify-write, so shared flags live in a
 /// critical-section cell instead of `AtomicU16::fetch_add`, which does not exist
@@ -122,10 +117,6 @@ impl Flags {
 static FLAGS: Mutex<CriticalSectionRawMutex, Cell<Flags>> = Mutex::new(Cell::new(Flags::new()));
 static RX: Channel<CriticalSectionRawMutex, Report, RX_DEPTH> = Channel::new();
 static FEATURE: Mutex<CriticalSectionRawMutex, Cell<[u8; 63]>> = Mutex::new(Cell::new([0; 63]));
-/// Keyboard LED output report bits: 1 num lock, 2 caps lock, 4 scroll lock.
-static LOCK_KEYS: Mutex<CriticalSectionRawMutex, Cell<u8>> = Mutex::new(Cell::new(0));
-/// LED brightness, persisted; the status colours are scaled by it.
-static BRIGHTNESS: Mutex<CriticalSectionRawMutex, Cell<u8>> = Mutex::new(Cell::new(LED_MAX));
 /// (reset reason, boot count) read from watchdog scratch at startup.
 static BOOT: Mutex<CriticalSectionRawMutex, Cell<(u8, u16)>> = Mutex::new(Cell::new((0, 0)));
 
@@ -164,31 +155,7 @@ impl Handler for DeviceHandler {
     }
 }
 
-/// What survives a power cycle. Small on purpose: one sector, rewritten only when
-/// the user changes something.
-#[derive(Clone, Copy)]
-struct Persisted {
-    brightness: u8,
-    flags: u8,
-}
-
-impl Persisted {
-    const DEFAULT: Self = Self {
-        brightness: LED_MAX,
-        flags: 0,
-    };
-}
-
-fn fnv1a(bytes: &[u8]) -> u32 {
-    let mut hash = 0x811c_9dc5u32;
-    for byte in bytes {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    hash
-}
-
-/// Feature 14 (read-only capabilities) and the keyboard LED output report.
+/// Feature 14 (read-only capabilities).
 struct VendorRequests;
 
 impl RequestHandler for VendorRequests {
@@ -206,20 +173,13 @@ impl RequestHandler for VendorRequests {
         }
     }
 
-    fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
-        // Interface 0's LED output report (id 2, one byte): bit0 num lock, bit1
-        // caps lock, bit2 scroll lock. Kept for STATUS_EXT; nothing is driven.
-        if let ReportId::Out(2) = id
-            && let Some(bits) = data.first()
-        {
-            LOCK_KEYS.lock(|cell| cell.set(*bits));
-        }
+    fn set_report(&mut self, _id: ReportId, _data: &[u8]) -> OutResponse {
+        // The input collection declares no output report: acknowledge and drop.
         OutResponse::Accepted
     }
 }
 
 struct UsbTransport<'d> {
-    flash: embassy_rp::flash::Flash<'d, embassy_rp::peripherals::FLASH, embassy_rp::flash::Blocking, FLASH_SIZE>,
     input: HidWriter<'d, Driver<'d, USB>, REPORT_SIZE>,
     vendor: HidWriter<'d, Driver<'d, USB>, REPORT_SIZE>,
     pending_input: Option<InputReport>,
@@ -253,58 +213,6 @@ impl UsbTransport<'_> {
         buffer[1..].copy_from_slice(&report.bytes);
         if self.vendor.write(&buffer).await.is_ok() {
             self.vendor_complete = Some(generation);
-        }
-    }
-
-    fn read_settings(&mut self) -> Option<Persisted> {
-        let mut buffer = [0u8; SETTINGS_BYTES];
-        self.flash
-            .blocking_read(SETTINGS_OFFSET, &mut buffer)
-            .ok()?;
-        if &buffer[0..4] != SETTINGS_MAGIC || buffer[4] != SETTINGS_VERSION {
-            return None;
-        }
-        let crc = u32::from_le_bytes(buffer[16..20].try_into().ok()?);
-        if crc != fnv1a(&buffer[0..16]) {
-            return None;
-        }
-        Some(Persisted {
-            brightness: buffer[5].min(LED_MAX),
-            flags: buffer[6],
-        })
-    }
-
-    fn write_settings(&mut self, value: Persisted) -> u8 {
-        let mut buffer = [0u8; SETTINGS_BYTES];
-        buffer[0..4].copy_from_slice(SETTINGS_MAGIC);
-        buffer[4] = SETTINGS_VERSION;
-        buffer[5] = value.brightness.min(LED_MAX);
-        buffer[6] = value.flags;
-        let crc = fnv1a(&buffer[0..16]);
-        buffer[16..20].copy_from_slice(&crc.to_le_bytes());
-        // embassy erases block-aligned ranges only: the end must be a sector
-        // boundary, not offset + record length.
-        let end = FLASH_SIZE as u32;
-        if let Err(error) = self.flash.blocking_erase(SETTINGS_OFFSET, end) {
-            return match error {
-                embassy_rp::flash::Error::OutOfBounds => 21,
-                embassy_rp::flash::Error::Unaligned => 22,
-                embassy_rp::flash::Error::InvalidCore => 24,
-                embassy_rp::flash::Error::Other => 23,
-            };
-        }
-        if let Err(error) = self.flash.blocking_write(SETTINGS_OFFSET, &buffer) {
-            return match error {
-                embassy_rp::flash::Error::OutOfBounds => 25,
-                embassy_rp::flash::Error::Unaligned => 31,
-                embassy_rp::flash::Error::InvalidCore => 32,
-                embassy_rp::flash::Error::Other => 26,
-            };
-        }
-        match self.read_settings() {
-            Some(saved) if saved.brightness == value.brightness => 0,
-            Some(_) => 27,
-            None => 28,
         }
     }
 }
@@ -362,32 +270,6 @@ impl Transport for UsbTransport<'_> {
 
     fn take_vendor_complete(&mut self) -> Option<u32> {
         self.vendor_complete.take()
-    }
-
-    fn answer_platform(&mut self, report: &Report) -> Option<Report> {
-        let op = report.bytes[1];
-        if op != wire::SETTINGS_GET && op != wire::SETTINGS_SET {
-            return None;
-        }
-        let session = wire::read32(&report.bytes[4..]);
-        let seq = wire::read32(&report.bytes[8..]);
-        let saved = self.read_settings().unwrap_or(Persisted::DEFAULT);
-        if op == wire::SETTINGS_GET {
-            let (_, boots) = boot_info();
-            let mut payload = [0u8; 8];
-            payload[1] = saved.brightness;
-            payload[2] = saved.flags;
-            payload[3..5].copy_from_slice(&0u16.to_le_bytes());
-            payload[5..7].copy_from_slice(&boots.to_le_bytes());
-            return Some(wire::reply(wire::SETTINGS_GET | 128, session, seq, &payload));
-        }
-        let value = Persisted {
-            brightness: report.bytes[12].min(LED_MAX),
-            flags: report.bytes[13],
-        };
-        let code = self.write_settings(value);
-        BRIGHTNESS.lock(|cell| cell.set(value.brightness));
-        Some(wire::reply(wire::SETTINGS_SET | 128, session, seq, &[code]))
     }
 
     fn take_reset(&mut self) -> bool {
@@ -458,11 +340,9 @@ async fn vendor_reader<'d>(mut reader: HidReader<'d, Driver<'d, USB>, REPORT_SIZ
     }
 }
 
-/// Colour for one LED state. Bright enough to read across a desk, dim enough that
-/// the current draw stays inside the 100 mA the descriptor asks for.
+/// Colour for one LED state, scaled by the fixed `LED_LEVEL`.
 fn led_colour(state: u8) -> RGB8 {
-    let level = BRIGHTNESS.lock(|cell| cell.get());
-    let scale = |channel: u8| ((u16::from(channel) * u16::from(level)) / u16::from(LED_MAX)) as u8;
+    let scale = |channel: u8| ((u16::from(channel) * u16::from(LED_LEVEL)) / 64) as u8;
     match state {
         1 => RGB8 { r: 0, g: 0, b: scale(12) },      // idle: dim blue
         2 => RGB8 { r: 0, g: scale(28), b: 0 },      // keys held: green
@@ -495,7 +375,6 @@ async fn engine_loop(
             rx_depth: RX.len() as u8,
             reset_reason,
             boot_count,
-            lock_keys: LOCK_KEYS.lock(|cell| cell.get()),
         });
 
         let now_ms = now.as_millis() as u32;
@@ -647,7 +526,6 @@ async fn main(_spawner: Spawner) {
     let mut usb = builder.build();
 
     let transport = UsbTransport {
-        flash,
         input,
         vendor: vendor_writer_half,
         pending_input: None,

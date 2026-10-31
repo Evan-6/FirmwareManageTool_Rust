@@ -15,10 +15,10 @@ impl UsbModel {
         r[0] = 14;
         r[1..5].copy_from_slice(b"FMT3");
         r[5] = 3;
-        r[6] = 1;
+        r[6] = 2;
         r[7] = 3;
-        r[8] = 1;
-        r[15..19].copy_from_slice(&23u32.to_le_bytes());
+        r[8] = 2;
+        r[15..19].copy_from_slice(&15u32.to_le_bytes());
         r[10..12].copy_from_slice(&2000u16.to_le_bytes());
         r[14] = 1;
         for entry in KEYS {

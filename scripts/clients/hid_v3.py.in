@@ -1,0 +1,278 @@
+"""@HEADER@
+
+A transport is anything with three methods::
+
+    class MyTransport:
+        def feature(self) -> bytes | None: ...   # Feature 14 report, id in byte 0
+        def write(self, report: bytes) -> None: ...  # 64-byte report, id 12
+        def read(self, timeout_ms: int) -> bytes | None: ...  # 64-byte report, id 13
+
+Nothing else is required: no scanning, no UI, no flashing.
+"""
+
+from __future__ import annotations
+
+import os
+import struct
+
+REPORT_SIZE = 64
+OUT_ID = 12
+IN_ID = 13
+FEATURE_ID = 14
+VERSION = 3
+MAX_PAYLOAD = 51
+HEADER = 12
+EVENT = 0x7F
+
+@OPCODES@
+
+FAULTS = {
+    1: "framing",
+    2: "busy (same session id, or eight owners already open)",
+    3: "invalid input",
+    5: "lease expired",
+    6: "HID send failed",
+    7: "USB disconnect",
+    8: "overflow or stale output",
+    9: "duplicate sequence",
+    10: "sequence gap",
+}
+
+
+class Error(RuntimeError):
+    """Device-side failure: the protocol answered, but with an error."""
+
+
+class ProtocolError(RuntimeError):
+    """The bytes on the wire do not follow protocol 3."""
+
+
+def _u16(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<H", data, offset)[0]
+
+
+def _u32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0]
+
+
+class Feature:
+    def __init__(self, board: int, firmware: str, lease_ms: int, poll_ms: int, capabilities: int):
+        self.board = board
+        self.firmware = firmware
+        self.lease_ms = lease_ms
+        self.poll_ms = poll_ms
+        self.capabilities = capabilities
+
+    def supports_nkro(self) -> bool:
+        return bool(self.capabilities & 1)
+
+    def supports_consumer(self) -> bool:
+        return bool(self.capabilities & 2)
+
+    def supports_mouse(self) -> bool:
+        return bool(self.capabilities & 4)
+
+    def supports_sessions(self) -> bool:
+        return bool(self.capabilities & 8)
+
+
+class Status:
+    def __init__(self, payload: bytes):
+        if len(payload) != 51 or payload[0] != 0:
+            raise ProtocolError("bad STATUS payload")
+        self.received = _u32(payload, 1)
+        self.completed = _u32(payload, 5)
+        self.pending = payload[9]
+        self.lease_ms = _u16(payload, 10)
+        self.rx = _u16(payload, 12)
+        self.tx = _u16(payload, 14)
+        self.hid = _u16(payload, 16)
+        self.failsafe = _u16(payload, 18)
+        self.snapshot = payload[20:51]
+
+
+class StatusExt:
+    def __init__(self, payload: bytes):
+        if len(payload) != 23 or payload[0] != 0:
+            raise ProtocolError("bad STATUS_EXT payload")
+        self.uptime_ms = _u32(payload, 1)
+        self.late_max_us = _u16(payload, 5)
+        self.out_depth = payload[7]
+        self.rx_depth = payload[8]
+        self.tx_depth = payload[9]
+        self.sessions = payload[10]
+        self.last_fault = payload[11]
+        age = _u32(payload, 12)
+        self.last_fault_age_ms = None if age == 0xFFFFFFFF else age
+        self.reset_reason = payload[16]
+        self.boot_count = _u16(payload, 17)
+        self.build = _u32(payload, 19)
+
+
+class SessionInfo:
+    def __init__(self, id: int, lease_ms: int, held: int, flags: int):
+        self.id = id
+        self.lease_ms = lease_ms
+        self.held = held
+        self.flags = flags
+
+
+class Client:
+    """One owner slot. Call verify() -> open() -> commands -> close()."""
+
+    def __init__(self, transport, session: int | None = None):
+        self.transport = transport
+        self.session = session or ((os.getpid() ^ 0x5E5510) & 0x7FFFFFFF) or 1
+        self.sequence = 0
+        self.feature = None
+        self._last_heartbeat = 0
+
+    # -- session lifecycle -------------------------------------------------
+
+    def verify(self) -> Feature:
+        report = self.transport.feature()
+        if not report or len(report) != REPORT_SIZE or report[0] != FEATURE_ID:
+            raise ProtocolError("no Feature 14 reply")
+        if report[1:5] != b"FMT3" or report[5] != VERSION:
+            raise ProtocolError("Feature 14 is not protocol 3")
+        self.feature = Feature(
+            board=report[6],
+            firmware=f"{report[7]}.{report[8]}.{report[9]}",
+            lease_ms=_u16(report, 10),
+            poll_ms=report[14],
+            capabilities=_u32(report, 15),
+        )
+        return self.feature
+
+    def open(self) -> None:
+        self._command(OPEN, b"", reply=True)
+
+    def close(self) -> None:
+        self._command(CLOSE, b"", reply=True)
+
+    def heartbeat(self, now_ms: int) -> None:
+        self._command(HEARTBEAT, b"", reply=False)
+        self._last_heartbeat = now_ms
+
+    def maybe_heartbeat(self, now_ms: int, interval_ms: int = 500) -> None:
+        if now_ms - self._last_heartbeat >= interval_ms:
+            self.heartbeat(now_ms)
+
+    # -- queries -----------------------------------------------------------
+
+    def status(self) -> Status:
+        return Status(self._command(STATUS, b"", reply=True).payload)
+
+    def status_ext(self) -> StatusExt:
+        return StatusExt(self._command(STATUS_EXT, b"", reply=True).payload)
+
+    def sessions(self) -> list[SessionInfo]:
+        payload = self._command(SESSION_LIST, b"", reply=True).payload
+        if len(payload) != 48:
+            raise ProtocolError("bad SESSION_LIST payload")
+        out = []
+        for index in range(8):
+            entry = payload[index * 6 : index * 6 + 6]
+            id = _u16(entry, 0)
+            if id:
+                out.append(SessionInfo(id, _u16(entry, 2), entry[4], entry[5]))
+        return out
+
+    # -- control -----------------------------------------------------------
+
+    def barrier(self) -> None:
+        self._command(BARRIER, b"", reply=True)
+
+    def release_all(self) -> None:
+        self._command(RELEASE, b"", reply=True)
+
+    def bootloader(self) -> None:
+        self._command(BOOTLOADER, b"", reply=True)
+
+    # -- input -------------------------------------------------------------
+
+    def key(self, page: int, usage: int, down: bool) -> None:
+        self._command(KEY, struct.pack("<HHB", page, usage, 1 if down else 0), reply=False)
+
+    def snapshot(self, state: bytes) -> None:
+        if len(state) != 31:
+            raise ValueError("snapshot is 31 bytes")
+        self._command(SNAPSHOT, bytes(state), reply=False)
+
+    def mouse_move(self, dx: int, dy: int) -> None:
+        if not (-1024 <= dx <= 1024 and -1024 <= dy <= 1024):
+            raise ValueError("mouse move is limited to +/-1024 per axis")
+        self._command(MOVE, struct.pack("<hh", dx, dy), reply=False)
+
+    def buttons(self, mask: int) -> None:
+        if mask & ~0x1F:
+            raise ValueError("buttons are bits 0-4")
+        self._command(BUTTONS, bytes([mask]), reply=False)
+
+    def wheel(self, vertical: int, horizontal: int) -> None:
+        if not (-1024 <= vertical <= 1024 and -1024 <= horizontal <= 1024):
+            raise ValueError("wheel is limited to +/-1024 per axis")
+        self._command(WHEEL, struct.pack("<hh", vertical, horizontal), reply=False)
+
+    # -- wire --------------------------------------------------------------
+
+    def _command(self, opcode: int, payload: bytes, reply: bool):
+        if len(payload) > MAX_PAYLOAD:
+            raise ValueError("payload is at most 51 bytes")
+        if self.sequence >= 0xFFFFFFFF:
+            raise Error("sequence exhausted; open a new session")
+        self.sequence += 1
+        sequence = self.sequence
+        report = bytearray(REPORT_SIZE)
+        report[0] = OUT_ID
+        report[1] = VERSION
+        report[2] = opcode
+        report[3] = len(payload)
+        struct.pack_into("<II", report, 5, self.session, sequence)
+        report[13 : 13 + len(payload)] = payload
+        self.transport.write(bytes(report))
+        if not reply:
+            return None
+        return self._await(opcode, sequence)
+
+    def _await(self, opcode: int, sequence: int, timeout_ms: int = 1000):
+        import time
+
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            report = self.transport.read(max(1, int((deadline - time.monotonic()) * 1000)))
+            if not report:
+                continue
+            if len(report) != REPORT_SIZE or report[0] != IN_ID:
+                raise ProtocolError("input report is not 64 bytes behind id 13")
+            if report[1] != VERSION or report[4] != 0:
+                raise ProtocolError("bad version or flags")
+            length = report[3]
+            if length > MAX_PAYLOAD:
+                raise ProtocolError("payload longer than 51 bytes")
+            session = _u32(report, 5)
+            if session != self.session:
+                continue
+            got = report[2]
+            got_sequence = _u32(report, 9)
+            if got == EVENT:
+                code = report[13]
+                raise Error(f"device event: {FAULTS.get(code, code)}")
+            if got != (opcode | 0x80) or got_sequence != sequence:
+                continue
+            payload = report[13 : 13 + length]
+            if not payload:
+                raise ProtocolError("empty control reply")
+            if opcode == SESSION_LIST:
+                return Reply(got, got_sequence, payload)
+            if payload[0] != 0:
+                raise Error(f"{FAULTS.get(payload[0], 'unknown')} (code {payload[0]})")
+            return Reply(got, got_sequence, payload)
+        raise Error("control reply timed out")
+
+
+class Reply:
+    def __init__(self, opcode: int, sequence: int, payload: bytes):
+        self.opcode = opcode
+        self.sequence = sequence
+        self.payload = payload

@@ -574,7 +574,6 @@ mod tests {
         }
         fn write(&mut self, report: &[u8]) -> Result<usize> {
             let packet = v3::Packet::decode(report, v3::OUT_ID)?;
-            assert_ne!(packet.opcode, v3::MOUSE_ABS);
             if packet.opcode == v3::MOUSE_MOVE {
                 let dx = i16::from_le_bytes(packet.payload[..2].try_into()?);
                 let dy = i16::from_le_bytes(packet.payload[2..].try_into()?);

@@ -1,16 +1,4 @@
-//! Static size budget. The XIAO has 264 KiB of SRAM and the shipping C++ engine
-//! uses 29,712 bytes of static RAM in total; the Rust engine must stay in the
-//! same order of magnitude before it can replace it.
-//!
-//! Measured with `arm-none-eabi-g++ -mcpu=cortex-m0plus -mthumb -Os` on the C++
-//! engine (`char probe[sizeof(T)]` + `nm -S`) versus `size_of` here:
-//!
-//! | type | C++ | Rust |
-//! | --- | ---: | ---: |
-//! | InputState | 31 | 31 |
-//! | Session | 60 | 56 |
-//! | OutputScheduler | 10,072 | — |
-//! | InputEngine | 12,600 | 12,564 |
+//! Static size budget. The XIAO has 264 KiB of SRAM.
 //!
 //! These are layout assertions, not measurements: they hold on every target and
 //! fail the build when a struct grows without review.

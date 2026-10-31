@@ -24,8 +24,6 @@ pub struct PlatformInfo {
     /// 0 unknown, 1 software/forced, 2 watchdog, 3 power-on.
     pub reset_reason: u8,
     pub boot_count: u16,
-    /// HID output report bits: 1 caps lock, 2 num lock, 4 scroll lock.
-    pub lock_keys: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -151,18 +149,6 @@ impl InputEngine {
         }
         if op == wire::SESSION_LIST {
             self.session_list(slot, seq);
-            return;
-        }
-        // Platform-owned commands: the engine only keeps the session bookkeeping
-        // (sequence, lease) correct; the transport answers them from flash.
-        if op == wire::SETTINGS_GET || op == wire::SETTINGS_SET {
-            self.sessions.get_mut(slot).lease_at = self.now;
-            return;
-        }
-        if op == wire::PING {
-            // Only the declared length is echoed; the rest of the frame is padding.
-            let length = usize::from(p[2]).min(8);
-            self.ping(slot, seq, &data[..length]);
             return;
         }
         if self.boot_requested {
@@ -306,9 +292,6 @@ impl InputEngine {
             }
             self.sessions.get_mut(slot).state.buttons = data[0];
             self.queue_state(seq, false, session)
-        } else if op == wire::ABSOLUTE {
-            self.session_fault(slot, 3);
-            return;
         } else {
             let a = wire::read16(&data[0..]) as i16 as i32;
             let b = wire::read16(&data[2..]) as i16 as i32;
@@ -634,16 +617,9 @@ impl InputEngine {
         b[12..16].copy_from_slice(&age.to_le_bytes());
         b[16] = self.platform.reset_reason;
         b[17..19].copy_from_slice(&self.platform.boot_count.to_le_bytes());
-        b[19] = self.platform.lock_keys;
-        b[20..24].copy_from_slice(&self.build.to_le_bytes());
+        b[19..23].copy_from_slice(&self.build.to_le_bytes());
         self.late_max_us = 0;
         self.reply(wire::STATUS_EXT | 128, id, seq, &b);
-    }
-
-    /// Echo back whatever the host sent (up to 8 bytes) for round-trip timing.
-    fn ping(&mut self, slot: usize, seq: u32, data: &[u8]) {
-        let id = self.sessions.get(slot).id;
-        self.reply(wire::PING | 128, id, seq, &data[..data.len().min(8)]);
     }
 
     /// Who else is driving this keyboard: id tail, remaining lease, held keys and

@@ -87,7 +87,6 @@ function ext(): StatusExt {
     lastFaultAgeMs: null,
     resetReason: 3,
     bootCount,
-    lockKeys: 0,
     build: 0x079d5ae9,
   };
 }
@@ -133,7 +132,7 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
           protocol: 3,
           nkro: true,
           media: true,
-          firmware: "3.1.0",
+          firmware: "3.2.0",
           lease_ms: 2000,
           mouse: true,
           },

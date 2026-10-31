@@ -1,4 +1,4 @@
-//! One main-loop pass, in the same stage order as the C++ `FirmwareRuntime::loop`:
+//! One main-loop pass:
 //!
 //! 1. reset / RX fault flags
 //! 2. consume up to four received packets
@@ -38,11 +38,6 @@ pub trait Transport {
     fn take_input_complete(&mut self) -> u8;
     fn take_input_failure(&mut self) -> bool;
     fn take_vendor_complete(&mut self) -> Option<u32>;
-    /// Optional hook for commands the platform answers itself from flash
-    /// (persisted settings). Returning a report queues it as the reply.
-    fn answer_platform(&mut self, _report: &Report) -> Option<Report> {
-        None
-    }
     fn take_reset(&mut self) -> bool;
     fn take_rx_fault(&mut self) -> RxFault;
 }
@@ -83,22 +78,6 @@ impl<T: Transport> Runtime<T> {
                 break;
             }
             self.engine.handle(&packet, now);
-            // The engine validated session and sequence; only then does the
-            // platform get to answer from flash.
-            if let Some(reply) = self.transport.answer_platform(&packet) {
-                let id = firmware_engine::wire::read32(&packet.bytes[4..]);
-                let seq = firmware_engine::wire::read32(&packet.bytes[8..]);
-                // Only answer when the engine actually accepted this command;
-                // otherwise a stale or replayed report could rewrite the sector.
-                let accepted = self
-                    .engine
-                    .session(id)
-                    .map(|session| session.received == seq)
-                    .unwrap_or(false);
-                if accepted {
-                    self.engine.push_reply(reply);
-                }
-            }
             self.discard_faulted_rx(now);
         }
 
@@ -179,7 +158,7 @@ impl<T: Transport> Runtime<T> {
     }
 
     /// Hands the engine the facts only the platform knows (queue depth, reset
-    /// cause, lock LEDs). Called once per loop; a few bytes, no allocation.
+    /// cause, boot count). Called once per loop; a few bytes, no allocation.
     pub fn set_platform(&mut self, info: firmware_engine::PlatformInfo) {
         self.engine.set_platform(info);
     }

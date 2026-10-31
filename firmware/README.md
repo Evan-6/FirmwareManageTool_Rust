@@ -1,26 +1,25 @@
 # 韌體（Seeed XIAO RP2040）
 
-主機透過 USB 下指令，裝置以真正的 HID 鍵盤／滑鼠身分送出輸入。沒有 CDC 序列埠、沒有 COM 埠、
-沒有 v2 或序列回退；唯一的控制通道是 Vendor HID（usage page `0xFF60`）。
+主機透過 USB 下指令，裝置以真正的 HID 鍵盤／滑鼠身分送出輸入。沒有 CDC 序列埠、沒有 COM 埠，
+唯一的控制通道是 Vendor HID（usage page `0xFF60`），協議 3.2.0。
 
 純 Rust：`firmware/app`（crate `xiao-firmware`，embassy-rp + embassy-usb）加 `firmware/engine`
-（協議引擎）。建置鏈只需要 Rust：boot2 由 embassy-rp 提供，UF2 由 `uf2pack` 打包，
-不需要額外的燒錄工具或 C 編譯器。
+（協議引擎）。建置鏈只需要 Rust：boot2 由 embassy-rp 提供，UF2 由 `uf2pack` 打包，不需要額外的
+燒錄工具或 C 編譯器。
 
-- 線路協定：[protocol-v3.md](protocol-v3.md)（索引：[PROTOCOL.md](PROTOCOL.md)）
+- 線路協定：[protocol-v3.md](protocol-v3.md)
 - USB：`03F0:0024`、產品字串 `HP Keyboard`、bcdDevice `0x0310`、序號取自 flash unique id
-- 容量：Flash 33,736 B（32.9 KiB／2 MiB）、RAM 30,796 B（30.1 KiB／264 KiB）
-- UF2：67,584 B、132 blocks、每塊 256-byte 對齊、首塊 `0x10000000`
+- 容量：Flash 32,724 B（32.0 KiB／2 MiB）、RAM 30,684 B（30.0 KiB／264 KiB）
+- UF2：65,536 B、128 blocks、每塊 256-byte 對齊、首塊 `0x10000000`
 
 ## 資料夾
 
 ```
 firmware/
   README.md       ← 本檔
-  PROTOCOL.md     ← 協定索引
   protocol-v3.md  ← Vendor HID v3 規範（framing、opcode、診斷、租約）
   engine/         協議引擎：no_std、無 heap、固定容量，可在主機上測試
-  app/            正式韌體：USB device、runtime loop、NeoPixel、flash 設定
+  app/            正式韌體：USB device、runtime loop、NeoPixel
 ```
 
 `firmware/engine/src/` 是唯一引擎實作。`keys_generated.rs` 由
@@ -50,7 +49,9 @@ cp firmware/app/target/thumbv6m-none-eabi/release/xiao-firmware.uf2 /e/   # E: =
   相對位移與滾輪單軸累計上限 ±8192。
 - **安全**：watchdog 2 s；USB suspend／reset 視為 bus loss（故障碼 7），所有 session 失效並放開
   按住的鍵——闔蓋時按著 W，醒來不該繼續走。
-- **持久設定**：亮度存在最後一個 flash sector（`0x101FF000`），重燒韌體不會清掉。
-- **狀態燈**：NeoPixel 以 PIO + DMA 驅動（GPIO12 資料、GPIO11 電源閘），亮度 0–64，
-  顏色代表 Idle／Held／Error／Failsafe／Bootloader。
-- **Feature 14**：board id 固定 2，帶 build hash（commit 前四 bytes），主機用來比對版本。
+- **狀態燈**：NeoPixel 以 PIO + DMA 驅動（GPIO12 資料、GPIO11 電源閘），固定亮度，顏色代表
+  Idle／Held／Error／Failsafe／Bootloader。
+- **Feature 14**：board id 固定 2、capabilities 15，帶 build hash（commit 前四 bytes），
+  主機用來比對版本。
+- **最小操作端**：`clients/{rust,cpp,python}` 由協議常數自動產生，只送命令、不管管理功能；
+  見 [protocol-v3.md](protocol-v3.md#最小操作端rustc-python)。

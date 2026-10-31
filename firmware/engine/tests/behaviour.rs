@@ -243,14 +243,13 @@ fn close_frees_one_owner_without_a_fault_and_keeps_the_peer() {
 }
 
 #[test]
-fn status_ext_reports_diagnostics_and_ping_echoes() {
+fn status_ext_reports_diagnostics() {
     let mut h = Harness::new(0);
     h.open();
     h.engine.set_platform(PlatformInfo {
         rx_depth: 3,
         reset_reason: 2,
         boot_count: 7,
-        lock_keys: 1,
     });
     h.engine.set_build(0xdead_beef);
     h.engine.note_late_tick(420);
@@ -270,9 +269,8 @@ fn status_ext_reports_diagnostics_and_ping_echoes() {
     assert_eq!(p[10], 1, "one session");
     assert_eq!(p[16], 2, "reset reason");
     assert_eq!(u16::from_le_bytes([p[17], p[18]]), 7, "boot count");
-    assert_eq!(p[19], 1, "caps lock");
     assert_eq!(
-        u32::from_le_bytes([p[20], p[21], p[22], p[23]]),
+        u32::from_le_bytes([p[19], p[20], p[21], p[22]]),
         0xdead_beef,
         "build hash"
     );
@@ -291,49 +289,7 @@ fn status_ext_reports_diagnostics_and_ping_echoes() {
         0,
         "reading clears the late-tick high-water mark"
     );
-
-    // PING echoes the bytes so the host can time a real device round trip.
-    h.send(wire::PING, 4, &[1, 2, 3, 4]);
-    h.tick(6);
-    let reply = h
-        .replies
-        .iter()
-        .rev()
-        .find(|r| r.bytes[1] == (wire::PING | 128))
-        .expect("PING must be answered");
-    assert_eq!(&reply.bytes[wire::HEADER..wire::HEADER + 4], &[1, 2, 3, 4]);
     assert_eq!(h.engine.counters().failsafe, 0);
-}
-
-#[test]
-fn platform_commands_keep_the_session_and_never_reply_themselves() {
-    // SETTINGS_* are answered from flash by the platform. The engine must still
-    // validate the sequence and keep the lease alive, but stay silent.
-    let mut h = Harness::new(0);
-    h.open();
-    let lease = h.engine.session(42).unwrap().lease_at;
-    h.now = lease.wrapping_add(1500);
-    h.send(wire::SETTINGS_GET, 2, &[]);
-    h.tick(6);
-    let session = h.engine.session(42).expect("session must survive");
-    assert_eq!(session.received, 2, "sequence advances");
-    assert!(session.lease_at > lease, "lease renewed");
-    assert!(
-        h.replies
-            .iter()
-            .all(|r| r.bytes[1] != (wire::SETTINGS_GET | 128)),
-        "the platform owns the reply"
-    );
-    assert_eq!(h.engine.counters().failsafe, 0);
-
-    // A bad length is still a framing fault, exactly like other commands.
-    h.send(wire::SETTINGS_SET, 3, &[1, 2]);
-    h.tick(6);
-    assert!(
-        h.engine.session(42).is_none(),
-        "malformed payload drops the session"
-    );
-    assert_eq!(h.engine.counters().failsafe, 1);
 }
 
 #[test]

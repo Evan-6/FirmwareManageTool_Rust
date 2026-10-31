@@ -84,16 +84,6 @@ export function StatusPage() {
                   <dd>{RESET_REASONS[state.ext.resetReason] ?? "未知"}</dd>
                   <dt>開機次數</dt>
                   <dd>{state.ext.bootCount}</dd>
-                  <dt>鎖定鍵</dt>
-                  <dd>
-                    {[
-                      state.ext.lockKeys & 1 ? "Num" : null,
-                      state.ext.lockKeys & 2 ? "Caps" : null,
-                      state.ext.lockKeys & 4 ? "Scroll" : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" ") || "—"}
-                  </dd>
                 </dl>
               </div>
             )}
