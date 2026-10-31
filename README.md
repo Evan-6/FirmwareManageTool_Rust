@@ -88,6 +88,26 @@ cargo run --release --example probe -- --bootloader     # 請裝置進 BOOTSEL
 bash scripts/build-rust-firmware.sh
 ```
 
+## GDBOX SDK
+
+`sdk/` 是給其他程式用的 Host SDK：Rust 原生實作，加上 C++／Python／Go 三種綁定，
+四者共用同一份 C ABI，行為一致。
+
+```powershell
+cargo build -p gdb-ffi --release       # target/release/gdb.dll
+cargo test  -p gdb -p gdb-motion       # 21 個測試，免硬體
+bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑）Go
+```
+
+- 裝置管理：列舉、以序號或路徑連線、自動重連、多裝置、逾時與 11 種錯誤碼。
+- 滑鼠：相對／絕對移動、到點時間、線性／緩入／緩出／貝茲／自訂曲線、多段路徑、
+  中途取消與改目標、五鍵、滾輪、拖曳、全部放開。
+- 鍵盤：按下／放開／單擊／長按、組合鍵、按鍵序列、文字輸入、全部放開。
+- 自動化：任務佇列、延遲、週期排程、優先級、暫停／恢復／取消、錯誤收集。
+- 開發者：統一錯誤碼、日誌等級與 sink、事件回呼、免硬體的模擬裝置、四語言範例與測試。
+
+細節與 API 對照表：[sdk/README.md](sdk/README.md)、[sdk/API.md](sdk/API.md)。
+
 ## 疑難排解
 
 | 現象 | 原因與處理 |
@@ -110,6 +130,7 @@ shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測�
 firmware/engine/    協議引擎（no_std、固定容量）：session、排程、狀態、LED
 firmware/app/       正式韌體：embassy-rp USB device、boot2、NeoPixel
 clients/            Rust／C++／Python 最小操作端（由協議常數產生）
+sdk/                GDBOX Host SDK：motion 數學、Rust 原生、C ABI、C++／Python／Go 綁定
 scripts/            建置、打包、preflight、清理、契約與客戶端檢查、CDP 檢查
 ```
 

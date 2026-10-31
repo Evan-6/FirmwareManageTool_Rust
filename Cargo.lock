@@ -921,6 +921,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdb"
+version = "0.1.0"
+dependencies = [
+ "gdb-motion",
+ "hidapi",
+ "input-protocol",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "gdb-ffi"
+version = "0.1.0"
+dependencies = [
+ "gdb",
+ "gdb-motion",
+ "serde_json",
+]
+
+[[package]]
+name = "gdb-motion"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

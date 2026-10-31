@@ -8,3 +8,6 @@ ui/dist/
 src-tauri/target/
 src-tauri/gen/
 
+# Python bindings
+__pycache__/
+*.pyc

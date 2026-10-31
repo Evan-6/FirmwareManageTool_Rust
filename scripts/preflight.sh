@@ -24,5 +24,6 @@ cargo test --manifest-path firmware/app/Cargo.toml
 cargo clippy --manifest-path firmware/app/Cargo.toml --target thumbv6m-none-eabi --features hardware -- -D warnings
 python scripts/sync-input-protocol.py --check
 python scripts/check-clients.py
+bash scripts/check-sdk.sh
 node scripts/check-ipc.mjs
 echo "preflight ok"

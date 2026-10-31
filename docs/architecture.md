@@ -24,6 +24,22 @@ src/                 library：hid（列舉／v3 client）、mouse、typing、la
 - **UI 是編譯期嵌入**：`src-tauri` 以 `custom-protocol` 把 `ui/dist` 打進 exe，所以 release 只有一支
   執行檔；改完前端一定要重建外殼，否則跑的是舊 bundle。
 
+## GDBOX SDK：主機端的第二個入口
+
+`sdk/` 把同一套主機能力包成給外部程式用的 SDK，與 GUI 平行、互不依賴：
+
+```
+sdk/motion/     gdb-motion：純移動數學（整數友善、固定 PRNG、無 I/O）
+sdk/rust/       gdb：session、心跳、絕對座標閉環、鍵鼠、排程
+sdk/ffi/        gdb-ffi：C ABI（include/gdb.h）+ cdylib
+sdk/cpp|python|go   薄綁定，只做名稱轉換，全部呼叫同一份 C ABI
+```
+
+- **一份實作、四種語言**：行為只在 Rust 寫一次，綁定不得自行補邏輯，否則四份會漂移。
+- **韌體沒有為了 SDK 改動**：SDK 只送既有 opcode；絕對座標、移動演算法、任務與排程都在主機。
+- **模擬裝置有虛擬游標**：免硬體的測試可以完整跑 `move_to`／`move_path`／`retarget`。
+- **驗證**：`bash scripts/check-sdk.sh`（已納入 `preflight.sh`）。
+
 ## 除錯模式與遊戲模式
 
 `Settings::debug` 決定 worker 對裝置的說話量：
@@ -54,7 +70,7 @@ USB OUT (id 12) → Runtime::step → engine → 排程 → USB IN (id 13) / 輸
 2. 交給 `firmware-engine` 解碼（opcode、session、sequence）
 3. 佇列輸出（鍵盤／consumer／滑鼠，移動可合併）
 4. 每 1 ms tick 推進排程，送出到期的 HID 報告
-5. 送出待回覆的 vendor reply（含 Feature 14、STATUS_EXT、PING、SESSION_LIST、SETTINGS）
+5. 送出待回覆的 vendor reply（Feature 14、STATUS、STATUS_EXT、SESSION_LIST 等）
 6. 處理 bootloader gate、watchdog、LED 狀態
 
 引擎是 `#![forbid(unsafe_code)]`、`no_std`、無 heap、固定容量；所有時間由呼叫端傳入 `now_ms`，
@@ -101,5 +117,6 @@ cargo 依「profile」和「有沒有指定 `--target`」分開放產物。在 W
 ## 品質門檻
 
 `scripts/preflight.sh` 依序跑：前端建置 → `cargo fmt --check` → clippy（host 與 thumbv6m）→
-workspace 測試 → 韌體 adapter／descriptor 測試 → 協議鍵值同步 `--check` → IPC 契約檢查。
+workspace 測試 → 韌體 adapter／descriptor 測試 → 協議與客戶端同步 `--check` →
+客戶端檢查（Python 行為、Rust 編譯、C++ 語法）→ IPC 契約檢查。
 任何一項失敗就不算完成；CI 的 windows job 跑同一組檢查，Linux job 只驗純邏輯與韌體編譯。

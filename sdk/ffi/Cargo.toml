@@ -1,0 +1,15 @@
+[package]
+name = "gdb-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "C ABI over the GDBOX SDK, used by the C++, Python and Go bindings"
+
+[lib]
+name = "gdb"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+gdb_sdk = { package = "gdb", path = "../rust" }
+gdb-motion = { path = "../motion" }
+serde_json = "1"

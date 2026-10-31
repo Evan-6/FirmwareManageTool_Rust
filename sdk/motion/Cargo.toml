@@ -1,0 +1,9 @@
+[package]
+name = "gdb-motion"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Language-neutral mouse motion profiles and trajectory generation for GDBOX"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

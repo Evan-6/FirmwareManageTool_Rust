@@ -25,7 +25,7 @@ lto = "thin"
 strip = "debuginfo"
 
 [workspace]
-members = ["shared/input-protocol", "firmware/engine", "src-tauri"]
+members = ["shared/input-protocol", "firmware/engine", "sdk/motion", "sdk/rust", "sdk/ffi", "src-tauri"]
 
 [dev-dependencies]
 input-protocol = { path = "shared/input-protocol", features = ["test-support"] }

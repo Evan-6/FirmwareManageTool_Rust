@@ -1,0 +1,694 @@
+"""GDBOX host SDK for Python.
+
+ctypes binding over ``gdb.dll`` (the Rust SDK compiled to a C ABI), so the
+behaviour is the same as the Rust and C++ SDKs. No hardware is needed for
+``Device.open_mock()``.
+
+    import gdb
+    with gdb.Device.open_mock() as device:
+        print(device.info)
+        device.keyboard.type_text("hello")
+        device.mouse.move_to(200, 300, duration_ms=250)
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import sys
+from ctypes import POINTER, byref, c_bool, c_char_p, c_double, c_int32, c_size_t, c_uint8, c_uint16, c_uint32, c_uint64, c_void_p
+from dataclasses import dataclass
+from typing import Callable, Iterable, Sequence
+
+__all__ = [
+    "GdbError",
+    "ErrorCode",
+    "ConnectionState",
+    "Button",
+    "Ease",
+    "Profile",
+    "KeyStep",
+    "Point",
+    "Movement",
+    "Mouse",
+    "Keyboard",
+    "Scheduler",
+    "Device",
+    "LIBRARY",
+]
+
+ABI_VERSION = 1
+
+
+class ErrorCode:
+    OK = 0
+    INVALID = 1
+    TIMEOUT = 2
+    DISCONNECTED = 3
+    BUSY = 4
+    LEASE = 5
+    FRAMING = 6
+    OVERFLOW = 7
+    UNSUPPORTED = 8
+    CANCELLED = 9
+    IO = 10
+
+    NAMES = {
+        0: "OK",
+        1: "INVALID",
+        2: "TIMEOUT",
+        3: "DISCONNECTED",
+        4: "BUSY",
+        5: "LEASE",
+        6: "FRAMING",
+        7: "OVERFLOW",
+        8: "UNSUPPORTED",
+        9: "CANCELLED",
+        10: "IO",
+    }
+
+
+class ConnectionState:
+    DISCONNECTED = 0
+    CONNECTING = 1
+    CONNECTED = 2
+    ERROR = 3
+
+
+class Button:
+    LEFT = 1
+    RIGHT = 2
+    MIDDLE = 3
+    BACK = 4
+    FORWARD = 5
+
+
+class Ease:
+    JERK = 0
+    IN_OUT = 1
+    LINEAR = 2
+    IN = 3
+    OUT = 4
+    CUBIC_BEZIER = 5
+
+
+class GdbError(Exception):
+    """Raised for every non-zero ErrorCode coming out of the SDK."""
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.name = ErrorCode.NAMES.get(code, str(code))
+        self.message = message
+        super().__init__(f"{self.name}: {message}" if message else self.name)
+
+
+class _Point(ctypes.Structure):
+    _fields_ = [("x", c_int32), ("y", c_int32)]
+
+
+class _KeyStep(ctypes.Structure):
+    _fields_ = [
+        ("page", c_uint16),
+        ("usage", c_uint16),
+        ("hold_ms", c_uint32),
+        ("gap_ms", c_uint32),
+    ]
+
+
+class _Profile(ctypes.Structure):
+    _fields_ = [
+        ("ease", c_int32),
+        ("bezier", c_double * 4),
+        ("curve", c_double),
+        ("jitter_px", c_double),
+        ("overshoot_pct", c_double),
+        ("settle_ms", c_uint32),
+        ("min_step_px", c_int32),
+    ]
+
+
+Point = tuple[int, int]
+EventCallback = Callable[[int, int, str], None]
+TaskCallback = Callable[[], int]
+LogCallback = Callable[[int, str], None]
+
+
+def _library_candidates() -> Iterable[str]:
+    override = os.environ.get("GDBOX_LIBRARY")
+    if override:
+        yield override
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.abspath(os.path.join(here, "..", ".."))
+    names = ["gdb.dll"] if sys.platform == "win32" else ["libgdb.so", "libgdb.dylib", "gdb.so"]
+    for name in names:
+        yield os.path.join(here, name)
+        for profile in ("debug", "release"):
+            yield os.path.join(root, "target", profile, name)
+
+
+def _load() -> ctypes.CDLL:
+    errors = []
+    for path in _library_candidates():
+        if not os.path.exists(path):
+            continue
+        try:
+            return ctypes.WinDLL(path) if sys.platform == "win32" else ctypes.CDLL(path)
+        except OSError as error:  # pragma: no cover - platform dependent
+            errors.append(f"{path}: {error}")
+    raise GdbError(
+        ErrorCode.IO,
+        "cannot load the GDBOX library; build it with `cargo build -p gdb-ffi` "
+        "or set GDBOX_LIBRARY. Tried: " + ", ".join(errors or ["no candidate paths"]),
+    )
+
+
+LIBRARY = _load()
+
+_D = LIBRARY
+_D.gdb_abi_version.restype = c_uint32
+_D.gdb_version.restype = c_char_p
+_D.gdb_last_error.argtypes = [c_char_p, c_size_t]
+_D.gdb_last_error.restype = c_int32
+_D.gdb_string_free.argtypes = [c_void_p]
+_D.gdb_set_log_level.argtypes = [c_uint8]
+_D.gdb_set_log_level.restype = c_int32
+_D.gdb_device_list.restype = c_void_p
+_D.gdb_open.restype = c_void_p
+_D.gdb_open.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
+_D.gdb_open_mock.restype = c_void_p
+_D.gdb_open_mock.argtypes = [c_uint32, c_bool, c_bool]
+_D.gdb_device_free.argtypes = [c_void_p]
+_D.gdb_close.argtypes = [c_void_p]
+_D.gdb_close.restype = c_int32
+_D.gdb_reconnect.argtypes = [c_void_p]
+_D.gdb_reconnect.restype = c_int32
+_D.gdb_set_auto_reconnect.argtypes = [c_void_p, c_bool]
+_D.gdb_set_auto_reconnect.restype = c_int32
+_D.gdb_device_state.argtypes = [c_void_p]
+_D.gdb_device_state.restype = c_int32
+for name in ("gdb_device_info", "gdb_status", "gdb_status_ext", "gdb_sessions"):
+    getattr(_D, name).argtypes = [c_void_p]
+    getattr(_D, name).restype = c_void_p
+for name in ("gdb_release_all", "gdb_barrier", "gdb_bootloader"):
+    getattr(_D, name).argtypes = [c_void_p]
+    getattr(_D, name).restype = c_int32
+_D.gdb_set_event_handler.argtypes = [c_void_p, c_void_p, c_void_p]
+_D.gdb_set_event_handler.restype = c_int32
+_D.gdb_profile_default.restype = _Profile
+
+_D.gdb_mouse_move_by.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_move_by.restype = c_int32
+_D.gdb_mouse_move_to.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_move_to.restype = c_int32
+_D.gdb_mouse_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_move_path.restype = c_int32
+_D.gdb_mouse_button.argtypes = [c_void_p, c_uint8, c_bool]
+_D.gdb_mouse_button.restype = c_int32
+_D.gdb_mouse_click.argtypes = [c_void_p, c_uint8, c_uint8]
+_D.gdb_mouse_click.restype = c_int32
+_D.gdb_mouse_double_click.argtypes = [c_void_p, c_uint8]
+_D.gdb_mouse_double_click.restype = c_int32
+_D.gdb_mouse_wheel.argtypes = [c_void_p, c_int32, c_int32]
+_D.gdb_mouse_wheel.restype = c_int32
+_D.gdb_mouse_drag.argtypes = [c_void_p, c_uint8, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_drag.restype = c_int32
+for name in ("gdb_mouse_start_move_to", "gdb_mouse_start_move_by"):
+    getattr(_D, name).argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+    getattr(_D, name).restype = c_void_p
+_D.gdb_mouse_start_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_start_move_path.restype = c_void_p
+for name in ("gdb_movement_cancel", "gdb_movement_retarget"):
+    getattr(_D, name).restype = c_int32
+_D.gdb_movement_cancel.argtypes = [c_void_p]
+_D.gdb_movement_retarget.argtypes = [c_void_p, c_int32, c_int32]
+_D.gdb_movement_is_finished.argtypes = [c_void_p]
+_D.gdb_movement_is_finished.restype = c_bool
+_D.gdb_movement_wait.argtypes = [c_void_p, c_uint32]
+_D.gdb_movement_wait.restype = c_int32
+_D.gdb_movement_free.argtypes = [c_void_p]
+
+for name in ("gdb_key_down", "gdb_key_up", "gdb_key_press"):
+    getattr(_D, name).argtypes = [c_void_p, c_uint16, c_uint16]
+    getattr(_D, name).restype = c_int32
+_D.gdb_key_long_press.argtypes = [c_void_p, c_uint16, c_uint16, c_uint32]
+_D.gdb_key_long_press.restype = c_int32
+_D.gdb_keys_chord.argtypes = [c_void_p, POINTER(c_uint16), c_size_t, c_uint32]
+_D.gdb_keys_chord.restype = c_int32
+_D.gdb_keys_sequence.argtypes = [c_void_p, POINTER(_KeyStep), c_size_t]
+_D.gdb_keys_sequence.restype = c_int32
+_D.gdb_type_text.argtypes = [c_void_p, c_char_p, c_uint32, c_uint32, c_uint32]
+_D.gdb_type_text.restype = c_int32
+
+_D.gdb_scheduler_new.argtypes = [c_void_p]
+_D.gdb_scheduler_new.restype = c_void_p
+_D.gdb_scheduler_free.argtypes = [c_void_p]
+_D.gdb_scheduler_submit.argtypes = [c_void_p, c_uint32, c_int32, c_void_p, c_void_p]
+_D.gdb_scheduler_submit.restype = c_uint64
+_D.gdb_scheduler_every.argtypes = [c_void_p, c_uint32, c_int32, c_void_p, c_void_p]
+_D.gdb_scheduler_every.restype = c_uint64
+_D.gdb_scheduler_cancel.argtypes = [c_void_p, c_uint64]
+_D.gdb_scheduler_cancel.restype = c_int32
+for name in ("gdb_scheduler_pause", "gdb_scheduler_resume"):
+    getattr(_D, name).argtypes = [c_void_p]
+    getattr(_D, name).restype = c_int32
+_D.gdb_scheduler_wait_idle.argtypes = [c_void_p, c_uint32]
+_D.gdb_scheduler_wait_idle.restype = c_int32
+_D.gdb_scheduler_take_errors.argtypes = [c_void_p]
+_D.gdb_scheduler_take_errors.restype = c_void_p
+
+
+def _last_error() -> tuple[int, str]:
+    buffer = ctypes.create_string_buffer(512)
+    code = _D.gdb_last_error(buffer, len(buffer))
+    return code, buffer.value.decode("utf-8", "replace")
+
+
+def _check(code: int) -> None:
+    if code != 0:
+        _, message = _last_error()
+        raise GdbError(code, message)
+
+
+def _take(pointer: int | None):
+    if not pointer:
+        code, message = _last_error()
+        raise GdbError(code or ErrorCode.IO, message or "no reply")
+    try:
+        return json.loads((ctypes.cast(pointer, c_char_p).value or b"").decode("utf-8"))
+    finally:
+        _D.gdb_string_free(pointer)
+
+
+@dataclass(frozen=True)
+class Profile:
+    """Motion profile; the defaults mirror `HumanProfile::default()`."""
+
+    ease: int = Ease.JERK
+    bezier: tuple[float, float, float, float] = (0.42, 0.0, 0.58, 1.0)
+    curve: float = 1.0
+    jitter_px: float = 1.0
+    overshoot_pct: float = 0.0
+    settle_ms: int = 0
+    min_step_px: int = 1
+
+    @classmethod
+    def linear(cls) -> "Profile":
+        return cls(ease=Ease.LINEAR, curve=0.0, jitter_px=0.0)
+
+    @classmethod
+    def from_library(cls) -> "Profile":
+        default = _D.gdb_profile_default()
+        return cls(
+            ease=default.ease,
+            bezier=tuple(default.bezier),
+            curve=default.curve,
+            jitter_px=default.jitter_px,
+            overshoot_pct=default.overshoot_pct,
+            settle_ms=default.settle_ms,
+            min_step_px=default.min_step_px,
+        )
+
+    def _ctype(self) -> _Profile:
+        value = _Profile()
+        value.ease = self.ease
+        for index, number in enumerate(self.bezier):
+            value.bezier[index] = number
+        value.curve = self.curve
+        value.jitter_px = self.jitter_px
+        value.overshoot_pct = self.overshoot_pct
+        value.settle_ms = self.settle_ms
+        value.min_step_px = self.min_step_px
+        return value
+
+
+@dataclass(frozen=True)
+class KeyStep:
+    page: int = 7
+    usage: int = 0
+    hold_ms: int = 18
+    gap_ms: int = 0
+
+
+def _profile_pointer(profile: Profile | None):
+    if profile is None:
+        return POINTER(_Profile)()
+    return ctypes.pointer(profile._ctype())
+
+
+class Movement:
+    """Handle for a running move; use as a context manager or call wait()."""
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer
+
+    def __bool__(self) -> bool:
+        return bool(self._pointer)
+
+    def cancel(self) -> None:
+        _check(_D.gdb_movement_cancel(self._pointer))
+
+    def retarget(self, x: int, y: int) -> None:
+        _check(_D.gdb_movement_retarget(self._pointer, x, y))
+
+    @property
+    def finished(self) -> bool:
+        return bool(_D.gdb_movement_is_finished(self._pointer))
+
+    def wait(self, timeout_ms: int = 10_000) -> None:
+        _check(_D.gdb_movement_wait(self._pointer, timeout_ms))
+
+    def close(self) -> None:
+        if self._pointer:
+            _D.gdb_movement_free(self._pointer)
+            self._pointer = 0
+
+    def __enter__(self) -> "Movement":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        self.close()
+
+
+class Mouse:
+    def __init__(self, device: "Device"):
+        self._device = device
+
+    def _handle(self) -> int:
+        return self._device._handle()
+
+    def move_by(self, dx: int, dy: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
+        _check(_D.gdb_mouse_move_by(self._handle(), dx, dy, duration_ms, _profile_pointer(profile)))
+
+    def move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
+        _check(_D.gdb_mouse_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile)))
+
+    def move_path(self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None) -> None:
+        array, count = _points(points)
+        _check(_D.gdb_mouse_move_path(self._handle(), array, count, duration_ms, _profile_pointer(profile)))
+
+    def start_move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> Movement:
+        pointer = _D.gdb_mouse_start_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile))
+        return _movement(pointer)
+
+    def start_move_by(self, dx: int, dy: int, duration_ms: int = 0, profile: Profile | None = None) -> Movement:
+        pointer = _D.gdb_mouse_start_move_by(self._handle(), dx, dy, duration_ms, _profile_pointer(profile))
+        return _movement(pointer)
+
+    def start_move_path(self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None) -> Movement:
+        array, count = _points(points)
+        pointer = _D.gdb_mouse_start_move_path(self._handle(), array, count, duration_ms, _profile_pointer(profile))
+        return _movement(pointer)
+
+    def button(self, button: int, down: bool) -> None:
+        _check(_D.gdb_mouse_button(self._handle(), button, down))
+
+    def click(self, button: int = Button.LEFT, count: int = 1) -> None:
+        _check(_D.gdb_mouse_click(self._handle(), button, count))
+
+    def double_click(self, button: int = Button.LEFT) -> None:
+        _check(_D.gdb_mouse_double_click(self._handle(), button))
+
+    def wheel(self, vertical: int, horizontal: int = 0) -> None:
+        _check(_D.gdb_mouse_wheel(self._handle(), vertical, horizontal))
+
+    def drag(self, button: int, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
+        _check(_D.gdb_mouse_drag(self._handle(), button, x, y, duration_ms, _profile_pointer(profile)))
+
+
+def _points(points: Sequence[Point]):
+    if not points:
+        raise GdbError(ErrorCode.INVALID, "path needs at least one point")
+    array = (_Point * len(points))()
+    for index, (x, y) in enumerate(points):
+        array[index] = _Point(x, y)
+    return array, len(points)
+
+
+def _movement(pointer: int | None) -> Movement:
+    if not pointer:
+        code, message = _last_error()
+        raise GdbError(code or ErrorCode.IO, message or "movement did not start")
+    return Movement(pointer)
+
+
+class Keyboard:
+    def __init__(self, device: "Device"):
+        self._device = device
+
+    def _handle(self) -> int:
+        return self._device._handle()
+
+    def key_down(self, page: int, usage: int) -> None:
+        _check(_D.gdb_key_down(self._handle(), page, usage))
+
+    def key_up(self, page: int, usage: int) -> None:
+        _check(_D.gdb_key_up(self._handle(), page, usage))
+
+    def press(self, page: int, usage: int) -> None:
+        _check(_D.gdb_key_press(self._handle(), page, usage))
+
+    def long_press(self, page: int, usage: int, hold_ms: int) -> None:
+        _check(_D.gdb_key_long_press(self._handle(), page, usage, hold_ms))
+
+    def chord(self, usages: Sequence[int], hold_ms: int = 60) -> None:
+        values = (c_uint16 * len(usages))(*usages)
+        _check(_D.gdb_keys_chord(self._handle(), values, len(usages), hold_ms))
+
+    def sequence(self, steps: Sequence[KeyStep]) -> None:
+        array = (_KeyStep * len(steps))(
+            *[_KeyStep(step.page, step.usage, step.hold_ms, step.gap_ms) for step in steps]
+        )
+        _check(_D.gdb_keys_sequence(self._handle(), array, len(steps)))
+
+    def type_text(self, text: str, interval_ms: int = 45, hold_ms: int = 18, jitter_ms: int = 30) -> None:
+        _check(_D.gdb_type_text(self._handle(), text.encode("utf-8"), interval_ms, hold_ms, jitter_ms))
+
+    def release_all(self) -> None:
+        self._device.release_all()
+
+
+# Task callbacks must stay referenced for as long as the scheduler lives.
+_TASK_CALLBACK = ctypes.CFUNCTYPE(c_int32, c_void_p)
+_EVENT_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_int32, c_char_p)
+_LOG_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
+
+
+class Scheduler:
+    """Task queue with priorities, delays, repeat, pause/resume and cancel."""
+
+    def __init__(self, device: "Device"):
+        self._device = device
+        pointer = _D.gdb_scheduler_new(device._handle())
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message)
+        self._pointer = pointer
+        self._callbacks: dict[int, object] = {}
+
+    def submit(self, delay_ms: int, priority: int, callback: TaskCallback) -> int:
+        wrapped = _TASK_CALLBACK(lambda _user: int(callback()))
+        task_id = _D.gdb_scheduler_submit(
+            self._pointer, delay_ms, priority, ctypes.cast(wrapped, c_void_p), None
+        )
+        if task_id == 0:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "submit failed")
+        self._callbacks[task_id] = wrapped
+        return task_id
+
+    def every(self, interval_ms: int, priority: int, callback: TaskCallback) -> int:
+        wrapped = _TASK_CALLBACK(lambda _user: int(callback()))
+        task_id = _D.gdb_scheduler_every(
+            self._pointer, interval_ms, priority, ctypes.cast(wrapped, c_void_p), None
+        )
+        if task_id == 0:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "schedule failed")
+        self._callbacks[task_id] = wrapped
+        return task_id
+
+    def cancel(self, task_id: int) -> None:
+        _check(_D.gdb_scheduler_cancel(self._pointer, task_id))
+
+    def pause(self) -> None:
+        _check(_D.gdb_scheduler_pause(self._pointer))
+
+    def resume(self) -> None:
+        _check(_D.gdb_scheduler_resume(self._pointer))
+
+    def wait_idle(self, timeout_ms: int = 5_000) -> None:
+        _check(_D.gdb_scheduler_wait_idle(self._pointer, timeout_ms))
+
+    def take_errors(self) -> list[dict]:
+        pointer = _D.gdb_scheduler_take_errors(self._pointer)
+        return _take(pointer)
+
+    def close(self) -> None:
+        if getattr(self, "_pointer", 0):
+            _D.gdb_scheduler_free(self._pointer)
+            self._pointer = 0
+            self._callbacks.clear()
+
+    def __enter__(self) -> "Scheduler":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        self.close()
+
+
+class Device:
+    """One controller session."""
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer
+        self._events: list[object] = []
+        self.mouse = Mouse(self)
+        self.keyboard = Keyboard(self)
+
+    @classmethod
+    def open(
+        cls,
+        selector: str | None = None,
+        timeout_ms: int = 1000,
+        auto_reconnect: bool = True,
+        heartbeat: bool = True,
+    ) -> "Device":
+        pointer = _D.gdb_open(
+            selector.encode("utf-8") if selector else None,
+            timeout_ms,
+            auto_reconnect,
+            heartbeat,
+        )
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "open failed")
+        return cls(pointer)
+
+    @classmethod
+    def open_mock(
+        cls,
+        timeout_ms: int = 1000,
+        auto_reconnect: bool = True,
+        heartbeat: bool = True,
+    ) -> "Device":
+        pointer = _D.gdb_open_mock(timeout_ms, auto_reconnect, heartbeat)
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "mock open failed")
+        return cls(pointer)
+
+    @staticmethod
+    def list_devices() -> list[dict]:
+        return _take(_D.gdb_device_list())
+
+    @property
+    def info(self) -> dict:
+        return _take(_D.gdb_device_info(self._handle()))
+
+    @property
+    def state(self) -> int:
+        value = _D.gdb_device_state(self._handle())
+        if value < 0:
+            raise GdbError(ErrorCode.INVALID, "device handle is NULL")
+        return value
+
+    @property
+    def status(self) -> dict:
+        return _take(_D.gdb_status(self._handle()))
+
+    @property
+    def status_ext(self) -> dict:
+        return _take(_D.gdb_status_ext(self._handle()))
+
+    @property
+    def sessions(self) -> list[dict]:
+        return _take(_D.gdb_sessions(self._handle()))
+
+    def release_all(self) -> None:
+        _check(_D.gdb_release_all(self._handle()))
+
+    def barrier(self) -> None:
+        _check(_D.gdb_barrier(self._handle()))
+
+    def bootloader(self) -> None:
+        _check(_D.gdb_bootloader(self._handle()))
+
+    def reconnect(self) -> None:
+        _check(_D.gdb_reconnect(self._handle()))
+
+    def set_auto_reconnect(self, enabled: bool) -> None:
+        _check(_D.gdb_set_auto_reconnect(self._handle(), enabled))
+
+    def set_event_handler(self, callback: EventCallback | None) -> None:
+        if callback is None:
+            _check(_D.gdb_set_event_handler(self._handle(), None, None))
+            self._events.clear()
+            return
+        wrapped = _EVENT_CALLBACK(
+            lambda _user, kind, code, message: callback(
+                kind, code, message.decode("utf-8", "replace") if message else ""
+            )
+        )
+        self._events.append(wrapped)
+        _check(
+            _D.gdb_set_event_handler(
+                self._handle(), ctypes.cast(wrapped, c_void_p), None
+            )
+        )
+
+    def scheduler(self) -> Scheduler:
+        return Scheduler(self)
+
+    def close(self) -> None:
+        if self._pointer:
+            try:
+                _D.gdb_close(self._pointer)
+            finally:
+                _D.gdb_device_free(self._pointer)
+                self._pointer = 0
+
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise GdbError(ErrorCode.INVALID, "device is closed")
+        return self._pointer
+
+    def __enter__(self) -> "Device":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        if getattr(self, "_pointer", 0):
+            _D.gdb_device_free(self._pointer)
+            self._pointer = 0
+
+
+def set_log_level(level: int) -> None:
+    _D.gdb_set_log_level(level)
+
+
+def set_log_sink(callback: LogCallback | None) -> None:
+    global _LOG_SINK
+    if callback is None:
+        _LOG_SINK = None
+        _D.gdb_set_log_sink(None, None)
+        return
+
+    def forward(_user, level, message):
+        callback(level, message.decode("utf-8", "replace") if message else "")
+
+    _LOG_SINK = _LOG_CALLBACK(forward)
+    _D.gdb_set_log_sink(ctypes.cast(_LOG_SINK, c_void_p), None)
+
+
+_LOG_SINK = None
+_D.gdb_set_log_sink.argtypes = [c_void_p, c_void_p]
+_D.gdb_set_log_sink.restype = c_int32
