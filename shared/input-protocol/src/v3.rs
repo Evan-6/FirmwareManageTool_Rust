@@ -322,7 +322,8 @@ impl Status {
 }
 /// Diagnostics block from STATUS_EXT. Everything here is cheap for the device to
 /// report and expensive for the host to guess.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusExt {
     pub uptime_ms: u32,
     /// Worst 1 ms tick overshoot since the previous read, in microseconds.

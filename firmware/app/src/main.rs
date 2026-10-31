@@ -89,9 +89,6 @@ const TICK: Duration = Duration::from_millis(1);
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
 /// Written to watchdog scratch on boot so a cold start is distinguishable.
 const BOOT_MAGIC: u32 = 0xB007_10AD;
-/// XIAO RP2040 NeoPixel: data on GPIO12, power gate on GPIO11 (old C++ board
-/// config used the same pins).
-const NEOPIXEL_DATA: usize = 12;
 
 /// RP2040 (Cortex-M0+) has no atomic read-modify-write, so shared flags live in a
 /// critical-section cell instead of `AtomicU16::fetch_add`, which does not exist

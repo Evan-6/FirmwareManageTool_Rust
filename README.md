@@ -1,9 +1,37 @@
 # FirmwareManageTool Rust
 
-以 Rust 2024、egui／eframe 0.36.2 與 Wgpu 重寫的 Windows 11 x64 GUI 工具。
+以 Rust 2024 撰寫的 Windows 11 x64 工具：硬體層與背景工作是一個 Rust 程式庫，
+介面是 **Tauri 2 + React 19 + TypeScript + Vite**（原本的 egui／eframe 介面已移除）。
 目標板只有 Seeed XIAO RP2040，韌體是**純 Rust**（embassy-rp／embassy-usb）。本分支已移除 Leonardo／AVR、Pico、
 其他 arduino-pico 板型，以及整套 Arduino／TinyUSB／C++ 實作——不再需要 arduino-cli、Pico SDK 或 picotool。
 韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
+
+## 建置
+
+需求：Rust 2024 工具鏈、Node.js 20 以上、Windows 上的 WebView2（Windows 11 內建）。
+
+```bash
+npm --prefix ui ci                     # 前端相依
+npm --prefix ui run build              # 產生 ui/dist（Tauri 編譯時會嵌入）
+cargo build --release -p firmware-manage-tool-app
+```
+
+`src-tauri` 在編譯時就把 `ui/dist` 包進執行檔，所以**任何碰到 src-tauri 的 cargo 指令之前都要先 build 前端**，
+否則會得到「frontendDist 不存在」。`scripts/preflight.sh` 已經照這個順序排好（前端 → fmt → clippy → 測試 →
+sync check → IPC 契約檢查）。
+
+開發時開兩個終端：
+
+```bash
+npm --prefix ui run dev                                  # Vite，127.0.0.1:5173
+cargo run -p firmware-manage-tool-app --no-default-features   # 連 dev server（HMR）
+```
+
+沒有板子也能看介面：`npm --prefix ui run dev` 後開 `http://127.0.0.1:5173/?mock=1`，
+假後端會實作全部命令並每 150 ms 推一次狀態；`npm --prefix ui run preview -- --host 127.0.0.1` 則用來驗打包後的 dist。
+
+前端與 Rust 的命令清單、事件清單由 `node scripts/check-ipc.mjs` 機械比對（真相來源是
+`generate_handler![...]` 與 `enum UiEvent`），改名沒同步會直接紅燈。
 
 ## Windows 使用
 
@@ -12,9 +40,11 @@
 正式建置靜態連結 MSVC CRT。
 
 1. 在「裝置」掃描並選取 Vendor HID，再連線。多裝置不自動取第一台。
-2. 「即時狀態」每 150 ms 自動查詢 STATUS：顯示按住鍵數、租約剩餘、待送工作、
-   rx/tx/hid/failsafe 計數與最近 30 秒走勢，並在傳輸計數增加時直接標紅。
-   命令執行期間暫停輪詢，結束後自動恢復。
+2. 「即時狀態」每 150 ms 自動查詢 STATUS：八個計數器各一張卡片（received／completed／pending／lease／
+   rx／tx／hid／failsafe），單調計數器畫每樣本增量、gauge 畫原值，保留最近 90 秒。
+   傳輸計數增加會標紅，只有 failsafe 增加則提示「有程式沒有送出 CLOSE」。
+   「診斷」區每秒讀一次 STATUS_EXT：uptime、tick 最大延遲、三條佇列水位、session 數、
+   最近故障與距今時間、reset 原因、開機次數、Caps/Num/Scroll 與 build hash。
 3. 在「韌體燒錄」直接開始編譯／上傳 XIAO 韌體：管理工具會 `cargo build` 目標
    `thumbv6m-none-eabi`、打包 UF2，再請裝置進 BOOTSEL 並複製檔案。需要已安裝的 Rust 工具鏈
    （可選擇略過 `rustup target add`）；也可指定 cargo.exe 的完整路徑。
@@ -26,11 +56,12 @@
    主機計算主顯示器目標／曲線並以相對滑鼠位移輸出，請先將游標放在主顯示器內。
    新版韌體 只有一個相對滑鼠；畫面上的目標定位不使用絕對 HID。
 
-「全部放開／停止」在工作中會取消操作並清理；閒置時釋放自己的 session。
+「全部放開／停止」在工作中會取消操作並清理；正常結束送 CLOSE（立刻歸還名額、不計 failsafe）。
 連線先查詢 Feature 14，再建立獨立 session；舊 v2／serial 設備直接顯示不支援。
 釋放／屏障等待 USB 傳送完成，再由 STATUS 確認。拔線後顯示未知，重連建立自己的空狀態。
-每 500ms 續租，租約 2 秒。個別釋放、協議故障與租約到期保留其他程式；
-USB／共用佇列故障釋放所有 session。STATUS 的輸入與待送數只屬於查詢者。
+每 500ms 續租，租約 2 秒（只當程式崩潰或直接拔線的保險）。最多八個程式同時連線；
+個別釋放、協議故障與租約到期保留其他程式，USB／共用佇列故障釋放所有 session。
+STATUS 的輸入與待送數只屬於查詢者。
 需重新燒錄 3.1.0；第一次從舊韌體升級使用 BOOTSEL。
 序號取自 RP2040 unique ID。燒錄前關閉其他控制程式並等 2 秒。
 

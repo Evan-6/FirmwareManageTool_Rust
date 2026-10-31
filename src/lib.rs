@@ -1,5 +1,3 @@
-#[cfg(feature = "gui")]
-pub mod app;
 pub mod backend;
 pub mod cancel;
 pub mod firmware;

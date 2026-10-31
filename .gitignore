@@ -3,3 +3,7 @@ firmware/app/target/
 scripts/__pycache__/
 /dist/
 *.log
+ui/node_modules/
+ui/dist/
+src-tauri/target/
+src-tauri/gen/

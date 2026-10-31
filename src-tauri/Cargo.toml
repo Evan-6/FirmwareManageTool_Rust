@@ -1,0 +1,24 @@
+[package]
+name = "firmware-manage-tool-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Tauri shell for FirmwareManageTool"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+firmware-manage-tool = { path = ".." }
+input-protocol = { path = "../shared/input-protocol" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[features]
+# `custom-protocol` makes the release binary load the bundled frontend instead of
+# the dev server. Without it, closing the dev server leaves a blank window.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

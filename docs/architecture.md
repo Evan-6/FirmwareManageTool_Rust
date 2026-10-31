@@ -88,3 +88,18 @@ reset／RX 故障、最多 4 個封包、最多 1 個輸入 report、vendor 完�
 重啟入口為 `reset_to_usb_boot`；gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
 
 InputConfig 固定 32／32／32 容量與 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。
+
+## 介面層（Tauri 2 + React）
+
+| 層 | 位置 | 責任 |
+| --- | --- | --- |
+| 程式庫 | `src/` | HID 列舉／session、firmware 建置與 UF2、延遲測試、滑鼠、設定。不含任何 UI 框架。 |
+| 背景工作 | `src/backend.rs` | 一個 worker 執行緒吃 `AppCommand`、吐 `AppEvent`；連線時每 150 ms 輪詢 STATUS、每秒輪詢 STATUS_EXT。 |
+| 外殼 | `src-tauri/` | Tauri 2 應用：13 個命令、把 `AppEvent` 轉成 `UiEvent` 後用 `app://event` 推給 webview。`--latency-worker` 也由這支執行檔提供。 |
+| 前端 | `ui/` | React 19 + TypeScript + Vite，五個頁面；`lib/ipc.ts` 是唯一的 IPC 出入口，`lib/mock.ts` 是瀏覽器用的假後端。 |
+
+契約由 `scripts/check-ipc.mjs` 守住：命令清單以 `generate_handler![...]` 為真相、事件清單以
+`enum UiEvent` 為真相，和 `ui/src/lib/ipc.ts`／`ui/src/lib/types.ts` 雙向比對。
+
+`src-tauri` 在編譯期把 `ui/dist` 嵌進執行檔（`custom-protocol` feature），所以 release 只有一支 exe；
+少了這個 feature，執行檔會去連 dev server，關掉後就是白畫面。

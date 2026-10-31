@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 /// Five samples per second is enough to watch counters move without stealing
 /// bandwidth from the 1 ms input endpoint.
 const STATUS_POLL: Duration = Duration::from_millis(150);
+/// Diagnostics move slower than the counters: once a second is enough to watch
+/// uptime, queue depth and the last fault without adding traffic to the 1 ms poll.
+const EXT_POLL: Duration = Duration::from_millis(1000);
 
 #[derive(Debug)]
 pub enum AppCommand {
@@ -33,6 +36,8 @@ pub enum AppEvent {
     Connected(Device, Hello),
     Disconnected,
     Status(Status),
+    /// STATUS_EXT block; absent on firmware older than 3.1.0+build-hash.
+    Ext(input_protocol::v3::StatusExt),
     Log(String),
     Error(String),
     Progress(usize, String),
@@ -213,6 +218,7 @@ fn worker(
     let mut held = false;
     let mut heartbeat = Instant::now();
     let mut polled = Instant::now();
+    let mut ext_polled = Instant::now();
     while !exit.is_cancelled() {
         match commands.recv_timeout(Duration::from_millis(50)) {
             Ok(work) => {
@@ -367,6 +373,14 @@ fn worker(
                             held = status.buttons() != 0;
                             polled = Instant::now();
                             let _ = events.send(AppEvent::Status(status));
+                        }
+                        // Older firmware has no STATUS_EXT; a failure here must not
+                        // tear down a working session.
+                        if ext_polled.elapsed() >= EXT_POLL {
+                            ext_polled = Instant::now();
+                            if let Ok(ext) = active.status_ext(&Cancellation::default()) {
+                                let _ = events.send(AppEvent::Ext(ext));
+                            }
                         }
                     }
                     Ok(())

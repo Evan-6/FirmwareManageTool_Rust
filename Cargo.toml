@@ -5,15 +5,10 @@ edition = "2024"
 license = "MIT"
 description = "Windows 11 Vendor HID firmware manager and input latency tester"
 
-[features]
-default = ["gui"]
-gui = ["dep:eframe"]
-
 [dependencies]
 input-protocol = { path = "shared/input-protocol" }
 anyhow = "1"
 crossbeam-channel = "0.5"
-eframe = { version = "=0.36.2", optional = true, default-features = false, features = ["wgpu", "default_fonts", "accesskit", "x11", "wayland"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,7 +25,7 @@ lto = "thin"
 strip = "debuginfo"
 
 [workspace]
-members = ["shared/input-protocol", "firmware/engine"]
+members = ["shared/input-protocol", "firmware/engine", "src-tauri"]
 
 [dev-dependencies]
 input-protocol = { path = "shared/input-protocol", features = ["test-support"] }

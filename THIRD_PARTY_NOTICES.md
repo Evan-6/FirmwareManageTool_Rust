@@ -17,7 +17,9 @@ It does not relicense the copied `firmware/` sources or third-party Rust depende
 
 Primary upstream projects:
 
-- egui/eframe: https://github.com/emilk/egui (MIT OR Apache-2.0)
+- Tauri 2: https://github.com/tauri-apps/tauri (MIT OR Apache-2.0)
+- React / React DOM: https://github.com/facebook/react (MIT)
+- Vite: https://github.com/vitejs/vite (MIT)
 - hidapi Rust bindings: https://github.com/ruabmbua/hidapi-rs (MIT)
 - HIDAPI C library: https://github.com/libusb/hidapi (upstream dual/triple license;
   license files are included from the hidapi package)
