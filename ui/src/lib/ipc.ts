@@ -29,6 +29,7 @@ export interface Commands {
   latency: { args: { config: LatencyConfig }; result: null };
   mouse: { args: { request: MouseRequest }; result: null };
   type_text: { args: { config: TypeTextConfig }; result: null };
+  set_debug: { args: { enabled: boolean }; result: null };
   chord: { args: { config: ChordConfig }; result: null };
   trajectory_preview: {
     args: { targetX: number; targetY: number; durationMs: number; profile: HumanProfile };

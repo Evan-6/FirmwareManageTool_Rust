@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { DevicePage } from "./pages/DevicePage";
 import { FirmwarePage } from "./pages/FirmwarePage";
@@ -35,6 +35,29 @@ export default function App() {
 
   const choose = async (target: string) => {
     await call("choose_target", { target });
+  };
+
+  const [debug, setDebug] = useState(true);
+  useEffect(() => {
+    if (state.settings) setDebug(state.settings.debug ?? true);
+  }, [state.settings]);
+  // Keep the worker in step with the saved mode, including right after connect.
+  useEffect(() => {
+    if (state.connected) void call("set_debug", { enabled: debug }).catch(() => undefined);
+  }, [state.connected, debug]);
+
+  const toggleDebug = async () => {
+    const next = !debug;
+    setDebug(next);
+    if (!state.settings) return;
+    const settings = { ...state.settings, debug: next };
+    try {
+      await call("set_debug", { enabled: next });
+      await call("settings_save", { settings });
+      dispatch({ type: "settings", settings });
+    } catch (error) {
+      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+    }
   };
 
   return (
@@ -74,6 +97,17 @@ export default function App() {
             {state.ext && state.info && (
               <StalePill build={state.ext.build} commit={state.info.commit} onOpen={() => setPage("firmware")} />
             )}
+            <button
+              className={`small ${debug ? "" : "primary"}`}
+              title={
+                debug
+                  ? "除錯模式：150 ms STATUS、每秒診斷、每行 HID 都顯示"
+                  : "遊戲模式：只保留 500 ms 心跳，不再輪詢裝置"
+              }
+              onClick={() => void toggleDebug()}
+            >
+              {debug ? "除錯模式" : "遊戲模式"}
+            </button>
             {state.busy && <span className="pill warn">工作中…</span>}
             {state.connected && (
               <button className="danger small" onClick={() => void call("disconnect", {})}>

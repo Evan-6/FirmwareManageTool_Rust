@@ -3,13 +3,26 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub upload: UploadConfig,
     pub latency: LatencyConfig,
     /// Humanised movement shape, shared by every mouse action.
     pub mouse: HumanProfile,
+    /// Debug mode polls STATUS every 150 ms and forwards every HID line. Off means
+    /// game mode: heartbeat only, nothing else touches the bus.
+    pub debug: bool,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            upload: UploadConfig::default(),
+            latency: LatencyConfig::default(),
+            mouse: HumanProfile::default(),
+            debug: true,
+        }
+    }
 }
 impl Settings {
     fn path() -> Result<PathBuf> {

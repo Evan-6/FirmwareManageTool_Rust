@@ -100,6 +100,7 @@ export interface Settings {
   upload: UploadConfig;
   latency: LatencyConfig;
   mouse: HumanProfile;
+  debug: boolean;
 }
 
 export type MouseAction =

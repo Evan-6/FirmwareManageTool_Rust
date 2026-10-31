@@ -81,6 +81,16 @@ pub fn mouse(state: TauriState<'_, State>, request: MouseRequest) -> Result<(), 
     state.submit(AppCommand::Mouse(request))
 }
 
+/// Debug mode lives in settings so it survives restarts, and is pushed to the
+/// worker immediately: turning it off has to stop the polling now, not later.
+#[tauri::command]
+pub fn set_debug(state: TauriState<'_, State>, enabled: bool) -> Result<(), String> {
+    state.submit(AppCommand::SetDebug(enabled))?;
+    let mut settings = firmware_manage_tool::settings::Settings::load();
+    settings.debug = enabled;
+    settings.save().map_err(err)
+}
+
 #[tauri::command]
 pub fn type_text(state: TauriState<'_, State>, config: TypeTextConfig) -> Result<(), String> {
     state.submit(AppCommand::TypeText(config))

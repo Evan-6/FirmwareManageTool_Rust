@@ -32,6 +32,9 @@ pub enum AppCommand {
     Latency(LatencyConfig),
     Mouse(crate::mouse::MouseRequest),
     TypeText(crate::typing::TypeTextConfig),
+    /// Game mode off/on: when disabled the worker stops polling the device and
+    /// only keeps the 500 ms heartbeat alive.
+    SetDebug(bool),
     Chord(crate::typing::ChordConfig),
 }
 #[derive(Debug)]
@@ -222,6 +225,7 @@ fn worker(
     let mut selected = None;
     let mut session: Option<NativeSession> = None;
     let mut held = false;
+    let mut debug = true;
     let mut heartbeat = Instant::now();
     let mut polled = Instant::now();
     let mut ext_polled = Instant::now();
@@ -294,6 +298,18 @@ fn worker(
                             held = status.buttons() != 0;
                             heartbeat = Instant::now();
                             let _ = events.send(AppEvent::Status(status));
+                        }
+                        AppCommand::SetDebug(enabled) => {
+                            debug = enabled;
+                            let _ = events.send(AppEvent::Log(format!(
+                                "除錯模式{}：{}",
+                                if enabled { "開啟" } else { "關閉" },
+                                if enabled {
+                                    "150 ms STATUS、1 s 診斷、每行 HID 都送給介面"
+                                } else {
+                                    "只保留 500 ms 心跳，其他輪詢全部停止"
+                                }
+                            )));
                         }
                         AppCommand::TypeText(config) => {
                             let active = require(&mut session)?;
@@ -417,7 +433,9 @@ fn worker(
                     }
                     Ok(())
                 })();
-                log_responses(&mut session, &events);
+                if debug {
+                    log_responses(&mut session, &events);
+                }
                 if let Err(e) = result {
                     let _ = events.send(AppEvent::Error(format!("{e:#}")));
                     held = false;
@@ -442,7 +460,7 @@ fn worker(
                         }
                         // Live telemetry: keep the STATUS panel moving even when
                         // the user is not pressing anything.
-                        if polled.elapsed() >= STATUS_POLL {
+                        if debug && polled.elapsed() >= STATUS_POLL {
                             let status = active.status(&Cancellation::default())?;
                             held = status.buttons() != 0;
                             polled = Instant::now();
@@ -450,7 +468,7 @@ fn worker(
                         }
                         // Older firmware has no STATUS_EXT; a failure here must not
                         // tear down a working session.
-                        if ext_polled.elapsed() >= EXT_POLL {
+                        if debug && ext_polled.elapsed() >= EXT_POLL {
                             ext_polled = Instant::now();
                             if let Ok(ext) = active.status_ext(&Cancellation::default()) {
                                 let _ = events.send(AppEvent::Ext(ext));
@@ -462,7 +480,9 @@ fn worker(
                     }
                     Ok(())
                 })();
-                log_responses(&mut session, &events);
+                if debug {
+                    log_responses(&mut session, &events);
+                }
                 if let Err(e) = result {
                     let _ = events.send(AppEvent::Error(format!("連線中斷／心跳失敗：{e:#}")));
                     held = false;

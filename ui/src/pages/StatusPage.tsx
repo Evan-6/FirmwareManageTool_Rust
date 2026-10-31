@@ -34,6 +34,11 @@ export function StatusPage() {
 
   return (
     <div className="page">
+      {!(state.settings?.debug ?? true) && (
+        <div className="banner warn">
+          遊戲模式：不再輪詢裝置，圖表停在最後一筆；心跳仍每 500 ms 續租，鍵盤功能照常。
+        </div>
+      )}
       <div className={`banner ${health.cls}`}>{health.text}</div>
 
       {!state.connected ? (

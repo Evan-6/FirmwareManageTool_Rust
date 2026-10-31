@@ -43,6 +43,7 @@ const settings: Settings = {
     boot_target: "",
   },
   latency: { rounds: 50, mode: "Normal" },
+  debug: true,
   mouse: {
     curve: 1,
     jitterPx: 1,
@@ -227,6 +228,9 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
         { kind: "chord", at: 0, config: { usages: [0xe0, 0x06], holdMs: 60 } },
         { kind: "text", at: 400, config: { text: "mock", intervalMs: 45, holdMs: 18, jitterMs: 30 } },
       ];
+    case "set_debug":
+      emit({ kind: "log", line: `mock: 除錯模式 ${args.enabled ? "開" : "關"}` });
+      return null;
     case "macro_list":
       return ["mock-demo"];
     case "choose_target":

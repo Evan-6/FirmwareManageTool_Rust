@@ -150,6 +150,7 @@ pub fn run() {
             crate::commands::upload,
             crate::commands::latency,
             crate::commands::mouse,
+            crate::commands::set_debug,
             crate::commands::type_text,
             crate::commands::chord,
             crate::commands::trajectory_preview,
