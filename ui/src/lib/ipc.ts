@@ -6,9 +6,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   AppInfo,
+  ChordConfig,
   Device,
+  HumanProfile,
   LatencyConfig,
-  MouseAction,
+  MouseRequest,
+  TrajectoryPreview,
+  TypeTextConfig,
   Settings,
   UiEvent,
   UploadConfig,
@@ -23,7 +27,16 @@ export interface Commands {
   reset_input: { args: Record<string, never>; result: null };
   upload: { args: { config: UploadConfig }; result: null };
   latency: { args: { config: LatencyConfig }; result: null };
-  mouse: { args: { action: MouseAction }; result: null };
+  mouse: { args: { request: MouseRequest }; result: null };
+  type_text: { args: { config: TypeTextConfig }; result: null };
+  chord: { args: { config: ChordConfig }; result: null };
+  trajectory_preview: {
+    args: { targetX: number; targetY: number; durationMs: number; profile: HumanProfile };
+    result: TrajectoryPreview;
+  };
+  macro_save: { args: { name: string; steps: unknown }; result: string };
+  macro_load: { args: { name: string }; result: unknown };
+  macro_list: { args: Record<string, never>; result: string[] };
   choose_target: { args: { target: string }; result: null };
   cancel: { args: Record<string, never>; result: null };
   settings_load: { args: Record<string, never>; result: Settings };

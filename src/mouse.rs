@@ -10,6 +10,71 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+/// Knobs for the humanised path. Defaults reproduce the shape the engine always
+/// had; everything is exposed so the UI can tune it instead of guessing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HumanProfile {
+    /// 0 = straight line, 1 = the original bow, 2 = exaggerated arc.
+    pub curve: f64,
+    /// Micro-jitter amplitude in pixels (0 = perfectly smooth).
+    pub jitter_px: f64,
+    /// Percent of the distance the pointer overshoots before correcting.
+    pub overshoot_pct: f64,
+    /// Pause at the end, the way a hand settles before clicking (ms).
+    pub settle_ms: u32,
+    /// How progress maps to time.
+    pub ease: Ease,
+    /// Ignore steps smaller than this, which looks like a coarser sensor.
+    pub min_step_px: i32,
+}
+
+impl Default for HumanProfile {
+    fn default() -> Self {
+        Self {
+            curve: 1.0,
+            jitter_px: 1.0,
+            overshoot_pct: 0.0,
+            settle_ms: 0,
+            ease: Ease::Jerk,
+            min_step_px: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Ease {
+    #[default]
+    Jerk,
+    EaseInOut,
+    Linear,
+}
+
+impl Ease {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Jerk => "jerk（人體加減速）",
+            Self::EaseInOut => "ease-in-out",
+            Self::Linear => "等速",
+        }
+    }
+    fn apply(self, p: f64) -> f64 {
+        match self {
+            Self::Jerk => jerk(p),
+            Self::EaseInOut => p * p * (3.0 - 2.0 * p),
+            Self::Linear => p,
+        }
+    }
+}
+
+/// One mouse command plus the movement profile it should use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MouseRequest {
+    pub action: MouseAction,
+    #[serde(default)]
+    pub profile: HumanProfile,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MouseAction {
     MoveTo {
@@ -76,6 +141,24 @@ pub fn trajectory<R: Rng>(
     duration_ms: u32,
     rng: &mut R,
 ) -> Result<Vec<Node>> {
+    trajectory_with(
+        start,
+        target,
+        screen,
+        duration_ms,
+        &HumanProfile::default(),
+        rng,
+    )
+}
+
+pub fn trajectory_with<R: Rng>(
+    start: (i32, i32),
+    target: (i32, i32),
+    screen: Screen,
+    duration_ms: u32,
+    profile: &HumanProfile,
+    rng: &mut R,
+) -> Result<Vec<Node>> {
     ensure!(screen.width > 1 && screen.height > 1, "顯示器尺寸無效");
     let target = (
         target.0.clamp(0, screen.width - 1),
@@ -98,7 +181,17 @@ pub fn trajectory<R: Rng>(
     }
     let nx = -dy / distance;
     let ny = dx / distance;
-    let limit = (distance * 0.13).clamp(4.0, 110.0);
+    // Overshoot: aim past the target, then correct back in a short second leg.
+    let over = (distance * profile.overshoot_pct / 100.0).clamp(0.0, 160.0);
+    let aim = if over > 0.5 {
+        (
+            (target.0 as f64 + dx / distance * over).clamp(0.0, (screen.width - 1) as f64),
+            (target.1 as f64 + dy / distance * over).clamp(0.0, (screen.height - 1) as f64),
+        )
+    } else {
+        (target.0 as f64, target.1 as f64)
+    };
+    let limit = (distance * 0.13).clamp(4.0, 110.0) * profile.curve.clamp(0.0, 2.0);
     let bend = rng.random_range(-limit..=limit);
     let a1 = rng.random_range(0.20..=0.38);
     let a2 = rng.random_range(0.62..=0.84);
@@ -113,31 +206,30 @@ pub fn trajectory<R: Rng>(
     );
     let phase = rng.random_range(0.0..std::f64::consts::TAU);
     let frequency = rng.random_range(1.1..=2.3);
-    let amplitude = (distance * 0.003).clamp(0.15, 1.35);
+    let amplitude = profile.jitter_px.clamp(0.0, 24.0);
     let steps = (duration / 8).clamp(10, 180);
     let mut nodes = Vec::new();
     let mut last = start;
     for step in 1..=steps {
         let p = step as f64 / steps as f64;
-        let t = jerk(p);
+        let t = profile.ease.apply(p);
         let jitter = amplitude
             * (std::f64::consts::PI * p).sin()
             * (phase + p * std::f64::consts::TAU * frequency).sin();
         let point = if step == steps {
-            target
+            (aim.0.round() as i32, aim.1.round() as i32)
         } else {
             (
-                (bezier(start.0 as f64, c1.0, c2.0, target.0 as f64, t) + nx * jitter).round()
-                    as i32,
-                (bezier(start.1 as f64, c1.1, c2.1, target.1 as f64, t) + ny * jitter).round()
-                    as i32,
+                (bezier(start.0 as f64, c1.0, c2.0, aim.0, t) + nx * jitter).round() as i32,
+                (bezier(start.1 as f64, c1.1, c2.1, aim.1, t) + ny * jitter).round() as i32,
             )
         };
         let point = (
             point.0.clamp(0, screen.width - 1),
             point.1.clamp(0, screen.height - 1),
         );
-        if point != last || step == steps {
+        let step_gap = (point.0 - last.0).abs() + (point.1 - last.1).abs();
+        if step_gap >= profile.min_step_px.max(1) || step == steps {
             nodes.push(Node {
                 at_ms: duration as u64 * step as u64 / steps as u64,
                 x: point.0,
@@ -145,6 +237,24 @@ pub fn trajectory<R: Rng>(
             });
             last = point;
         }
+    }
+    // Correction leg: come back from the overshoot point to the real target.
+    if over > 0.5 {
+        let settle_at = nodes.last().map(|node| node.at_ms).unwrap_or(0) + 90;
+        nodes.push(Node {
+            at_ms: settle_at,
+            x: target.0,
+            y: target.1,
+        });
+    }
+    // Human hands pause before they stop moving.
+    if profile.settle_ms > 0 {
+        let last_at = nodes.last().map(|node| node.at_ms).unwrap_or(0);
+        nodes.push(Node {
+            at_ms: last_at + u64::from(profile.settle_ms),
+            x: target.0,
+            y: target.1,
+        });
     }
     Ok(nodes)
 }
@@ -179,6 +289,7 @@ fn move_to<T: HidTransport>(
     session: &mut Session<T>,
     target: (i32, i32),
     duration: u32,
+    profile: &HumanProfile,
     cancel: &Cancellation,
 ) -> Result<()> {
     let (screen, start) = platform::screen_and_cursor()?;
@@ -186,7 +297,7 @@ fn move_to<T: HidTransport>(
         start.0 >= 0 && start.0 < screen.width && start.1 >= 0 && start.1 < screen.height,
         "擬人化移動前，請將游標放在主顯示器內"
     );
-    let nodes = trajectory(start, target, screen, duration, &mut rand::rng())?;
+    let nodes = trajectory_with(start, target, screen, duration, profile, &mut rand::rng())?;
     move_along_trajectory(session, &nodes, screen, cancel, platform::screen_and_cursor)
 }
 
@@ -238,17 +349,21 @@ fn move_along_trajectory<T: HidTransport>(
 pub fn execute<T: HidTransport>(
     session: &mut Session<T>,
     action: &MouseAction,
+    profile: &HumanProfile,
     cancel: &Cancellation,
 ) -> Result<Status> {
     let before = session.status(cancel)?;
     match *action {
-        MouseAction::MoveTo { x, y, duration_ms } => move_to(session, (x, y), duration_ms, cancel)?,
+        MouseAction::MoveTo { x, y, duration_ms } => {
+            move_to(session, (x, y), duration_ms, profile, cancel)?
+        }
         MouseAction::MoveBy { x, y, duration_ms } => {
             let (_, start) = platform::screen_and_cursor()?;
             move_to(
                 session,
                 (start.0.saturating_add(x), start.1.saturating_add(y)),
                 duration_ms,
+                profile,
                 cancel,
             )?;
         }
@@ -263,7 +378,7 @@ pub fn execute<T: HidTransport>(
                 armed: true,
             };
             set_button(guard.session, button, true, cancel)?;
-            move_to(guard.session, (x, y), duration_ms, cancel)?;
+            move_to(guard.session, (x, y), duration_ms, profile, cancel)?;
             set_button(guard.session, button, false, cancel)?;
             guard.armed = false;
         }
@@ -326,6 +441,121 @@ pub fn execute<T: HidTransport>(
     after.check_transport_since(&before)?;
     Ok(after)
 }
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    fn screen() -> Screen {
+        Screen {
+            width: 1920,
+            height: 1080,
+        }
+    }
+
+    #[test]
+    fn overshoot_adds_a_correction_leg_and_settle_extends_the_end() {
+        let mut rng = rand::rng();
+        let plain = trajectory_with(
+            (500, 500),
+            (900, 500),
+            screen(),
+            300,
+            &HumanProfile::default(),
+            &mut rng,
+        )
+        .unwrap();
+        let human = trajectory_with(
+            (500, 500),
+            (900, 500),
+            screen(),
+            300,
+            &HumanProfile {
+                overshoot_pct: 8.0,
+                settle_ms: 120,
+                ..HumanProfile::default()
+            },
+            &mut rng,
+        )
+        .unwrap();
+        assert!(
+            human.len() > plain.len(),
+            "overshoot + settle must add nodes"
+        );
+        let last = human.last().unwrap();
+        assert_eq!((last.x, last.y), (900, 500), "ends exactly on target");
+        assert!(
+            last.at_ms > plain.last().unwrap().at_ms,
+            "settle delays the end"
+        );
+    }
+
+    #[test]
+    fn zero_jitter_and_coarse_steps_produce_a_shorter_path() {
+        let mut rng = rand::rng();
+        let fine = trajectory_with(
+            (100, 100),
+            (400, 100),
+            screen(),
+            300,
+            &HumanProfile::default(),
+            &mut rng,
+        )
+        .unwrap();
+        let coarse = trajectory_with(
+            (100, 100),
+            (400, 100),
+            screen(),
+            300,
+            &HumanProfile {
+                jitter_px: 0.0,
+                min_step_px: 25,
+                ..HumanProfile::default()
+            },
+            &mut rng,
+        )
+        .unwrap();
+        assert!(coarse.len() < fine.len(), "coarse stepping drops nodes");
+        assert!(coarse.len() >= 2);
+    }
+
+    #[test]
+    fn linear_ease_differs_from_the_default_curve() {
+        let mut rng = rand::rng();
+        let jerk = trajectory_with(
+            (0, 0),
+            (600, 0),
+            screen(),
+            300,
+            &HumanProfile::default(),
+            &mut rng,
+        )
+        .unwrap();
+        let linear = trajectory_with(
+            (0, 0),
+            (600, 0),
+            screen(),
+            300,
+            &HumanProfile {
+                ease: Ease::Linear,
+                jitter_px: 0.0,
+                ..HumanProfile::default()
+            },
+            &mut rng,
+        )
+        .unwrap();
+        // The jerk curve is symmetric, so compare a quarter of the way in: there
+        // ease-in still holds the pointer back, linear does not.
+        let jerk_quarter = jerk[jerk.len() / 4].x;
+        let linear_quarter = linear[linear.len() / 4].x;
+        assert!(
+            linear_quarter > jerk_quarter + 30,
+            "jerk lags behind linear early on ({} vs {})",
+            jerk_quarter,
+            linear_quarter
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +769,7 @@ mod tests {
                     button: 1,
                     count: 2
                 },
+                &HumanProfile::default(),
                 &token
             )
             .is_err()

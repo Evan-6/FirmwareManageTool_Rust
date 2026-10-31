@@ -99,6 +99,7 @@ export interface UploadConfig {
 export interface Settings {
   upload: UploadConfig;
   latency: LatencyConfig;
+  mouse: HumanProfile;
 }
 
 export type MouseAction =
@@ -163,3 +164,59 @@ export const FAULT_CODES: Record<number, string> = {
   9: "序號重複",
   10: "序號跳號",
 };
+
+export type Ease = "Jerk" | "EaseInOut" | "Linear";
+
+export interface HumanProfile {
+  curve: number;
+  jitterPx: number;
+  overshootPct: number;
+  settleMs: number;
+  ease: Ease;
+  minStepPx: number;
+}
+
+export const DEFAULT_PROFILE: HumanProfile = {
+  curve: 1,
+  jitterPx: 1,
+  overshootPct: 0,
+  settleMs: 0,
+  ease: "Jerk",
+  minStepPx: 1,
+};
+
+export interface MouseRequest {
+  action: MouseAction;
+  profile: HumanProfile;
+}
+
+export interface TypeTextConfig {
+  text: string;
+  intervalMs: number;
+  holdMs: number;
+  jitterMs: number;
+}
+
+export interface ChordConfig {
+  usages: number[];
+  holdMs: number;
+}
+
+export interface PreviewNode {
+  atMs: number;
+  x: number;
+  y: number;
+}
+
+export interface TrajectoryPreview {
+  startX: number;
+  startY: number;
+  width: number;
+  height: number;
+  nodes: PreviewNode[];
+}
+
+export type MacroStep =
+  | { kind: "mouse"; at: number; request: MouseRequest }
+  | { kind: "text"; at: number; config: TypeTextConfig }
+  | { kind: "chord"; at: number; config: ChordConfig };

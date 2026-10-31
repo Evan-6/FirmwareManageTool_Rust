@@ -6,7 +6,6 @@ import type {
   Device,
   LatencyConfig,
   LatencyReport,
-  MouseAction,
   Round,
   Settings,
   SessionInfo,
@@ -44,6 +43,14 @@ const settings: Settings = {
     boot_target: "",
   },
   latency: { rounds: 50, mode: "Normal" },
+  mouse: {
+    curve: 1,
+    jitterPx: 1,
+    overshootPct: 0,
+    settleMs: 0,
+    ease: "Jerk",
+    minStepPx: 1,
+  },
 };
 
 function emit(event: UiEvent) {
@@ -180,8 +187,48 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
       return null;
     }
     case "mouse":
-      emit({ kind: "log", line: `mock: mouse ${JSON.stringify(args.action as MouseAction)}` });
+      emit({ kind: "log", line: `mock: mouse ${JSON.stringify(args.request)}` });
       return null;
+    case "type_text":
+      emit({ kind: "log", line: `mock: 輸入 ${JSON.stringify(args.config)}` });
+      emit({ kind: "done" });
+      return null;
+    case "chord":
+      emit({ kind: "log", line: `mock: 組合鍵 ${JSON.stringify(args.config)}` });
+      emit({ kind: "done" });
+      return null;
+    case "trajectory_preview": {
+      const profile = args.profile as { curve: number; jitterPx: number; overshootPct: number; settleMs: number };
+      const width = 1920;
+      const height = 1080;
+      const startX = 600;
+      const startY = 500;
+      const nodes = [];
+      const steps = 60;
+      for (let step = 1; step <= steps; step += 1) {
+        const p = step / steps;
+        const t = p * p * p * (10 + p * (-15 + 6 * p));
+        const jitter = profile.jitterPx * Math.sin(Math.PI * p) * Math.sin(6 * p);
+        nodes.push({
+          atMs: Math.round(260 * p),
+          x: Math.round(startX + 300 * t + jitter),
+          y: Math.round(startY + 120 * t + jitter * (step % 2 ? 1 : -1)),
+        });
+      }
+      if (profile.overshootPct > 0) nodes.push({ atMs: 300, x: startX + 320, y: startY + 130 });
+      if (profile.overshootPct > 0) nodes.push({ atMs: 380, x: startX + 300, y: startY + 120 });
+      return { startX, startY, width, height, nodes };
+    }
+    case "macro_save":
+      emit({ kind: "log", line: `mock: 巨集 ${String(args.name)} 已存（${(args.steps as unknown[]).length} 步）` });
+      return `mock/${String(args.name)}.json`;
+    case "macro_load":
+      return [
+        { kind: "chord", at: 0, config: { usages: [0xe0, 0x06], holdMs: 60 } },
+        { kind: "text", at: 400, config: { text: "mock", intervalMs: 45, holdMs: 18, jitterMs: 30 } },
+      ];
+    case "macro_list":
+      return ["mock-demo"];
     case "choose_target":
       emit({ kind: "log", line: `mock: bootloader ${String(args.target)}` });
       return null;

@@ -8,6 +8,7 @@ pub mod platform;
 pub mod process;
 pub mod protocol;
 pub mod settings;
+pub mod typing;
 pub mod uf2;
 
 #[cfg(test)]

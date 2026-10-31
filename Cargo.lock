@@ -782,6 +782,7 @@ dependencies = [
  "anyhow",
  "firmware-manage-tool",
  "input-protocol",
+ "rand",
  "serde",
  "serde_json",
  "tauri",

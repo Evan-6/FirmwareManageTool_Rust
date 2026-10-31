@@ -492,3 +492,26 @@ input[type="checkbox"] {
   color: #ffb0b0;
   margin: 0;
 }
+
+.trajectory {
+  width: 100%;
+  max-height: 320px;
+  border-radius: 10px;
+  display: block;
+  background: #12151c;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+  width: 100%;
+}
+
+textarea {
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #171a22;
+  color: var(--fg);
+  font: inherit;
+  resize: vertical;
+}

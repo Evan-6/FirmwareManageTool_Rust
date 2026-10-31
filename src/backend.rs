@@ -3,12 +3,14 @@ use crate::{
     firmware::{self, UploadConfig, UploadObserver, UploadOutcome},
     hid::{self, Device, NativeSession},
     latency::{self, LatencyConfig, Mode, Report, Round},
-    mouse::{self, MouseAction},
+    mouse,
     process::SystemRunner,
     protocol::{Hello, Status},
 };
 use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, Sender};
+use input_protocol::v3::Command;
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 /// How often a connected device is asked for STATUS while nothing else happens.
@@ -28,7 +30,9 @@ pub enum AppCommand {
     Reset,
     Upload(UploadConfig),
     Latency(LatencyConfig),
-    Mouse(MouseAction),
+    Mouse(crate::mouse::MouseRequest),
+    TypeText(crate::typing::TypeTextConfig),
+    Chord(crate::typing::ChordConfig),
 }
 #[derive(Debug)]
 pub enum AppEvent {
@@ -280,12 +284,75 @@ fn worker(
                             let status = require(&mut session)?.status(&Cancellation::default())?;
                             let _ = events.send(AppEvent::Status(status));
                         }
-                        AppCommand::Mouse(action) => {
-                            let status =
-                                mouse::execute(require(&mut session)?, &action, &work.cancel)?;
+                        AppCommand::Mouse(request) => {
+                            let status = mouse::execute(
+                                require(&mut session)?,
+                                &request.action,
+                                &request.profile,
+                                &work.cancel,
+                            )?;
                             held = status.buttons() != 0;
                             heartbeat = Instant::now();
                             let _ = events.send(AppEvent::Status(status));
+                        }
+                        AppCommand::TypeText(config) => {
+                            let active = require(&mut session)?;
+                            let strokes = crate::typing::strokes(&config.text);
+                            let mut rng = rand::rng();
+                            let hold = Duration::from_millis(u64::from(config.hold_ms.max(8)));
+                            for stroke in strokes {
+                                if stroke.shift {
+                                    active.input(
+                                        Command::Key(crate::typing::LEFT_SHIFT, true),
+                                        &work.cancel,
+                                    )?;
+                                }
+                                active.input(Command::Key(stroke.key, true), &work.cancel)?;
+                                work.cancel.sleep(hold)?;
+                                active.input(Command::Key(stroke.key, false), &work.cancel)?;
+                                if stroke.shift {
+                                    active.input(
+                                        Command::Key(crate::typing::LEFT_SHIFT, false),
+                                        &work.cancel,
+                                    )?;
+                                }
+                                let jitter = if config.jitter_ms > 0 {
+                                    u64::from(rng.random_range(0..=config.jitter_ms))
+                                } else {
+                                    0
+                                };
+                                work.cancel.sleep(Duration::from_millis(
+                                    u64::from(config.interval_ms) + jitter,
+                                ))?;
+                            }
+                            let status = active.status(&work.cancel)?;
+                            held = status.buttons() != 0;
+                            let _ = events.send(AppEvent::Status(status));
+                            let _ = events.send(AppEvent::Done);
+                        }
+                        AppCommand::Chord(config) => {
+                            let active = require(&mut session)?;
+                            let mut pressed = input_protocol::v3::InputState::default();
+                            for usage in &config.usages {
+                                pressed.set(
+                                    input_protocol::KeyId {
+                                        usage_page: 7,
+                                        usage: *usage,
+                                    },
+                                    true,
+                                )?;
+                            }
+                            active.input(Command::Snapshot(pressed), &work.cancel)?;
+                            work.cancel
+                                .sleep(Duration::from_millis(u64::from(config.hold_ms.max(10))))?;
+                            active.input(
+                                Command::Snapshot(input_protocol::v3::InputState::default()),
+                                &work.cancel,
+                            )?;
+                            let status = active.status(&work.cancel)?;
+                            held = false;
+                            let _ = events.send(AppEvent::Status(status));
+                            let _ = events.send(AppEvent::Done);
                         }
                         AppCommand::Upload(config) => {
                             if let Some(active) = session.as_mut() {

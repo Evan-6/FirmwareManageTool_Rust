@@ -51,7 +51,58 @@ async function evaluate(expression) {
 const script = process.argv[2];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-if (script === "hotkey") {
+if (script === "p1") {
+  // Humanised movement: profile panel, real trajectory preview, one real move,
+  // one text run and one chord — all through the worker.
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('重新掃描')).click()`);
+  await sleep(1200);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '連線').click()`);
+  await sleep(2500);
+
+  await evaluate(`document.querySelectorAll('nav .nav')[4].click()`);
+  await sleep(1200);
+  const panel = await evaluate(`(() => {
+    const svg = document.querySelector('svg.trajectory');
+    const poly = svg?.querySelector('polyline');
+    return {
+      sliders: document.querySelectorAll('input[type=range]').length,
+      panels: document.querySelectorAll('.panel').length,
+      polyPoints: poly ? poly.getAttribute('points').split(' ').length : 0,
+      text: document.body.innerText.includes('擬人化參數'),
+    };
+  })()`);
+  console.log("mouse page:", JSON.stringify(panel));
+
+  const before = await evaluate(`(async () => (await window.__TAURI_INTERNALS__.invoke("app_info"), document.body.innerText.match(/received[^0-9]*([0-9]+)/)?.[1] ?? "0"))()`);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '移動').click()`);
+  await sleep(2500);
+  const afterMove = await evaluate(`(() => {
+    const consoleText = document.querySelector('.console.small')?.textContent ?? '';
+    return { history: consoleText.split(String.fromCharCode(10)).slice(0, 2) };
+  })()`);
+  console.log("after move:", JSON.stringify(afterMove));
+
+  const textResult = await evaluate(`window.__TAURI_INTERNALS__.invoke("type_text", { config: { text: "x", intervalMs: 40, holdMs: 15, jitterMs: 10 } }).then(() => "ok").catch((e) => String(e))`);
+  await sleep(1200);
+  const chordResult = await evaluate(`window.__TAURI_INTERNALS__.invoke("chord", { config: { usages: [225], holdMs: 50 } }).then(() => "ok").catch((e) => String(e))`);
+  await sleep(800);
+  console.log("type_text:", textResult, "chord:", chordResult);
+
+  const status = await evaluate(`document.querySelectorAll('nav .nav')[1].click(), null`);
+  await sleep(1500);
+  const counters = await evaluate(`(() => {
+    const metrics = Array.from(document.querySelectorAll('.metric')).slice(0, 3).map(m => m.textContent);
+    return { metrics, receivedBefore: ${JSON.stringify(before)} };
+  })()`);
+  console.log("counters:", JSON.stringify(counters));
+
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '中斷')?.click()`);
+  await sleep(1000);
+} else if (script === "hotkey") {
   // Connect, fire Ctrl+Alt+Shift+Esc through the OS, then read the log the
   // handler emitted. This is the only way to prove a global hotkey works.
   await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);

@@ -1,4 +1,4 @@
-use crate::{firmware::UploadConfig, latency::LatencyConfig};
+use crate::{firmware::UploadConfig, latency::LatencyConfig, mouse::HumanProfile};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct Settings {
     pub upload: UploadConfig,
     pub latency: LatencyConfig,
+    /// Humanised movement shape, shared by every mouse action.
+    pub mouse: HumanProfile,
 }
 impl Settings {
     fn path() -> Result<PathBuf> {
