@@ -22,6 +22,11 @@ pub const PING: u8 = 9;
 /// Persisted device settings (LED brightness today, room for flags).
 pub const SETTINGS_GET: u8 = 10;
 pub const SETTINGS_SET: u8 = 11;
+/// Per-session snapshot (eight fixed six-byte entries).
+pub const SESSION_LIST: u8 = 15;
+pub const SESSION_ENTRY: usize = 6;
+pub const SESSION_SLOTS: usize = 8;
+pub const SESSION_LIST_BYTES: usize = SESSION_ENTRY * SESSION_SLOTS;
 pub const STATUS_EXT_BYTES: usize = 24;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
@@ -228,6 +233,7 @@ pub enum Command {
     Ping(Vec<u8>),
     SettingsGet,
     SettingsSet { brightness: u8, flags: u8 },
+    SessionList,
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
@@ -249,6 +255,7 @@ impl Command {
             Self::Close => (CLOSE, vec![]),
             Self::StatusExt => (STATUS_EXT, vec![]),
             Self::SettingsGet => (SETTINGS_GET, vec![]),
+            Self::SessionList => (SESSION_LIST, vec![]),
             Self::SettingsSet { brightness, flags } => {
                 (SETTINGS_SET, vec![*brightness, *flags, 0, 0])
             }
@@ -299,6 +306,7 @@ impl Command {
                 | Self::Ping(_)
                 | Self::SettingsGet
                 | Self::SettingsSet { .. }
+                | Self::SessionList
         )
     }
 }
@@ -331,6 +339,40 @@ impl Status {
         })
     }
 }
+/// One owner as reported by SESSION_LIST.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInfo {
+    /// Low 16 bits of the session id, enough to match a host log line.
+    pub id: u16,
+    pub lease_ms: u16,
+    /// Pressed keys (modifiers included).
+    pub held: u8,
+    /// 1 pending command, 2 released, 4 bootloader requested.
+    pub flags: u8,
+}
+
+pub fn parse_session_list(p: &[u8]) -> Vec<SessionInfo> {
+    let mut sessions = Vec::new();
+    for index in 0..SESSION_SLOTS {
+        let base = index * SESSION_ENTRY;
+        let Some(entry) = p.get(base..base + SESSION_ENTRY) else {
+            break;
+        };
+        let id = u16::from_le_bytes([entry[0], entry[1]]);
+        if id == 0 {
+            continue;
+        }
+        sessions.push(SessionInfo {
+            id,
+            lease_ms: u16::from_le_bytes([entry[2], entry[3]]),
+            held: entry[4],
+            flags: entry[5],
+        });
+    }
+    sessions
+}
+
 /// Echo of the persisted settings block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -406,6 +448,7 @@ pub fn check_response(p: &Packet, session: u32, sequence: u32, opcode: u8) -> Re
         STATUS => p.payload.len() == 51,
         STATUS_EXT => p.payload.len() == STATUS_EXT_BYTES,
         SETTINGS_GET => p.payload.len() == 8,
+        SESSION_LIST => p.payload.len() == SESSION_LIST_BYTES,
         PING => p.payload.len() <= 8,
         _ => p.payload.len() == 1,
     };

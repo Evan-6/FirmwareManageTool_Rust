@@ -127,6 +127,9 @@ export function DevicePage() {
           <button disabled={!state.connected} onClick={() => void call("reset_input", {})}>
             全部放開
           </button>
+          <span className={state.info?.hotkey ? "pill ok" : "pill warn"}>
+            {state.info?.hotkey ? "緊急放開：Ctrl+Alt+Shift+Esc" : "緊急放開熱鍵不可用"}
+          </span>
           <button disabled={!state.connected} onClick={() => void call("request_status", {})}>
             立即讀取 STATUS
           </button>

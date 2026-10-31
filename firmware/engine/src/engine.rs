@@ -149,6 +149,10 @@ impl InputEngine {
             self.status_ext(slot, seq);
             return;
         }
+        if op == wire::SESSION_LIST {
+            self.session_list(slot, seq);
+            return;
+        }
         // Platform-owned commands: the engine only keeps the session bookkeeping
         // (sequence, lease) correct; the transport answers them from flash.
         if op == wire::SETTINGS_GET || op == wire::SETTINGS_SET {
@@ -640,6 +644,36 @@ impl InputEngine {
     fn ping(&mut self, slot: usize, seq: u32, data: &[u8]) {
         let id = self.sessions.get(slot).id;
         self.reply(wire::PING | 128, id, seq, &data[..data.len().min(8)]);
+    }
+
+    /// Who else is driving this keyboard: id tail, remaining lease, held keys and
+    /// pending flags per slot. The host cannot work this out from aggregates.
+    fn session_list(&mut self, slot: usize, seq: u32) {
+        let id = self.sessions.get(slot).id;
+        let mut b = [0u8; wire::SESSION_LIST_BYTES];
+        for index in 0..SESSIONS {
+            let session = *self.sessions.get(index);
+            if session.id == 0 {
+                continue;
+            }
+            let base = index * wire::SESSION_ENTRY;
+            b[base..base + 2].copy_from_slice(&(session.id as u16).to_le_bytes());
+            let lease = self.lease_remaining(session.lease_at);
+            b[base + 2..base + 4].copy_from_slice(&lease.to_le_bytes());
+            b[base + 4] = session.state.count_keys();
+            let mut flags = 0u8;
+            if !session.pending.is_none() {
+                flags |= 1;
+            }
+            if session.released {
+                flags |= 2;
+            }
+            if self.boot_requested {
+                flags |= 4;
+            }
+            b[base + 5] = flags;
+        }
+        self.reply(wire::SESSION_LIST | 128, id, seq, &b);
     }
 
     fn status(&mut self, slot: usize, seq: u32) {

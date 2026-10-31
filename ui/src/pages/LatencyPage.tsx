@@ -49,6 +49,22 @@ export function LatencyPage() {
     }
   };
 
+  const [csvPath, setCsvPath] = useState("");
+
+  const exportCsv = async () => {
+    if (!state.report) return;
+    try {
+      const path = await call("export_report_csv", {
+        report: state.report,
+        path: state.settings?.csv_path ?? "",
+      });
+      setCsvPath(path);
+      dispatch({ type: "event", event: { kind: "log", line: `CSV 已寫入 ${path}` } });
+    } catch (error) {
+      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+    }
+  };
+
   const values = (state.report?.rounds ?? []).filter((round) => round.outcome === "Success" && round.latency_ms != null).map((round) => round.latency_ms!);
   const summary = stats(values);
 
@@ -95,7 +111,14 @@ export function LatencyPage() {
         </p>
       </Panel>
 
-      <Panel title="統計">
+      <Panel
+        title="統計"
+        actions={
+          <button disabled={!state.report} onClick={() => void exportCsv()}>
+            匯出 CSV
+          </button>
+        }
+      >
         {!summary ? (
           <p className="muted">尚無資料。</p>
         ) : (
@@ -118,6 +141,7 @@ export function LatencyPage() {
             ))}
           </div>
         )}
+        {csvPath && <p className="muted mono">CSV：{csvPath}</p>}
         {state.report && (
           <p className="muted">
             {state.report.rounds.length} 輪，取消 {String(state.report.cancelled)}，清理確認{" "}

@@ -18,6 +18,16 @@ const PAGES = [
 
 type PageId = (typeof PAGES)[number]["id"];
 
+function StalePill({ build, commit, onOpen }: { build: number; commit: string; onOpen: () => void }) {
+  const board = build.toString(16).padStart(8, "0");
+  if (!build || commit === "unknown" || commit.startsWith(board)) return null;
+  return (
+    <button className="pill warn" onClick={onOpen} title="板的 build 與目前程式不同">
+      板子韌體較舊（{board}）— 前往燒錄
+    </button>
+  );
+}
+
 export default function App() {
   const { state, dispatch } = useStore();
   const [page, setPage] = useState<PageId>("device");
@@ -61,6 +71,9 @@ export default function App() {
           </div>
           <div className="topbar-actions">
             {state.ext && <span className="pill mono">fw {state.hello?.firmware} · build {state.ext.build.toString(16).padStart(8, "0")}</span>}
+            {state.ext && state.info && (
+              <StalePill build={state.ext.build} commit={state.info.commit} onOpen={() => setPage("firmware")} />
+            )}
             {state.busy && <span className="pill warn">工作中…</span>}
             {state.connected && (
               <button className="danger small" onClick={() => void call("disconnect", {})}>

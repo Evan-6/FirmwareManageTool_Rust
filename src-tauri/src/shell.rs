@@ -9,6 +9,10 @@ use tauri::{Emitter, Manager};
 
 use crate::dto::UiEvent;
 
+/// Set once at startup so `app_info` can tell the UI whether the emergency
+/// release hotkey is actually live.
+pub static HOTKEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct State {
     /// The library worker. Locked only for the microseconds it takes to queue a
     /// command or copy one event out; the heavy lifting happens on its own thread.
@@ -68,6 +72,68 @@ fn spawn_pump(handle: tauri::AppHandle) {
     });
 }
 
+/// Ctrl+Alt+Shift+Esc releases everything, even when the window is behind a game.
+/// Registration happens before the window exists (so `app_info` can report it and
+/// no event is lost), the message loop needs a thread of its own.
+#[cfg(windows)]
+pub fn register_hotkey() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, VK_ESCAPE,
+    };
+    // SAFETY: registering a thread-agnostic hotkey with a null window handle.
+    unsafe {
+        RegisterHotKey(
+            std::ptr::null_mut(),
+            HOTKEY_ID,
+            MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
+            u32::from(VK_ESCAPE),
+        ) != 0
+    }
+}
+
+#[cfg(windows)]
+const HOTKEY_ID: i32 = 1;
+
+#[cfg(windows)]
+fn pump_hotkey(handle: tauri::AppHandle) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+
+    std::thread::spawn(move || {
+        let registered = register_hotkey();
+        HOTKEY.store(registered, std::sync::atomic::Ordering::Relaxed);
+        let _ = handle.emit(
+            "app://event",
+            UiEvent::Log {
+                line: if registered {
+                    "緊急放開熱鍵已啟用：Ctrl+Alt+Shift+Esc".to_string()
+                } else {
+                    "無法註冊緊急放開熱鍵 Ctrl+Alt+Shift+Esc（可能被其他程式佔用）".to_string()
+                },
+            },
+        );
+        let mut message: MSG = unsafe { std::mem::zeroed() };
+        loop {
+            // SAFETY: the thread owns the queue that received the registration.
+            let got = unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) };
+            if got <= 0 {
+                return;
+            }
+            if message.message != WM_HOTKEY || message.wParam != HOTKEY_ID as usize {
+                continue;
+            }
+            if let Some(state) = handle.try_state::<State>() {
+                let _ = state.submit(firmware_manage_tool::backend::AppCommand::Reset);
+            }
+            let _ = handle.emit(
+                "app://event",
+                UiEvent::Log {
+                    line: "熱鍵：全部放開".into(),
+                },
+            );
+        }
+    });
+}
+
 pub fn run() {
     let backend = Backend::start();
     let app = tauri::Builder::default()
@@ -86,11 +152,14 @@ pub fn run() {
             crate::commands::mouse,
             crate::commands::choose_target,
             crate::commands::cancel,
+            crate::commands::export_report_csv,
             crate::commands::settings_load,
             crate::commands::settings_save,
         ])
         .setup(|app| {
             spawn_pump(app.handle().clone());
+            #[cfg(windows)]
+            pump_hotkey(app.handle().clone());
             Ok(())
         })
         .build(tauri::generate_context!())

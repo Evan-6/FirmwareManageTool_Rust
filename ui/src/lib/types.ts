@@ -50,6 +50,13 @@ export interface StatusExt {
   build: number;
 }
 
+export interface SessionInfo {
+  id: number;
+  leaseMs: number;
+  held: number;
+  flags: number;
+}
+
 export type RoundOutcome = "Success" | "Failed" | "Timeout";
 
 export interface Round {
@@ -110,6 +117,7 @@ export type UiEvent =
   | { kind: "disconnected" }
   | { kind: "status"; status: Status }
   | { kind: "ext"; ext: StatusExt }
+  | { kind: "sessions"; sessions: SessionInfo[] }
   | { kind: "log"; line: string }
   | { kind: "error"; message: string }
   | { kind: "progress"; stage: number; message: string }
@@ -127,6 +135,7 @@ export interface AppInfo {
   commit: string;
   target: string;
   firmwareDir: string;
+  hotkey: boolean;
 }
 
 export function outcomeLabel(outcome: UploadOutcome): string {

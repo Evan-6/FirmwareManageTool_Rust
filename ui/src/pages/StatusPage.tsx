@@ -94,6 +94,41 @@ export function StatusPage() {
             )}
           </Panel>
 
+          <Panel title="連線擁有者（SESSION_LIST）">
+            {state.sessions.length === 0 ? (
+              <p className="muted">沒有其他連線。</p>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>session</th>
+                    <th>剩餘租約</th>
+                    <th>按住鍵</th>
+                    <th>狀態</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.sessions.map((session) => (
+                    <tr key={session.id}>
+                      <td className="mono">{session.id.toString(16).padStart(4, "0")}</td>
+                      <td>{session.leaseMs} ms</td>
+                      <td>{session.held}</td>
+                      <td>
+                        {[
+                          session.flags & 1 ? "有待送命令" : null,
+                          session.flags & 2 ? "已釋放" : null,
+                          session.flags & 4 ? "要求 BOOTSEL" : null,
+                        ]
+                          .filter(Boolean)
+                          .join("・") || "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </Panel>
+
           <Panel title="原始 STATUS">
             <div className="console small">{state.status?.raw ?? ""}</div>
             <div className="row">

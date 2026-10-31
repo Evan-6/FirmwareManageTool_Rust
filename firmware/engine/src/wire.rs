@@ -20,6 +20,10 @@ pub const PING: u8 = 9;
 /// Persisted device settings (LED brightness, lifetime counters).
 pub const SETTINGS_GET: u8 = 10;
 pub const SETTINGS_SET: u8 = 11;
+/// Per-session snapshot: eight fixed entries of six bytes.
+pub const SESSION_LIST: u8 = 15;
+pub const SESSION_ENTRY: usize = 6;
+pub const SESSION_LIST_BYTES: usize = SESSION_ENTRY * crate::config::SESSIONS;
 // 12..=14 stay reserved for a future in-application firmware update; the ROM
 // bootloader flow owns updates today, so nothing here claims those opcodes yet.
 pub const KEY: u8 = 16;
@@ -103,7 +107,7 @@ pub fn write32(p: &mut [u8], v: u32) {
 fn shape(op: u8, n: u8) -> Option<bool> {
     let expected = match op {
         OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER | CLOSE | STATUS_EXT => n == 0,
-        SETTINGS_GET => n == 0,
+        SETTINGS_GET | SESSION_LIST => n == 0,
         SETTINGS_SET => n == 4,
         PING => n <= 8,
         KEY => n == 5,

@@ -12,6 +12,7 @@ import type {
   LatencyReport,
   Round,
   Settings,
+  SessionInfo,
   Status,
   StatusExt,
   UiEvent,
@@ -32,6 +33,7 @@ export interface Store {
   hello: Hello | null;
   status: Status | null;
   ext: StatusExt | null;
+  sessions: SessionInfo[];
   samples: Sample[];
   logs: string[];
   errors: string[];
@@ -57,6 +59,7 @@ const initial: Store = {
   hello: null,
   status: null,
   ext: null,
+  sessions: [],
   samples: [],
   logs: [],
   errors: [],
@@ -118,6 +121,7 @@ function reducer(state: Store, action: Action): Store {
             hello: null,
             status: null,
             ext: null,
+            sessions: [],
             samples: [],
             busy: false,
           };
@@ -128,6 +132,8 @@ function reducer(state: Store, action: Action): Store {
         }
         case "ext":
           return { ...state, ext: event.ext };
+        case "sessions":
+          return { ...state, sessions: event.sessions };
         case "log": {
           const logs = [...state.logs, event.line];
           if (logs.length > MAX_LOGS) logs.splice(0, logs.length - MAX_LOGS);

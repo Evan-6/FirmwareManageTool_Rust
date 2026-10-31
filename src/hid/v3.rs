@@ -1,5 +1,5 @@
 use super::*;
-use input_protocol::v3::{DeviceSettings, Packet, StatusExt};
+use input_protocol::v3::{DeviceSettings, Packet, SessionInfo, StatusExt};
 use input_protocol::{KeyId, v3::Command};
 impl<T: HidTransport> Session<T> {
     pub(super) fn v3_pump(&mut self, timeout: i32) -> Result<()> {
@@ -84,6 +84,12 @@ impl<T: HidTransport> Session<T> {
     pub fn status_ext(&mut self, cancel: &Cancellation) -> Result<StatusExt> {
         let reply = self.query(Command::StatusExt, cancel)?;
         StatusExt::parse(&reply.payload)
+    }
+
+    /// Who else is driving the keyboard right now.
+    pub fn sessions(&mut self, cancel: &Cancellation) -> Result<Vec<SessionInfo>> {
+        let reply = self.query(Command::SessionList, cancel)?;
+        Ok(input_protocol::v3::parse_session_list(&reply.payload))
     }
 
     /// Persisted settings as the device has them right now.

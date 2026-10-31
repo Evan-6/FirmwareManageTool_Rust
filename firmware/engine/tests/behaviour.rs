@@ -337,6 +337,34 @@ fn platform_commands_keep_the_session_and_never_reply_themselves() {
 }
 
 #[test]
+fn session_list_reports_every_owner() {
+    // With eight sessions the host needs to know who is holding a key, not just
+    // how many sessions exist.
+    let mut h = Harness::new(0);
+    h.open();
+    h.send_as(wire::OPEN, 1, &[], 43);
+    h.tick(12);
+    h.send(wire::KEY, 2, &[7, 0, 4, 0, 1]);
+    h.tick(12);
+
+    h.send(wire::SESSION_LIST, 3, &[]);
+    h.tick(6);
+    let reply = h
+        .replies
+        .iter()
+        .rev()
+        .find(|r| r.bytes[1] == (wire::SESSION_LIST | 128))
+        .expect("SESSION_LIST must be answered");
+    let p = &reply.bytes[wire::HEADER..wire::HEADER + wire::SESSION_LIST_BYTES];
+    assert_eq!(u16::from_le_bytes([p[0], p[1]]), 42, "first owner id tail");
+    assert!(u16::from_le_bytes([p[2], p[3]]) > 0, "lease still running");
+    assert_eq!(p[4], 1, "one key held");
+    assert_eq!(p[5], 0, "no pending work");
+    assert_eq!(u16::from_le_bytes([p[6], p[7]]), 43, "second owner");
+    assert_eq!(p[10], 0, "second owner holds nothing");
+}
+
+#[test]
 fn bootloader_gate_needs_120ms_and_a_quiet_bus() {
     let mut gate = BootloaderGate::default();
     let at = u32::MAX - 60;

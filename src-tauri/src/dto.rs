@@ -82,19 +82,48 @@ impl StatusDto {
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum UiEvent {
-    Devices { devices: Vec<DeviceDto> },
-    Connected { device: DeviceDto, hello: Hello },
+    Devices {
+        devices: Vec<DeviceDto>,
+    },
+    Connected {
+        device: DeviceDto,
+        hello: Hello,
+    },
     Disconnected,
-    Status { status: StatusDto },
-    Ext { ext: input_protocol::v3::StatusExt },
-    Log { line: String },
-    Error { message: String },
-    Progress { stage: usize, message: String },
-    BootChoices { candidates: Vec<String> },
-    Round { round: Round },
-    Report { report: Report },
-    Upload { outcome: UploadOutcome },
-    Cleanup { confirmed: bool },
+    Status {
+        status: StatusDto,
+    },
+    Ext {
+        ext: input_protocol::v3::StatusExt,
+    },
+    Sessions {
+        sessions: Vec<input_protocol::v3::SessionInfo>,
+    },
+    Log {
+        line: String,
+    },
+    Error {
+        message: String,
+    },
+    Progress {
+        stage: usize,
+        message: String,
+    },
+    BootChoices {
+        candidates: Vec<String>,
+    },
+    Round {
+        round: Round,
+    },
+    Report {
+        report: Report,
+    },
+    Upload {
+        outcome: UploadOutcome,
+    },
+    Cleanup {
+        confirmed: bool,
+    },
     Done,
     Stopped,
 }
@@ -120,6 +149,7 @@ impl From<AppEvent> for UiEvent {
                 status: StatusDto::new(&status),
             },
             AppEvent::Ext(ext) => Self::Ext { ext },
+            AppEvent::Sessions(sessions) => Self::Sessions { sessions },
             AppEvent::Log(line) => Self::Log { line },
             AppEvent::Error(message) => Self::Error { message },
             AppEvent::Progress(stage, message) => Self::Progress { stage, message },
@@ -143,4 +173,6 @@ pub struct AppInfo {
     pub target: String,
     /// Where the firmware sources were found, so the UI can show the real path.
     pub firmware_dir: String,
+    /// Emergency release hotkey registered (Ctrl+Alt+Shift+Esc).
+    pub hotkey: bool,
 }

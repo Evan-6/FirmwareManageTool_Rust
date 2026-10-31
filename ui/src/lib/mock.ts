@@ -9,6 +9,7 @@ import type {
   MouseAction,
   Round,
   Settings,
+  SessionInfo,
   Status,
   StatusExt,
   UiEvent,
@@ -91,6 +92,13 @@ setInterval(() => {
   completed = submitted;
   emit({ kind: "status", status: status() });
   if (tick % 7 === 0) emit({ kind: "ext", ext: ext() });
+  if (tick % 7 === 0) {
+    const sessions: SessionInfo[] = [
+      { id: 0x2a, leaseMs: 1600 + (tick % 300), held: 0, flags: 0 },
+      { id: 0x9f31, leaseMs: 900 + (tick % 200), held: 2, flags: 1 },
+    ];
+    emit({ kind: "sessions", sessions });
+  }
 }, 150);
 
 export async function mockCall(name: string, args: Record<string, unknown>): Promise<unknown> {
@@ -102,6 +110,7 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
         commit: "mock",
         target: "thumbv6m-none-eabi",
         firmwareDir: "D:/WorkSpace/FirmwareManageTool_Rust/firmware",
+        hotkey: true,
       } satisfies AppInfo;
     case "scan":
       return devices;

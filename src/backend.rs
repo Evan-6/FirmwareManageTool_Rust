@@ -38,6 +38,8 @@ pub enum AppEvent {
     Status(Status),
     /// STATUS_EXT block; absent on firmware older than 3.1.0+build-hash.
     Ext(input_protocol::v3::StatusExt),
+    /// SESSION_LIST: one entry per connected owner.
+    Sessions(Vec<input_protocol::v3::SessionInfo>),
     Log(String),
     Error(String),
     Progress(usize, String),
@@ -266,6 +268,11 @@ fn worker(
                             held = status.buttons() != 0;
                             let _ = events.send(AppEvent::Status(status));
                         }
+                        AppCommand::Reset if session.is_none() => {
+                            // The emergency-release hotkey can fire with no session;
+                            // nothing is held, so this is not an error.
+                            let _ = events.send(AppEvent::Log("沒有連線，無需放開".into()));
+                        }
                         AppCommand::Reset => {
                             require(&mut session)?.reset(&Cancellation::default())?;
                             held = false;
@@ -380,6 +387,9 @@ fn worker(
                             ext_polled = Instant::now();
                             if let Ok(ext) = active.status_ext(&Cancellation::default()) {
                                 let _ = events.send(AppEvent::Ext(ext));
+                            }
+                            if let Ok(sessions) = active.sessions(&Cancellation::default()) {
+                                let _ = events.send(AppEvent::Sessions(sessions));
                             }
                         }
                     }

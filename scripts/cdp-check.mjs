@@ -51,7 +51,82 @@ async function evaluate(expression) {
 const script = process.argv[2];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-if (script === "hardware") {
+if (script === "hotkey") {
+  // Connect, fire Ctrl+Alt+Shift+Esc through the OS, then read the log the
+  // handler emitted. This is the only way to prove a global hotkey works.
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('重新掃描')).click()`);
+  await sleep(1200);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '連線').click()`);
+  await sleep(2500);
+
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("powershell", [
+    "-NoProfile",
+    "-Command",
+    "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^%+{ESC}')",
+  ]);
+  await sleep(1500);
+
+  await evaluate(`document.querySelectorAll('nav .nav')[2].click()`);
+  await sleep(600);
+  const logs = await evaluate(`document.querySelector('.console')?.textContent ?? ''`);
+  const hits = String(logs)
+    .split(String.fromCharCode(10))
+    .filter((line) => line.includes("熱鍵") || line.includes("放開"));
+  console.log("hotkey log lines:", JSON.stringify(hits));
+
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '中斷')?.click()`);
+  await sleep(1000);
+} else if (script === "features") {
+  // Sessions table + CSV export + hotkey registration, all through the real IPC.
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('重新掃描')).click()`);
+  await sleep(1200);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '連線').click()`);
+  await sleep(3000);
+
+  await evaluate(`document.querySelectorAll('nav .nav')[1].click()`);
+  await sleep(2000);
+  const sessions = await evaluate(`(() => {
+    const rows = Array.from(document.querySelectorAll('.panel'))
+      .find(p => p.textContent.includes('SESSION_LIST'))
+      ?.querySelectorAll('tbody tr');
+    return rows ? Array.from(rows).map(r => Array.from(r.children).map(c => c.textContent)) : [];
+  })()`);
+  console.log("sessions:", JSON.stringify(sessions));
+
+  const csv = await evaluate(`(async () => {
+    const report = {
+      config: { rounds: 1, mode: "Normal" },
+      device: { path: "test", product: "HP Keyboard", serial: "TEST", vid: 1008, pid: 36 },
+      unix_ms: Date.now(),
+      rounds: [{ round: 1, latency_ms: 1.5, outcome: "Success", error: "" }],
+      cancelled: false,
+      cleanup_confirmed: true,
+      terminal_error: null,
+    };
+    return await window.__TAURI_INTERNALS__.invoke("export_report_csv", { report });
+  })()`);
+  console.log("csv:", csv);
+
+  const info = await evaluate(`window.__TAURI_INTERNALS__.invoke("app_info")`);
+  console.log("hotkey registered:", info.hotkey);
+
+  await evaluate(`document.querySelectorAll('nav .nav')[2].click()`);
+  await sleep(600);
+  const logs = await evaluate(`document.querySelector('.console')?.textContent ?? ''`);
+
+
+  await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
+  await sleep(300);
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '中斷')?.click()`);
+  await sleep(1000);
+} else if (script === "hardware") {
   // Real end-to-end against the board: scan, connect, then read the live page.
   await evaluate(`document.querySelectorAll('nav .nav')[0].click()`);
   await sleep(300);

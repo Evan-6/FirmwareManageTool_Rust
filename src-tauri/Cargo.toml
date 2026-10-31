@@ -17,6 +17,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [features]
 # `custom-protocol` makes the release binary load the bundled frontend instead of
 # the dev server. Without it, closing the dev server leaves a blank window.

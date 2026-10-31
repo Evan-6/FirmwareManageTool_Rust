@@ -70,6 +70,16 @@ impl InputState {
         true
     }
 
+    /// Number of pressed keys (modifiers included), consumer and mouse excluded.
+    /// Used by SESSION_LIST so the host can see who is holding what.
+    pub fn count_keys(&self) -> u8 {
+        let mut count = self.modifiers.count_ones() as u8;
+        for byte in self.keys {
+            count = count.saturating_add(byte.count_ones() as u8);
+        }
+        count
+    }
+
     pub fn held(&self) -> bool {
         self.modifiers != 0
             || self.consumer != 0
