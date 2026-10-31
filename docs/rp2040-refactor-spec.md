@@ -1,11 +1,16 @@
 # RP2040 韌體重構規格
 
+> **2026-10-31：歷史規劃文件。** 這裡描述的 C++ sketch（`firmware/boards/`）、`firmware/common/`
+> 與 Leonardo／AVR 分支都已在 `rp2040-xiao-only` 刪除。現行韌體是 `firmware/app`（embassy USB）＋
+> `firmware/engine`，規格以 [firmware/protocol-v3.md](../firmware/protocol-v3.md) 與
+> [firmware/app/README.md](../firmware/app/README.md) 為準；本文只作為重構過程紀錄。
+
 日期：2026-10-07。狀態：結構重構已實作並通過本機測試／板型建置；Windows／USB 實機驗收待完成。
 
 本次只整理 RP2040 韌體結構，涵蓋同一份 sketch 的 Raspberry Pi Pico、Seeed XIAO RP2040 與既有相容板設定。
 基準為 commit `8893eb5`：Vendor HID v3、韌體 3.1.0，以及管理工具的 RealTime 量測修正。
 分支 `rp2040-xiao-only` 已移除 AVR／Pico 目標，本文的 Leonardo 段落與 `firmware/common/` 安排屬歷史規格。
-本文件記錄第一階段 RP2040 重構（`d9d8ef7`）的已確認要求；後續使用者要求兩板共用實作，由 [shared-firmware-refactor-spec.md](shared-firmware-refactor-spec.md) 記錄，取代本文的 AVR 過渡安排。第一階段實作與本機驗證結果見 [validation.md](validation.md#rp2040-結構重構)。
+本文件記錄第一階段 RP2040 重構（`d9d8ef7`）的已確認要求；後續使用者要求兩板共用實作，由第一階段之後的共用實作紀錄（已併入 [rp2040-xiao-only-analysis.md](rp2040-xiao-only-analysis.md)），取代本文的 AVR 過渡安排。第一階段實作與本機驗證結果見 [validation.md](validation.md#rp2040-結構重構)。
 
 ## 1. 問題與目標
 

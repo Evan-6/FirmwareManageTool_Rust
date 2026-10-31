@@ -105,20 +105,15 @@ cargo test --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 python3 scripts/sync-input-protocol.py --check
-bash scripts/test-rp2040.sh
 cargo build -p firmware-engine --release --target thumbv6m-none-eabi
+cargo test --manifest-path firmware/app/Cargo.toml
 ```
 
-Linux 可驗證純邏輯及 GUI 版面；實體 HID、量測與 bootloader 功能限定 Windows。
-Linux 開發執行原始碼檢查、測試及 XIAO 韌體編譯，不產生 Windows EXE 或 ZIP。
-Linux GUI 字型使用系統 Noto CJK；Windows 使用系統 Microsoft JhengHei。
+Linux 可驗證純邏輯（library、協議、引擎與韌體測試）及 XIAO 韌體編譯；GUI 是 Tauri 2 + WebView2，
+實體 HID、量測、燒錄與打包限定 Windows，Linux 不產生 EXE 或 ZIP。
 
 架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。
 本分支的冗餘盤點與原生 Rust 遷移評估見 [docs/rp2040-xiao-only-analysis.md](docs/rp2040-xiao-only-analysis.md)。
-
-Linux 離線介面預覽（尚未連接硬體）：
-
-![GUI 預覽](docs/screenshots/firmware-linux.png)
 
 驗證紀錄與實機驗收清單見 [docs/validation.md](docs/validation.md)。
 線路協定見 [firmware/PROTOCOL.md](firmware/PROTOCOL.md)。
