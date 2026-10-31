@@ -5,7 +5,7 @@
 ## 能力與 framing
 
 - OUT id 12、IN id 13、Feature id 14。所有 report 含 id 為 64 bytes。Feature 14 的 `Get_Report` 必須回 64 bytes，`buf[0]` 是 report id（只回 63-byte payload 會被 Windows 判為短報告）。
-- Feature 14 只讀、不取得 ownership。63-byte payload：`FMT3[4]`、protocol u8、board u8（本專案 XIAO 為 2）、fw major/minor/patch 三個 u8、lease u16、reserved u16（新韌體寫零；主機忽略，以維持既有 v3 欄位位置）、poll_ms u8、capabilities u32、keyboard bitmap[28]、modifiers mask u8、consumer mask u8、device id[8]（RP2040 unique ID）、reserved[7]。capabilities 位元 0=NKRO、1=Consumer、2=relative mouse、3=absolute mouse（3.0.2 起固定為零）、4=concurrent v3 sessions（3.0.3 起）；目前 flags=23。
+- Feature 14 只讀、不取得 ownership。63-byte payload：`FMT3[4]`、protocol u8、board u8（本專案 XIAO 為 2）、fw major/minor/patch 三個 u8、lease u16、reserved u16（新韌體寫零；主機忽略，以維持既有 v3 欄位位置）、poll_ms u8、capabilities u32、keyboard bitmap[28]、modifiers mask u8、consumer mask u8、device id[8]（RP2040 unique ID）、build u32（`firmware/app/build.rs` 取 commit 前四 bytes，和 STATUS_EXT 相同）、reserved[3]（寫零）。capabilities 位元 0=NKRO、1=Consumer、2=relative mouse、3=absolute mouse（3.0.2 起固定為零）、4=concurrent v3 sessions（3.0.3 起）；目前 flags=23。
 - OUT/IN 的 63-byte payload 標頭為 `version:u8, opcode:u8, length:u8, flags:u8, session:u32, sequence:u32`。資料最多 51 bytes。整數 little-endian，flags 與未使用尾端 byte 必須為零，不另加 CRC（USB 提供傳輸校驗）。
 - `KeyId` 為 page u16 + usage u16；僅接受按鍵表中定義的 usage。
 - 31-byte input snapshot：modifiers u8 + keyboard bitmap[28] + consumer u8 + buttons u8。bitmap bit `u` 代表 Keyboard usage `u`，E0–E7 放在 modifiers bit 0–7。未支援／保留 bit 必須為零。
@@ -26,6 +26,7 @@
 | 09 | PING | 最多 8 bytes | 89（原樣回音） |
 | 0A | SETTINGS_GET | 空 | 8A（8-byte 設定） |
 | 0B | SETTINGS_SET | brightness u8、flags u8、2 bytes 保留 | 8B（result） |
+| 0F | SESSION_LIST | 空 | 8F（8 × 6 bytes，見下） |
 | 10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
 | 11 | SNAPSHOT | 31-byte input snapshot | 無 |
 | 20 | MOUSE_MOVE | dx/dy i16，各 ±1024 | 無 |
@@ -46,6 +47,20 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 設定存在**最後一個 flash sector**（`0x101FF000`，4 KiB），image 永遠不會用到那裡，所以重新燒錄韌體不會清掉它
 （實測：亮度改成 8 → 重新燒錄 → 讀回仍是 8）。記錄格式：`FSET` magic、版本、brightness、flags、FNV-1a 檢查碼；
 讀到壞資料就回預設值（亮度 64）。這兩個命令由平台層回答，引擎只負責驗證 session／sequence 與續租。
+
+`SETTINGS_GET` 回 8-byte payload：
+
+| 位移 | 型別 | 內容 |
+| --- | --- | --- |
+| 0 | u8 | result（0 正常） |
+| 1 | u8 | 亮度 0–64 |
+| 2 | u8 | flags（目前保留，寫 0） |
+| 3..5 | u16 | 保留 |
+| 5..7 | u16 | 開機次數 |
+| 7 | u8 | 保留 |
+
+`SETTINGS_SET` 請求只取 `brightness`（第 12 byte，超過 64 會被夾住）與 `flags`（第 13 byte），
+回覆 1 byte 結果：0 成功、1 寫入失敗、2 值沒有變（不重寫 flash）。
 
 `12..=14` 保留給「在應用內更新韌體」，目前沒有實作：RP2040 要就地覆寫正在執行的 flash，
 必須讓整段 erase／program 迴圈都跑在 RAM，寫錯就只能按 BOOTSEL 救回。現行的 Build → BOOTSEL → 複製 UF2
@@ -75,6 +90,20 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 
 主機 suspend／USB reset 都會讓裝置走同一條故障路徑（碼 7）：所有 session 失效、按住的鍵放開。這是刻意的——筆電闔蓋時按著 W，醒來不該繼續走。watchdog（2 秒）則處理主迴圈卡死。
 
+## 連線擁有者（SESSION_LIST 0F）
+
+回覆固定 48 bytes：八個 slot 各 6 bytes，空 slot 全零，順序固定（slot 0–7），所以主機不必解析可變長度清單。
+
+| 位移 | 型別 | 內容 |
+| --- | --- | --- |
+| 0..2 | u16 | session id 的低 16 bit（主機用來認出自己與其他程式） |
+| 2..4 | u16 | 剩餘租約 ms |
+| 4 | u8 | 該 session 目前按住的鍵數 |
+| 5 | u8 | flags：bit0 有尚未送出的命令、bit1 已 RELEASE_ALL、bit2 有 BOOTSEL 請求 |
+
+`STATUS_EXT` 只說「有幾個 session」，答不出「誰按著 W」或「誰正在要求進 bootloader」；要除錯多程式同時連線就看這份清單。
+這命令和其他查詢一樣會續租，但不會改變任何 session 的狀態。
+
 ## 完成與租約
 
 - 只有一個相對滑鼠 HID top-level collection，report id 3 同時輸出位移、五鍵與雙軸滾輪。沒有絕對 HID report id 4、座標快取或絕對輸出。目標位置／路徑在主機端計算並換算相對位移，韌體不處理螢幕座標。
@@ -84,7 +113,7 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 - 同來源最後一筆排程可承載 BARRIER 完成序號，避免單次 down/up/barrier 額外佔用佇列；完成仍等待所有先前 USB 輸出。
 - v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。租約是「程式崩潰或直接拔線」的保險：正常結束必須送 CLOSE，否則 owner 要等 2 秒才釋放，而且會計入 failsafe。
 - 同時的 v3 session 各自持有 31-byte 狀態，USB 鍵盤／Consumer／按鈕輸出為位元聯集。相同按鍵須所有持有者都放開才放開；snapshot 只替換自己的狀態。不同 session 的相對位移與滾輪按接收順序作用於同一支游標，不能互相覆寫。BARRIER 回覆使用該 session 的序號，不能用另一 session 的完成序號代替。
-- 非阻塞排程由 core 0 擁有（`Ticker::every(1 ms)`），LED 狀態機也在同一核心但目前沒有驅動 WS2812。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
+- 非阻塞排程由 core 0 擁有（`Ticker::every(1 ms)`）。NeoPixel 由同一核心以 PIO + DMA 驅動（GPIO12 資料、GPIO11 電源閘），亮度取自 flash 設定（0–64），顏色代表 Idle／Held／Error／Failsafe／Bootloader。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
 
 ## 同步與測試
 
