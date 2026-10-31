@@ -38,6 +38,11 @@ fn main() -> anyhow::Result<()> {
     let enter_bootloader = args.iter().any(|arg| arg == "--bootloader");
     let keys_check = args.iter().any(|arg| arg == "--keys");
     let ext_check = args.iter().any(|arg| arg == "--ext");
+    let brightness = args
+        .windows(2)
+        .find(|pair| pair[0] == "--brightness")
+        .and_then(|pair| pair[1].parse::<u8>().ok());
+    let settings_check = args.iter().any(|arg| arg == "--settings");
     let ping_count = args
         .windows(2)
         .find(|pair| pair[0] == "--ping")
@@ -90,6 +95,31 @@ fn main() -> anyhow::Result<()> {
 
     let first = session.status(&cancel)?;
     println!("status: {}", first.raw);
+
+    if let Some(level) = brightness {
+        session.set_brightness(level, &cancel)?;
+        let saved = session.settings(&cancel)?;
+        println!(
+            "settings: brightness={} flags={} boots={}",
+            saved.brightness, saved.flags, saved.boot_count
+        );
+        anyhow::ensure!(saved.brightness == level.min(64), "亮度沒有寫入");
+        println!("settings ok: {} 已持久化（重開機後應保留）", level.min(64));
+        session.finish(&cancel)?;
+        session.close(&cancel)?;
+        return Ok(());
+    }
+
+    if settings_check {
+        let saved = session.settings(&cancel)?;
+        println!(
+            "settings: brightness={} flags={} boots={}",
+            saved.brightness, saved.flags, saved.boot_count
+        );
+        session.finish(&cancel)?;
+        session.close(&cancel)?;
+        return Ok(());
+    }
 
     if ext_check {
         for _ in 0..2 {

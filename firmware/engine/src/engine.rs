@@ -83,6 +83,19 @@ impl InputEngine {
         self.build = build;
     }
 
+    /// Queues a reply the platform built itself (settings, firmware update).
+    pub fn push_reply(&mut self, report: Report) -> bool {
+        if self.tx_count as usize == TX_DEPTH {
+            self.counters.tx = self.counters.tx.wrapping_add(1);
+            self.overflow = true;
+            return false;
+        }
+        let index = (self.tx_head as usize + self.tx_count as usize) % TX_DEPTH;
+        self.tx[index] = report;
+        self.tx_count += 1;
+        true
+    }
+
     // ---- inbound path -----------------------------------------------------
 
     pub fn handle(&mut self, report: &Report, now: u32) {
@@ -134,6 +147,12 @@ impl InputEngine {
         }
         if op == wire::STATUS_EXT {
             self.status_ext(slot, seq);
+            return;
+        }
+        // Platform-owned commands: the engine only keeps the session bookkeeping
+        // (sequence, lease) correct; the transport answers them from flash.
+        if op == wire::SETTINGS_GET || op == wire::SETTINGS_SET {
+            self.sessions.get_mut(slot).lease_at = self.now;
             return;
         }
         if op == wire::PING {

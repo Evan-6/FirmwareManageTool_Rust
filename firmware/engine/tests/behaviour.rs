@@ -306,6 +306,37 @@ fn status_ext_reports_diagnostics_and_ping_echoes() {
 }
 
 #[test]
+fn platform_commands_keep_the_session_and_never_reply_themselves() {
+    // SETTINGS_* are answered from flash by the platform. The engine must still
+    // validate the sequence and keep the lease alive, but stay silent.
+    let mut h = Harness::new(0);
+    h.open();
+    let lease = h.engine.session(42).unwrap().lease_at;
+    h.now = lease.wrapping_add(1500);
+    h.send(wire::SETTINGS_GET, 2, &[]);
+    h.tick(6);
+    let session = h.engine.session(42).expect("session must survive");
+    assert_eq!(session.received, 2, "sequence advances");
+    assert!(session.lease_at > lease, "lease renewed");
+    assert!(
+        h.replies
+            .iter()
+            .all(|r| r.bytes[1] != (wire::SETTINGS_GET | 128)),
+        "the platform owns the reply"
+    );
+    assert_eq!(h.engine.counters().failsafe, 0);
+
+    // A bad length is still a framing fault, exactly like other commands.
+    h.send(wire::SETTINGS_SET, 3, &[1, 2]);
+    h.tick(6);
+    assert!(
+        h.engine.session(42).is_none(),
+        "malformed payload drops the session"
+    );
+    assert_eq!(h.engine.counters().failsafe, 1);
+}
+
+#[test]
 fn bootloader_gate_needs_120ms_and_a_quiet_bus() {
     let mut gate = BootloaderGate::default();
     let at = u32::MAX - 60;

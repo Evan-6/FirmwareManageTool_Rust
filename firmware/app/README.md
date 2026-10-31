@@ -36,7 +36,7 @@ Measured on the PoC (release, no LED, single core):
 | image | flash | RAM |
 | --- | --- | --- |
 | C++ sketch (arduino-pico 6.2.0, TinyUSB — deleted) | 90,792 B | 29,712 B |
-| Rust `xiao-firmware` | 32,432 B | 30,692 B |
+| Rust `xiao-firmware` | 33,488 B | 30,796 B |
 
 RAM is dominated by the engine (`InputEngine` 12,564 B) and the 32-slot RX queue
 (2,016 B); the flash difference is the Arduino core and TinyUSB that are no

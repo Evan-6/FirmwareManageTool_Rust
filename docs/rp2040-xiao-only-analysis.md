@@ -318,3 +318,18 @@ session，只新增 `CLOSE`：
 - 行為測試 `close_frees_one_owner_without_a_fault_and_keeps_the_peer`：關掉一個 session
   只釋放它按的鍵，另一個 session 的鍵還在，`fs` 不變。
 - `engine_trace.golden` 原封不動通過（CLOSE 不影響既有排程），映像 28,292 B flash / 17,804 B RAM。
+
+## 9. 持久設定（2026-11-01）
+
+LED 亮度原本寫死在程式裡。現在存在最後一個 flash sector（`0x101FF000`），用 `SETTINGS_GET`（0A）／
+`SETTINGS_SET`（0B）讀寫，格式是 `FSET` magic + 版本 + brightness + flags + FNV-1a 檢查碼。
+
+- 只在使用者改設定時才寫，不做每次開機寫入（避免磨損）。
+- 讀到壞資料或空白 sector 就回預設值，不會卡住開機。
+- 這兩個命令由平台層（`UsbTransport::answer_platform`）回答；引擎只驗證 session／sequence 並續租，
+  `Runtime` 只有在引擎真的接受了該序號時才把平台的回覆排進 TX，避免重播封包寫 flash。
+- 實測：`--brightness 8` → 讀回 8 → 整份重燒 → 讀回仍是 8 → 還原 64。映像 33,488 B flash / 30,796 B RAM。
+
+**沒有做 OTA（在應用內更新）**：RP2040 就地覆寫正在執行的 flash，需要整段 erase／program 迴圈都住在 RAM，
+且中斷全關；寫錯就無法用軟體救回，只能按 BOOTSEL。現行 Build → BOOTSEL → 複製 UF2 已經全自動，
+`12..=14` 這個 opcode 區段先保留不用。

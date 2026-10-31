@@ -1,5 +1,5 @@
 use super::*;
-use input_protocol::v3::{Packet, StatusExt};
+use input_protocol::v3::{DeviceSettings, Packet, StatusExt};
 use input_protocol::{KeyId, v3::Command};
 impl<T: HidTransport> Session<T> {
     pub(super) fn v3_pump(&mut self, timeout: i32) -> Result<()> {
@@ -84,6 +84,25 @@ impl<T: HidTransport> Session<T> {
     pub fn status_ext(&mut self, cancel: &Cancellation) -> Result<StatusExt> {
         let reply = self.query(Command::StatusExt, cancel)?;
         StatusExt::parse(&reply.payload)
+    }
+
+    /// Persisted settings as the device has them right now.
+    pub fn settings(&mut self, cancel: &Cancellation) -> Result<DeviceSettings> {
+        let reply = self.query(Command::SettingsGet, cancel)?;
+        DeviceSettings::parse(&reply.payload)
+    }
+
+    /// Persists the brightness (0..=64) so it survives a power cycle.
+    pub fn set_brightness(&mut self, brightness: u8, cancel: &Cancellation) -> Result<()> {
+        let reply = self.query(
+            Command::SettingsSet {
+                brightness: brightness.min(64),
+                flags: 0,
+            },
+            cancel,
+        )?;
+        ensure!(reply.payload.first() == Some(&0), "裝置拒絕儲存設定");
+        Ok(())
     }
 
     /// Round-trip time in microseconds for a 4-byte echo.

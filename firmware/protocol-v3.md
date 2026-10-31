@@ -24,6 +24,8 @@
 | 07 | CLOSE | 空 | 87 |
 | 08 | STATUS_EXT | 空 | 88（24-byte 診斷） |
 | 09 | PING | 最多 8 bytes | 89（原樣回音） |
+| 0A | SETTINGS_GET | 空 | 8A（8-byte 設定） |
+| 0B | SETTINGS_SET | brightness u8、flags u8、2 bytes 保留 | 8B（result） |
 | 10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
 | 11 | SNAPSHOT | 31-byte input snapshot | 無 |
 | 20 | MOUSE_MOVE | dx/dy i16，各 ±1024 | 無 |
@@ -38,6 +40,16 @@ OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包
 STATUS payload：result u8、received u32、completed u32、pending u8、lease_remaining u16、rx/tx/hid/failsafe 各 u16、input snapshot[31]。計數為 u16 wrap。snapshot、received、completed、lease、pending 是查詢 session 自己的狀態；錯誤計數為裝置共用。其他 session 的租約到期或協議錯誤也會增加 failsafe，不能僅依此判定本工作失敗。本 session 故障以匹配自身 ID 的 EVENT／控制 timeout 判定，TX／HID 共用傳輸計數變化仍須檢查。completed 序號才表示該 session 前面的 USB 輸出已完成。
 
 故障事件 opcode=7F，包含 result byte 與故障 session／最近接收序號。非法輸入、序號與租約故障只使對應 session 失效，取消該 session 待送工作並釋放其持有狀態，保留其他 session。USB／共用佇列故障使全部 session 失效，各自產生一個故障事件。TX overflow 另記計數；事件可能因傳輸問題遺失，控制 timeout 也須使主機 session 失效。**CLOSE 不算故障**：它只歸還自己的名額、不發 EVENT、不增加 failsafe。
+
+## 設定（SETTINGS 0A／0B）
+
+設定存在**最後一個 flash sector**（`0x101FF000`，4 KiB），image 永遠不會用到那裡，所以重新燒錄韌體不會清掉它
+（實測：亮度改成 8 → 重新燒錄 → 讀回仍是 8）。記錄格式：`FSET` magic、版本、brightness、flags、FNV-1a 檢查碼；
+讀到壞資料就回預設值（亮度 64）。這兩個命令由平台層回答，引擎只負責驗證 session／sequence 與續租。
+
+`12..=14` 保留給「在應用內更新韌體」，目前沒有實作：RP2040 要就地覆寫正在執行的 flash，
+必須讓整段 erase／program 迴圈都跑在 RAM，寫錯就只能按 BOOTSEL 救回。現行的 Build → BOOTSEL → 複製 UF2
+流程已經全自動，收益不足以承擔這個風險。
 
 ## 診斷（STATUS_EXT 08）
 

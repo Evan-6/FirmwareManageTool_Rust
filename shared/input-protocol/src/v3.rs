@@ -19,6 +19,9 @@ pub const CLOSE: u8 = 7;
 pub const STATUS_EXT: u8 = 8;
 /// Echo up to 8 bytes; the device answers with the same bytes.
 pub const PING: u8 = 9;
+/// Persisted device settings (LED brightness today, room for flags).
+pub const SETTINGS_GET: u8 = 10;
+pub const SETTINGS_SET: u8 = 11;
 pub const STATUS_EXT_BYTES: usize = 24;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
@@ -223,6 +226,8 @@ pub enum Command {
     Close,
     StatusExt,
     Ping(Vec<u8>),
+    SettingsGet,
+    SettingsSet { brightness: u8, flags: u8 },
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
@@ -243,6 +248,10 @@ impl Command {
             Self::Bootloader => (BOOTLOADER, vec![]),
             Self::Close => (CLOSE, vec![]),
             Self::StatusExt => (STATUS_EXT, vec![]),
+            Self::SettingsGet => (SETTINGS_GET, vec![]),
+            Self::SettingsSet { brightness, flags } => {
+                (SETTINGS_SET, vec![*brightness, *flags, 0, 0])
+            }
             Self::Ping(data) => {
                 ensure!(data.len() <= 8, "PING payload 最多 8 bytes");
                 (PING, data.clone())
@@ -288,6 +297,8 @@ impl Command {
                 | Self::Close
                 | Self::StatusExt
                 | Self::Ping(_)
+                | Self::SettingsGet
+                | Self::SettingsSet { .. }
         )
     }
 }
@@ -320,6 +331,26 @@ impl Status {
         })
     }
 }
+/// Echo of the persisted settings block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceSettings {
+    /// 0..=64; scales the NeoPixel brightness.
+    pub brightness: u8,
+    pub flags: u8,
+    pub boot_count: u16,
+}
+impl DeviceSettings {
+    pub fn parse(p: &[u8]) -> Result<Self> {
+        ensure!(p.len() == 8 && p[0] == 0, "無效的設定回應");
+        Ok(Self {
+            brightness: p[1],
+            flags: p[2],
+            boot_count: u16::from_le_bytes([p[5], p[6]]),
+        })
+    }
+}
+
 /// Diagnostics block from STATUS_EXT. Everything here is cheap for the device to
 /// report and expensive for the host to guess.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -374,6 +405,7 @@ pub fn check_response(p: &Packet, session: u32, sequence: u32, opcode: u8) -> Re
     let length_ok = match opcode {
         STATUS => p.payload.len() == 51,
         STATUS_EXT => p.payload.len() == STATUS_EXT_BYTES,
+        SETTINGS_GET => p.payload.len() == 8,
         PING => p.payload.len() <= 8,
         _ => p.payload.len() == 1,
     };
