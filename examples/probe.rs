@@ -5,6 +5,8 @@
 //! cargo run --release --no-default-features --example probe -- --watch 5
 //! cargo run --release --no-default-features --example probe -- --lease
 //! cargo run --release --no-default-features --example probe -- --bootloader
+//! cargo run --release --no-default-features --example probe -- --ext
+//! cargo run --release --no-default-features --example probe -- --ping 20
 //! ```
 //!
 //! It walks the exact path the GUI uses: enumerate the vendor collection, read
@@ -35,6 +37,11 @@ fn main() -> anyhow::Result<()> {
     let lease_check = args.iter().any(|arg| arg == "--lease");
     let enter_bootloader = args.iter().any(|arg| arg == "--bootloader");
     let keys_check = args.iter().any(|arg| arg == "--keys");
+    let ext_check = args.iter().any(|arg| arg == "--ext");
+    let ping_count = args
+        .windows(2)
+        .find(|pair| pair[0] == "--ping")
+        .and_then(|pair| pair[1].parse::<u32>().ok());
 
     let devices = hid::enumerate()?;
     if devices.is_empty() {
@@ -55,7 +62,7 @@ fn main() -> anyhow::Result<()> {
     let mut session = hid::open(device)?;
 
     session.synchronize(&cancel)?;
-    let (board, firmware, lease_ms, poll_ms, flags, consumer, device_id) = {
+    let (board, firmware, lease_ms, poll_ms, flags, consumer, device_id, build) = {
         let caps = session
             .capabilities()
             .ok_or_else(|| anyhow::anyhow!("synchronize 後沒有 capabilities"))?;
@@ -67,10 +74,11 @@ fn main() -> anyhow::Result<()> {
             caps.flags,
             caps.consumer,
             caps.device_id,
+            caps.build,
         )
     };
     println!(
-        "feature14: board={board} firmware={firmware} lease={lease_ms}ms poll={poll_ms}ms flags={flags:#08b} consumer={consumer:#04X} device={device_id:02X?}"
+        "feature14: board={board} firmware={firmware} build={build:08x} lease={lease_ms}ms poll={poll_ms}ms flags={flags:#08b} consumer={consumer:#04X} device={device_id:02X?}"
     );
     anyhow::ensure!(board == 2, "board id 應為 2（XIAO RP2040），實際 {board}");
 
@@ -82,6 +90,52 @@ fn main() -> anyhow::Result<()> {
 
     let first = session.status(&cancel)?;
     println!("status: {}", first.raw);
+
+    if ext_check {
+        for _ in 0..2 {
+            let ext = session.status_ext(&cancel)?;
+            println!(
+                "ext: uptime={}ms late_max={}us out={} rx={} tx={} sessions={} last_fault={} age={:?} reset={} boots={} locks={:#04b} build={:08x}",
+                ext.uptime_ms,
+                ext.late_max_us,
+                ext.out_depth,
+                ext.rx_depth,
+                ext.tx_depth,
+                ext.sessions,
+                ext.last_fault,
+                ext.last_fault_age_ms,
+                ext.reset_reason,
+                ext.boot_count,
+                ext.lock_keys,
+                ext.build
+            );
+            anyhow::ensure!(ext.sessions >= 1, "STATUS_EXT 應顯示至少一個 session");
+            anyhow::ensure!(ext.boot_count >= 1, "boot count 應至少為 1");
+            anyhow::ensure!(
+                ext.build != 0,
+                "build hash 為 0：Feature 14 沒有帶入 commit"
+            );
+            cancel.sleep(Duration::from_millis(20))?;
+        }
+        println!("ext ok: STATUS_EXT 回報 uptime／佇列水位／reset reason／build hash");
+    }
+
+    if let Some(count) = ping_count {
+        let mut best = u32::MAX;
+        let mut total = 0u64;
+        for index in 0..count.max(1) {
+            let token = [index as u8, 0x5a, 0xc3, 0x01];
+            let rtt = session.ping(token, &cancel)?;
+            best = best.min(rtt);
+            total += u64::from(rtt);
+            cancel.sleep(Duration::from_millis(2))?;
+        }
+        let mean = total / u64::from(count.max(1));
+        println!(
+            "ping {}x: min={best}us mean={mean}us（裝置往返，含 USB 排程）",
+            count.max(1)
+        );
+    }
 
     if keys_check {
         // Windows claims the keyboard collection for itself (raw ReadFile returns
@@ -168,8 +222,20 @@ fn main() -> anyhow::Result<()> {
         last.raw
     );
 
+    let ext = session.status_ext(&cancel)?;
+    println!(
+        "ext: uptime={}ms late_max={}us out={} rx={} tx={} sessions={} boots={} build={:08x}",
+        ext.uptime_ms,
+        ext.late_max_us,
+        ext.out_depth,
+        ext.rx_depth,
+        ext.tx_depth,
+        ext.sessions,
+        ext.boot_count,
+        ext.build
+    );
     session.finish(&cancel)?;
     session.close(&cancel)?;
-    println!("ok: Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER → CLOSE 全部通過");
+    println!("ok: Feature 14 → OPEN → STATUS → STATUS_EXT → HEARTBEAT → BARRIER → CLOSE 全部通過");
     Ok(())
 }

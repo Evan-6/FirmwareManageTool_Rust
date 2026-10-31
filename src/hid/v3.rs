@@ -1,4 +1,5 @@
 use super::*;
+use input_protocol::v3::{Packet, StatusExt};
 use input_protocol::{KeyId, v3::Command};
 impl<T: HidTransport> Session<T> {
     pub(super) fn v3_pump(&mut self, timeout: i32) -> Result<()> {
@@ -39,6 +40,16 @@ impl<T: HidTransport> Session<T> {
         Ok(())
     }
     pub(super) fn v3_send(&mut self, command: &Command, cancel: &Cancellation) -> Result<()> {
+        self.v3_exchange(command, cancel).map(|_| ())
+    }
+    /// Same handshake, but hands back the reply packet so typed queries
+    /// (STATUS_EXT, PING) can parse the payload themselves.
+    pub fn query(&mut self, command: Command, cancel: &Cancellation) -> Result<Packet> {
+        cancel.check()?;
+        self.v3_exchange(&command, cancel)?
+            .ok_or_else(|| anyhow::anyhow!("命令沒有回應"))
+    }
+    fn v3_exchange(&mut self, command: &Command, cancel: &Cancellation) -> Result<Option<Packet>> {
         cancel.check()?;
         ensure!(self.valid, "HID session 已失效");
         self.v3_pump(0)?;
@@ -62,12 +73,25 @@ impl<T: HidTransport> Session<T> {
                     return self.fail(anyhow::anyhow!("v3 控制回應逾時"));
                 }
                 self.v3_pump(10)?;
-                if self.binary.as_mut().unwrap().take_reply().is_some() {
-                    break;
+                if let Some(packet) = self.binary.as_mut().unwrap().take_reply() {
+                    return Ok(Some(packet));
                 }
             }
         }
-        Ok(())
+        Ok(None)
+    }
+
+    pub fn status_ext(&mut self, cancel: &Cancellation) -> Result<StatusExt> {
+        let reply = self.query(Command::StatusExt, cancel)?;
+        StatusExt::parse(&reply.payload)
+    }
+
+    /// Round-trip time in microseconds for a 4-byte echo.
+    pub fn ping(&mut self, token: [u8; 4], cancel: &Cancellation) -> Result<u32> {
+        let started = Instant::now();
+        let reply = self.query(Command::Ping(token.to_vec()), cancel)?;
+        ensure!(reply.payload == token, "PING 回音內容不符");
+        Ok(started.elapsed().as_micros().min(u128::from(u32::MAX)) as u32)
     }
     pub fn input(&mut self, command: Command, cancel: &Cancellation) -> Result<()> {
         self.v3_send(&command, cancel)

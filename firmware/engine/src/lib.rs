@@ -22,7 +22,7 @@ pub mod wire;
 mod keys_generated;
 
 pub use boot_gate::BootloaderGate;
-pub use engine::{BOOT_CONFIRMED, Counters, ERROR, FAILSAFE, InputEngine};
+pub use engine::{BOOT_CONFIRMED, Counters, ERROR, FAILSAFE, InputEngine, PlatformInfo};
 pub use led::{LedState, StatusIndicator};
 pub use scheduler::{Completion, InputReport};
 pub use session::{Pending, Session, SessionTable};

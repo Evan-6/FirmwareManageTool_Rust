@@ -13,6 +13,10 @@ pub const RELEASE: u8 = 5;
 pub const BOOTLOADER: u8 = 6;
 /// Explicit teardown: frees the owner slot without counting a failsafe.
 pub const CLOSE: u8 = 7;
+/// Fixed 24-byte diagnostic block (uptime, queue depths, last fault, reset info).
+pub const STATUS_EXT: u8 = 8;
+/// Echo up to 8 bytes so the host can measure a true device round trip.
+pub const PING: u8 = 9;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOVE: u8 = 32;
@@ -34,7 +38,13 @@ pub const REPORT_BYTES: usize = 63;
 pub struct DeviceInfo {
     pub board: u8,
     pub id: [u8; 8],
+    /// First four bytes of the git commit the image was built from, little endian.
+    /// Zero when the build did not record one, so the host can tell "unknown".
+    pub build: u32,
 }
+
+/// Fixed size of the STATUS_EXT payload.
+pub const EXT_BYTES: usize = 24;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,14 +97,15 @@ pub fn write32(p: &mut [u8], v: u32) {
 /// Payload length required by each opcode; `None` means the opcode is unknown.
 fn shape(op: u8, n: u8) -> Option<bool> {
     let expected = match op {
-        OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER | CLOSE => 0,
-        KEY => 5,
-        SNAPSHOT => 31,
-        MOVE | ABSOLUTE | WHEEL => 4,
-        BUTTONS => 1,
+        OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER | CLOSE | STATUS_EXT => n == 0,
+        PING => n <= 8,
+        KEY => n == 5,
+        SNAPSHOT => n == 31,
+        MOVE | ABSOLUTE | WHEEL => n == 4,
+        BUTTONS => n == 1,
         _ => return None,
     };
-    Some(n == expected)
+    Some(expected)
 }
 
 /// Rejects anything the dispatcher must not interpret: wrong version, flags,
@@ -139,5 +150,7 @@ pub fn feature(info: &DeviceInfo) -> [u8; REPORT_BYTES] {
     b[46] = 255;
     b[47] = 127;
     b[48..56].copy_from_slice(&info.id);
+    // Build identity lives in the spare tail so the 63-byte frame is unchanged.
+    write32(&mut b[56..], info.build);
     b
 }

@@ -22,6 +22,8 @@
 | 05 | RELEASE_ALL | 空 | 85 |
 | 06 | BOOTLOADER | 空 | 86 |
 | 07 | CLOSE | 空 | 87 |
+| 08 | STATUS_EXT | 空 | 88（24-byte 診斷） |
+| 09 | PING | 最多 8 bytes | 89（原樣回音） |
 | 10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
 | 11 | SNAPSHOT | 31-byte input snapshot | 無 |
 | 20 | MOUSE_MOVE | dx/dy i16，各 ±1024 | 無 |
@@ -31,11 +33,35 @@
 
 OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包括心跳與查詢。耗盡 u32 前建立新連線，不在同一 session wrap。最多同時八個 session，序號各自計算；GUI、MSCV 與 EvanRemote 會同時連著。未知 session 的輸入丟棄；相同 ID 的 OPEN 或名額已滿回 busy，不覆蓋原連線。重複／缺號使所屬 session 失效，避免重播相對位移或按鍵。主機依 session、sequence、opcode 匹配回應，不能按回覆順序推測成功。結束時送 CLOSE 立刻歸還名額，不要靠租約。
 
-控制回應 opcode=命令|80，回應 payload 首 byte result：0=成功、1=framing、2=busy（同名或名額已滿）、3=invalid input、5=lease、6=HID send failed、7=USB disconnect、8=overflow/stale output、9=duplicate sequence、10=sequence gap。正常控制回應僅一個 result byte；STATUS 為固定 51-byte payload。
+控制回應 opcode=命令|80，回應 payload 首 byte result：0=成功、1=framing、2=busy（同名或名額已滿）、3=invalid input、5=lease、6=HID send failed、7=USB disconnect、8=overflow/stale output、9=duplicate sequence、10=sequence gap。正常控制回應僅一個 result byte；STATUS 為固定 51-byte payload；STATUS_EXT 固定 24 bytes；PING 回音長度等於請求長度且沒有 result byte。
 
 STATUS payload：result u8、received u32、completed u32、pending u8、lease_remaining u16、rx/tx/hid/failsafe 各 u16、input snapshot[31]。計數為 u16 wrap。snapshot、received、completed、lease、pending 是查詢 session 自己的狀態；錯誤計數為裝置共用。其他 session 的租約到期或協議錯誤也會增加 failsafe，不能僅依此判定本工作失敗。本 session 故障以匹配自身 ID 的 EVENT／控制 timeout 判定，TX／HID 共用傳輸計數變化仍須檢查。completed 序號才表示該 session 前面的 USB 輸出已完成。
 
 故障事件 opcode=7F，包含 result byte 與故障 session／最近接收序號。非法輸入、序號與租約故障只使對應 session 失效，取消該 session 待送工作並釋放其持有狀態，保留其他 session。USB／共用佇列故障使全部 session 失效，各自產生一個故障事件。TX overflow 另記計數；事件可能因傳輸問題遺失，控制 timeout 也須使主機 session 失效。**CLOSE 不算故障**：它只歸還自己的名額、不發 EVENT、不增加 failsafe。
+
+## 診斷（STATUS_EXT 08）
+
+24-byte payload，全部 little endian：
+
+| 位移 | 型別 | 內容 |
+| --- | --- | --- |
+| 0 | u8 | result（0 正常） |
+| 1..5 | u32 | 開機至今 uptime ms |
+| 5..7 | u16 | 上次讀取以來最大 1 ms tick 超時（µs），讀後歸零 |
+| 7 | u8 | output 佇列待送工作數 |
+| 8 | u8 | USB OUT 佇列深度 |
+| 9 | u8 | TX 待送回應數 |
+| 10 | u8 | 目前 session 數 |
+| 11 | u8 | 最近故障碼（0 = 開機後沒有故障） |
+| 12..16 | u32 | 最近故障距今 ms（`0xFFFF_FFFF` = 沒有） |
+| 16 | u8 | reset 原因：0 未知、1 軟體／forced、2 watchdog、3 冷開機 |
+| 17..19 | u16 | 開機次數（watchdog scratch 保存，斷電歸零） |
+| 19 | u8 | 鎖定鍵：1 Num、2 Caps、4 Scroll（主機送來的 LED report） |
+| 20..24 | u32 | build：Feature 14 相同的 commit 前四 bytes |
+
+`PING`（09）把請求 payload（最多 8 bytes）原樣回在 `0x89` 裡，主機用來量裝置往返時間（含 USB 排程）。實測 XIAO + Windows 約 1.5–1.8 ms（poll 1 ms）。
+
+主機 suspend／USB reset 都會讓裝置走同一條故障路徑（碼 7）：所有 session 失效、按住的鍵放開。這是刻意的——筆電闔蓋時按著 W，醒來不該繼續走。watchdog（2 秒）則處理主迴圈卡死。
 
 ## 完成與租約
 

@@ -6,6 +6,9 @@
 //! `tests/descriptors.rs`; Feature 14 must answer 64 bytes with the report id in
 //! `buf[0]`, or Windows rejects it as a short report.
 //!
+//! The board also carries a watchdog, a NeoPixel status LED (GPIO12 data,
+//! GPIO11 power) and the diagnostics that feed STATUS_EXT.
+//!
 //! The main loop keeps the stage order the C++ runtime used to have:
 //! `Runtime::step` submits at most one report, and the awaited write reports its
 //! completion on the next pass, so "accepted" is never confused with "sent".
@@ -18,8 +21,13 @@ use core::cell::Cell;
 use embassy_executor::Spawner;
 use embassy_futures::join::join3;
 use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::USB;
+use embassy_rp::dma::InterruptHandler as DmaInterruptHandler;
+use embassy_rp::gpio::{Level, Output};
+use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
+use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
+use embassy_rp::pio_programs::ws2812::{Grb, PioWs2812, PioWs2812Program};
 use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_rp::watchdog::{ResetReason, Watchdog};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -30,12 +38,15 @@ use embassy_usb::class::hid::{
 };
 use embassy_usb::control::OutResponse;
 use embassy_usb::{Builder, Config, Handler};
-use firmware_engine::{InputReport, Report, wire};
+use firmware_engine::{InputReport, PlatformInfo, Report, wire};
+use smart_leds::RGB8;
 use panic_halt as _;
 use xiao_firmware::{Runtime, RxFault, Transport, usb_descriptors};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
+    PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
+    DMA_IRQ_0 => DmaInterruptHandler<DMA_CH0>;
 });
 
 /// Feature 14 `board` byte; must match `src/firmware.rs::BOARD_ID` on the host.
@@ -49,6 +60,38 @@ const POLL_MS: u8 = 1;
 const MAX_POWER_MA: u16 = 100;
 const DEVICE_RELEASE: u16 = 0x0310;
 const RX_DEPTH: usize = 32;
+/// First four bytes of the commit this image was built from (0 when unknown).
+const BUILD_HASH: u32 = parse_build_hash(env!("BUILD_HASH"));
+const fn parse_build_hash(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    if bytes.len() < 8 {
+        return 0;
+    }
+    let mut value = 0u32;
+    let mut index = 0;
+    while index < 8 {
+        let digit = match bytes[index] {
+            b'0'..=b'9' => bytes[index] - b'0',
+            b'a'..=b'f' => bytes[index] - b'a' + 10,
+            b'A'..=b'F' => bytes[index] - b'A' + 10,
+            _ => return 0,
+        };
+        value = (value << 4) | digit as u32;
+        index += 1;
+    }
+    value
+}
+/// One scheduled pass per millisecond; the late-tick high-water mark feeds
+/// STATUS_EXT so the host can see the scheduler slipping.
+const TICK: Duration = Duration::from_millis(1);
+/// Long enough that a slow STATUS_EXT reply is not a reset, short enough that a
+/// hung executor releases held keys within a couple of seconds.
+const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
+/// Written to watchdog scratch on boot so a cold start is distinguishable.
+const BOOT_MAGIC: u32 = 0xB007_10AD;
+/// XIAO RP2040 NeoPixel: data on GPIO12, power gate on GPIO11 (old C++ board
+/// config used the same pins).
+const NEOPIXEL_DATA: usize = 12;
 
 /// RP2040 (Cortex-M0+) has no atomic read-modify-write, so shared flags live in a
 /// critical-section cell instead of `AtomicU16::fetch_add`, which does not exist
@@ -75,6 +118,10 @@ impl Flags {
 static FLAGS: Mutex<CriticalSectionRawMutex, Cell<Flags>> = Mutex::new(Cell::new(Flags::new()));
 static RX: Channel<CriticalSectionRawMutex, Report, RX_DEPTH> = Channel::new();
 static FEATURE: Mutex<CriticalSectionRawMutex, Cell<[u8; 63]>> = Mutex::new(Cell::new([0; 63]));
+/// Keyboard LED output report bits: 1 num lock, 2 caps lock, 4 scroll lock.
+static LOCK_KEYS: Mutex<CriticalSectionRawMutex, Cell<u8>> = Mutex::new(Cell::new(0));
+/// (reset reason, boot count) read from watchdog scratch at startup.
+static BOOT: Mutex<CriticalSectionRawMutex, Cell<(u8, u16)>> = Mutex::new(Cell::new((0, 0)));
 
 fn update_flags(update: impl FnOnce(&mut Flags)) {
     FLAGS.lock(|cell| {
@@ -97,6 +144,18 @@ impl Handler for DeviceHandler {
             flags.reset = true;
         });
     }
+
+    /// Host suspend is a bus loss as far as the engine is concerned: transfers are
+    /// gone and any key we were holding must not stay down while the machine
+    /// sleeps (a sleeping laptop used to wake up with W still pressed).
+    fn suspended(&mut self, suspended: bool) {
+        if suspended {
+            update_flags(|flags| {
+                flags.configured = false;
+                flags.reset = true;
+            });
+        }
+    }
 }
 
 /// Feature 14 (read-only capabilities) and the keyboard LED output report.
@@ -117,8 +176,14 @@ impl RequestHandler for VendorRequests {
         }
     }
 
-    fn set_report(&mut self, _id: ReportId, _data: &[u8]) -> OutResponse {
-        // Lock-key LEDs: accepted and ignored, exactly like the C++ callback.
+    fn set_report(&mut self, id: ReportId, data: &[u8]) -> OutResponse {
+        // Interface 0's LED output report (id 2, one byte): bit0 num lock, bit1
+        // caps lock, bit2 scroll lock. Kept for STATUS_EXT; nothing is driven.
+        if let ReportId::Out(2) = id
+            && let Some(bits) = data.first()
+        {
+            LOCK_KEYS.lock(|cell| cell.set(*bits));
+        }
         OutResponse::Accepted
     }
 }
@@ -284,17 +349,60 @@ async fn vendor_reader<'d>(mut reader: HidReader<'d, Driver<'d, USB>, REPORT_SIZ
     }
 }
 
-async fn engine_loop(transport: UsbTransport<'_>) -> ! {
-    let mut runtime = Runtime::new(transport);
-    let mut ticker = Ticker::every(Duration::from_millis(1));
+/// Colour for one LED state. Bright enough to read across a desk, dim enough that
+/// the current draw stays inside the 100 mA the descriptor asks for.
+fn led_colour(state: u8) -> RGB8 {
+    match state {
+        1 => RGB8 { r: 0, g: 0, b: 12 },      // idle: dim blue
+        2 => RGB8 { r: 0, g: 28, b: 0 },      // keys held: green
+        3 => RGB8 { r: 32, g: 0, b: 0 },      // fault: red
+        4 => RGB8 { r: 32, g: 18, b: 0 },     // failsafe: amber
+        5 => RGB8 { r: 10, g: 0, b: 28 },     // bootloader: violet
+        _ => RGB8 { r: 0, g: 0, b: 0 },
+    }
+}
+
+fn boot_info() -> (u8, u16) {
+    BOOT.lock(|cell| cell.get())
+}
+
+async fn engine_loop(
+    mut runtime: Runtime<UsbTransport<'_>>,
+    mut watchdog: Watchdog,
+    mut led: PioWs2812<'_, PIO0, 0, 1, Grb>,
+) -> ! {
+    runtime.set_build(BUILD_HASH);
+    let mut ticker = Ticker::every(TICK);
+    let mut deadline = Instant::now();
+    let mut shown = u8::MAX;
     loop {
-        let now = Instant::now().as_millis() as u32;
-        runtime.step(now);
+        let now = Instant::now();
+        let late = now.checked_duration_since(deadline).unwrap_or_default();
+        runtime.note_late_tick(late.as_micros().min(u64::from(u16::MAX)) as u16);
+        let (reset_reason, boot_count) = boot_info();
+        runtime.set_platform(PlatformInfo {
+            rx_depth: RX.len() as u8,
+            reset_reason,
+            boot_count,
+            lock_keys: LOCK_KEYS.lock(|cell| cell.get()),
+        });
+
+        let now_ms = now.as_millis() as u32;
+        runtime.step(now_ms);
         runtime.transport_mut().flush_input().await;
         runtime.transport_mut().flush_vendor().await;
         if runtime.take_boot_request() {
             embassy_rp::rom_data::reset_to_usb_boot(0, 0);
         }
+
+        let state = runtime.led_state() as u8;
+        if state != shown {
+            shown = state;
+            led.write(&[led_colour(state)]).await;
+        }
+
+        watchdog.feed(WATCHDOG_TIMEOUT);
+        deadline += TICK;
         ticker.next().await;
     }
 }
@@ -302,6 +410,49 @@ async fn engine_loop(transport: UsbTransport<'_>) -> ! {
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+
+    // Watchdog first: if anything below hangs, the board restarts instead of
+    // holding keys down forever. Scratch keeps the boot count across resets.
+    let mut watchdog = Watchdog::new(p.WATCHDOG);
+    let (reset_reason, boot_count) = {
+        let magic = watchdog.get_scratch(0);
+        let previous = if magic == BOOT_MAGIC {
+            watchdog.get_scratch(1) as u16
+        } else {
+            0
+        };
+        // Only trust the watchdog reason when our own scratch marker is present:
+        // the ROM bootloader leaves the timer bit set, which used to make the
+        // first boot after a reflash look like a watchdog reset.
+        let reason = if magic != BOOT_MAGIC {
+            3
+        } else {
+            match watchdog.reset_reason() {
+                Some(ResetReason::TimedOut) => 2,
+                Some(ResetReason::Forced) | None => 1,
+            }
+        };
+        let count = previous.wrapping_add(1);
+        watchdog.set_scratch(0, BOOT_MAGIC);
+        watchdog.set_scratch(1, u32::from(count));
+        (reason, count)
+    };
+    BOOT.lock(|cell| cell.set((reset_reason, boot_count)));
+    watchdog.start(WATCHDOG_TIMEOUT);
+
+    // NeoPixel: GPIO11 gates power for the LED on the XIAO, GPIO12 is the data
+    // line. The power pin must stay high for the whole run.
+    let _neopixel_power = Output::new(p.PIN_11, Level::High);
+    let Pio { mut common, sm0, .. } = Pio::new(p.PIO0, Irqs);
+    let neopixel_program = PioWs2812Program::new(&mut common);
+    let neopixel = PioWs2812::<_, 0, 1, Grb>::new(
+        &mut common,
+        sm0,
+        p.DMA_CH0,
+        Irqs,
+        p.PIN_12,
+        &neopixel_program,
+    );
 
     // Flash unique id (same source as pico_get_unique_board_id), printed as 16
     // upper-case hex characters so the host can tell boards apart.
@@ -317,6 +468,7 @@ async fn main(_spawner: Spawner) {
         cell.set(wire::feature(&wire::DeviceInfo {
             board: BOARD_ID,
             id,
+            build: BUILD_HASH,
         }))
     });
 
@@ -400,7 +552,7 @@ async fn main(_spawner: Spawner) {
     join3(
         usb.run(),
         vendor_reader(vendor_reader_half),
-        engine_loop(transport),
+        engine_loop(Runtime::new(transport), watchdog, neopixel),
     )
     .await;
 }

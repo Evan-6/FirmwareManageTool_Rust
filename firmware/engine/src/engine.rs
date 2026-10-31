@@ -16,6 +16,18 @@ pub const FAILSAFE: u8 = 2;
 /// Set when the bootloader reply completed on the bus.
 pub const BOOT_CONFIRMED: u8 = 4;
 
+/// Platform facts the engine cannot know by itself. Refreshed once per loop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlatformInfo {
+    /// Bytes sitting in the USB OUT queue, waiting to be decoded.
+    pub rx_depth: u8,
+    /// 0 unknown, 1 software/forced, 2 watchdog, 3 power-on.
+    pub reset_reason: u8,
+    pub boot_count: u16,
+    /// HID output report bits: 1 caps lock, 2 num lock, 4 scroll lock.
+    pub lock_keys: u8,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
     pub rx: u16,
@@ -42,11 +54,33 @@ pub struct InputEngine {
     boot_inflight: bool,
     boot_completed: bool,
     boot_confirmed: bool,
+    platform: PlatformInfo,
+    build: u32,
+    last_fault: u8,
+    last_fault_at: u32,
+    late_max_us: u16,
 }
 
 impl InputEngine {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            last_fault_at: u32::MAX,
+            ..Self::default()
+        }
+    }
+
+    /// Platform facts for STATUS_EXT. Cheap: a few bytes copied once per loop.
+    pub fn set_platform(&mut self, info: PlatformInfo) {
+        self.platform = info;
+    }
+
+    /// Largest ticker overshoot since the last STATUS_EXT read, in microseconds.
+    pub fn note_late_tick(&mut self, late_us: u16) {
+        self.late_max_us = self.late_max_us.max(late_us);
+    }
+
+    pub fn set_build(&mut self, build: u32) {
+        self.build = build;
     }
 
     // ---- inbound path -----------------------------------------------------
@@ -96,6 +130,16 @@ impl InputEngine {
         }
         if op == wire::CLOSE {
             self.close(slot);
+            return;
+        }
+        if op == wire::STATUS_EXT {
+            self.status_ext(slot, seq);
+            return;
+        }
+        if op == wire::PING {
+            // Only the declared length is echoed; the rest of the frame is padding.
+            let length = usize::from(p[2]).min(8);
+            self.ping(slot, seq, &data[..length]);
             return;
         }
         if self.boot_requested {
@@ -490,7 +534,13 @@ impl InputEngine {
         self.boot_generation = self.boot_generation.wrapping_add(1);
     }
 
+    fn note_fault(&mut self, code: u8) {
+        self.last_fault = code;
+        self.last_fault_at = self.now;
+    }
+
     fn session_fault(&mut self, slot: usize, code: u8) {
+        self.note_fault(code);
         let snapshot = *self.sessions.get(slot);
         let id = snapshot.id;
         let seq = snapshot.received;
@@ -510,6 +560,7 @@ impl InputEngine {
 
     /// Shared-queue or USB fault: every session is released and told why.
     fn fault(&mut self, code: u8) {
+        self.note_fault(code);
         self.clear_boot();
         self.rx_generation = self.rx_generation.wrapping_add(1);
         self.overflow = false;
@@ -537,6 +588,39 @@ impl InputEngine {
         } else {
             (LEASE_MS - elapsed) as u16
         }
+    }
+
+    /// Diagnostics block. Deliberately separate from STATUS so the 51-byte
+    /// payload that every host parses stays frozen.
+    fn status_ext(&mut self, slot: usize, seq: u32) {
+        let session = self.sessions.get(slot);
+        let id = session.id;
+        let mut b = [0u8; wire::EXT_BYTES];
+        b[1..5].copy_from_slice(&self.now.to_le_bytes());
+        b[5..7].copy_from_slice(&self.late_max_us.to_le_bytes());
+        b[7] = self.output.pending();
+        b[8] = self.platform.rx_depth;
+        b[9] = self.tx_count;
+        b[10] = self.sessions.count();
+        b[11] = self.last_fault;
+        let age = if self.last_fault_at == u32::MAX {
+            u32::MAX
+        } else {
+            self.now.wrapping_sub(self.last_fault_at)
+        };
+        b[12..16].copy_from_slice(&age.to_le_bytes());
+        b[16] = self.platform.reset_reason;
+        b[17..19].copy_from_slice(&self.platform.boot_count.to_le_bytes());
+        b[19] = self.platform.lock_keys;
+        b[20..24].copy_from_slice(&self.build.to_le_bytes());
+        self.late_max_us = 0;
+        self.reply(wire::STATUS_EXT | 128, id, seq, &b);
+    }
+
+    /// Echo back whatever the host sent (up to 8 bytes) for round-trip timing.
+    fn ping(&mut self, slot: usize, seq: u32, data: &[u8]) {
+        let id = self.sessions.get(slot).id;
+        self.reply(wire::PING | 128, id, seq, &data[..data.len().min(8)]);
     }
 
     fn status(&mut self, slot: usize, seq: u32) {

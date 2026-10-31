@@ -157,6 +157,23 @@ impl<T: Transport> Runtime<T> {
         &self.engine
     }
 
+    /// Hands the engine the facts only the platform knows (queue depth, reset
+    /// cause, lock LEDs). Called once per loop; a few bytes, no allocation.
+    pub fn set_platform(&mut self, info: firmware_engine::PlatformInfo) {
+        self.engine.set_platform(info);
+    }
+
+    /// Records how late this tick ran, in microseconds; STATUS_EXT reports the
+    /// high-water mark and clears it.
+    /// Build identity for STATUS_EXT; Feature 14 carries the same value.
+    pub fn set_build(&mut self, build: u32) {
+        self.engine.set_build(build);
+    }
+
+    pub fn note_late_tick(&mut self, late_us: u16) {
+        self.engine.note_late_tick(late_us);
+    }
+
     pub fn led_state(&self) -> firmware_engine::LedState {
         self.led.state()
     }

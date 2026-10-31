@@ -14,6 +14,12 @@ pub const RELEASE_ALL: u8 = 5;
 pub const BOOTLOADER: u8 = 6;
 /// Explicit teardown: frees the owner slot without counting a failsafe.
 pub const CLOSE: u8 = 7;
+/// Fixed 24-byte diagnostics block; separate from STATUS so the 51-byte payload
+/// that every existing host parses stays frozen.
+pub const STATUS_EXT: u8 = 8;
+/// Echo up to 8 bytes; the device answers with the same bytes.
+pub const PING: u8 = 9;
+pub const STATUS_EXT_BYTES: usize = 24;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOUSE_MOVE: u8 = 32;
@@ -165,6 +171,8 @@ pub struct Capabilities {
     pub modifiers: u8,
     pub consumer: u8,
     pub device_id: [u8; 8],
+    /// First four bytes of the firmware's git commit, 0 when unknown.
+    pub build: u32,
 }
 impl Capabilities {
     pub fn parse(r: &[u8]) -> Result<Self> {
@@ -172,7 +180,7 @@ impl Capabilities {
             r.len() == 64 && r[0] == 14 && &r[1..5] == b"FMT3" && r[5] == 3,
             "無效的能力查詢回應"
         );
-        ensure!(r[57..].iter().all(|b| *b == 0), "能力回應保留欄位非零");
+        ensure!(r[61..].iter().all(|b| *b == 0), "能力回應保留欄位非零");
         let s = Self {
             board: r[6],
             firmware: format!("{}.{}.{}", r[7], r[8], r[9]),
@@ -183,6 +191,7 @@ impl Capabilities {
             modifiers: r[47],
             consumer: r[48],
             device_id: r[49..57].try_into()?,
+            build: u32::from_le_bytes(r[57..61].try_into()?),
         };
         ensure!(s.lease_ms >= 1000 && s.poll_ms > 0, "無效的租約／輪詢參數");
         Ok(s)
@@ -212,6 +221,8 @@ pub enum Command {
     ReleaseAll,
     Bootloader,
     Close,
+    StatusExt,
+    Ping(Vec<u8>),
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
@@ -231,6 +242,11 @@ impl Command {
             Self::ReleaseAll => (RELEASE_ALL, vec![]),
             Self::Bootloader => (BOOTLOADER, vec![]),
             Self::Close => (CLOSE, vec![]),
+            Self::StatusExt => (STATUS_EXT, vec![]),
+            Self::Ping(data) => {
+                ensure!(data.len() <= 8, "PING payload 最多 8 bytes");
+                (PING, data.clone())
+            }
             Self::Key(k, d) => {
                 ensure!(k.valid(), "不支援的按鍵");
                 let mut p = pair(k.usage_page.to_le_bytes(), k.usage.to_le_bytes());
@@ -270,6 +286,8 @@ impl Command {
                 | Self::ReleaseAll
                 | Self::Bootloader
                 | Self::Close
+                | Self::StatusExt
+                | Self::Ping(_)
         )
     }
 }
@@ -302,15 +320,67 @@ impl Status {
         })
     }
 }
+/// Diagnostics block from STATUS_EXT. Everything here is cheap for the device to
+/// report and expensive for the host to guess.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatusExt {
+    pub uptime_ms: u32,
+    /// Worst 1 ms tick overshoot since the previous read, in microseconds.
+    pub late_max_us: u16,
+    pub out_depth: u8,
+    pub rx_depth: u8,
+    pub tx_depth: u8,
+    pub sessions: u8,
+    /// 0 when nothing has faulted since boot.
+    pub last_fault: u8,
+    /// None when no fault has happened yet.
+    pub last_fault_age_ms: Option<u32>,
+    /// 0 unknown, 1 software/forced, 2 watchdog, 3 power-on.
+    pub reset_reason: u8,
+    pub boot_count: u16,
+    /// 1 num lock, 2 caps lock, 4 scroll lock, as reported by the host.
+    pub lock_keys: u8,
+    pub build: u32,
+}
+impl StatusExt {
+    pub fn parse(p: &[u8]) -> Result<Self> {
+        ensure!(
+            p.len() == STATUS_EXT_BYTES && p[0] == 0,
+            "無效的 STATUS_EXT"
+        );
+        let age = u32::from_le_bytes(p[12..16].try_into()?);
+        Ok(Self {
+            uptime_ms: u32::from_le_bytes(p[1..5].try_into()?),
+            late_max_us: u16::from_le_bytes(p[5..7].try_into()?),
+            out_depth: p[7],
+            rx_depth: p[8],
+            tx_depth: p[9],
+            sessions: p[10],
+            last_fault: p[11],
+            last_fault_age_ms: if age == u32::MAX { None } else { Some(age) },
+            reset_reason: p[16],
+            boot_count: u16::from_le_bytes(p[17..19].try_into()?),
+            lock_keys: p[19],
+            build: u32::from_le_bytes(p[20..24].try_into()?),
+        })
+    }
+}
 pub fn check_response(p: &Packet, session: u32, sequence: u32, opcode: u8) -> Result<()> {
     ensure!(
         p.session == session && p.sequence == sequence && p.opcode == opcode | 0x80,
         "回應 session／sequence／opcode 不相符"
     );
-    ensure!(
-        p.payload.len() == if opcode == STATUS { 51 } else { 1 },
-        "控制回應長度錯誤"
-    );
+    let length_ok = match opcode {
+        STATUS => p.payload.len() == 51,
+        STATUS_EXT => p.payload.len() == STATUS_EXT_BYTES,
+        PING => p.payload.len() <= 8,
+        _ => p.payload.len() == 1,
+    };
+    ensure!(length_ok, "控制回應長度錯誤");
+    if opcode == PING {
+        // PING echoes raw bytes: there is no result byte to inspect.
+        return Ok(());
+    }
     let code = *p.payload.first().ok_or_else(|| anyhow::anyhow!("空回應"))?;
     if code != 0 {
         bail!(

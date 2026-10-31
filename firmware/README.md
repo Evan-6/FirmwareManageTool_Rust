@@ -55,4 +55,4 @@ Feature 14 的 board id 固定為 2，USB 序號取自 flash unique id。
 | 映像 | Flash | RAM |
 | --- | --- | --- |
 | 舊 C++ sketch（arduino-pico 6.2.0 + TinyUSB，已刪除） | 90,792 B | 29,712 B |
-| Rust `firmware/app` | 28,292 B | 17,804 B |
+| Rust `firmware/app` | 32,432 B | 30,692 B |

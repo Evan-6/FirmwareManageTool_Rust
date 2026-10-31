@@ -6,8 +6,8 @@ mod common;
 
 use common::{Harness, command};
 use firmware_engine::{
-    BOOT_CONFIRMED, BootloaderGate, ERROR, FAILSAFE, InputEngine, LedState, StatusIndicator,
-    config, wire,
+    BOOT_CONFIRMED, BootloaderGate, ERROR, FAILSAFE, InputEngine, LedState, PlatformInfo,
+    StatusIndicator, config, wire,
 };
 
 #[test]
@@ -240,6 +240,69 @@ fn close_frees_one_owner_without_a_fault_and_keeps_the_peer() {
     h.tick(12);
     assert!(!h.engine.completed_state().held());
     assert_eq!(h.engine.counters().failsafe, failsafe);
+}
+
+#[test]
+fn status_ext_reports_diagnostics_and_ping_echoes() {
+    let mut h = Harness::new(0);
+    h.open();
+    h.engine.set_platform(PlatformInfo {
+        rx_depth: 3,
+        reset_reason: 2,
+        boot_count: 7,
+        lock_keys: 1,
+    });
+    h.engine.set_build(0xdead_beef);
+    h.engine.note_late_tick(420);
+
+    h.send(wire::STATUS_EXT, 2, &[]);
+    h.tick(6);
+    let reply = h
+        .replies
+        .iter()
+        .rev()
+        .find(|r| r.bytes[1] == (wire::STATUS_EXT | 128))
+        .expect("STATUS_EXT must be answered");
+    let p = &reply.bytes[wire::HEADER..wire::HEADER + wire::EXT_BYTES];
+    assert_eq!(p[0], 0, "result ok");
+    assert_eq!(u16::from_le_bytes([p[5], p[6]]), 420, "late tick max");
+    assert_eq!(p[8], 3, "rx depth comes from the platform");
+    assert_eq!(p[10], 1, "one session");
+    assert_eq!(p[16], 2, "reset reason");
+    assert_eq!(u16::from_le_bytes([p[17], p[18]]), 7, "boot count");
+    assert_eq!(p[19], 1, "caps lock");
+    assert_eq!(
+        u32::from_le_bytes([p[20], p[21], p[22], p[23]]),
+        0xdead_beef,
+        "build hash"
+    );
+
+    // Reading clears the late-tick high-water mark.
+    h.send(wire::STATUS_EXT, 3, &[]);
+    h.tick(6);
+    let reply = h
+        .replies
+        .iter()
+        .rev()
+        .find(|r| r.bytes[1] == (wire::STATUS_EXT | 128))
+        .expect("second STATUS_EXT");
+    assert_eq!(
+        u16::from_le_bytes([reply.bytes[wire::HEADER + 5], reply.bytes[wire::HEADER + 6]]),
+        0,
+        "reading clears the late-tick high-water mark"
+    );
+
+    // PING echoes the bytes so the host can time a real device round trip.
+    h.send(wire::PING, 4, &[1, 2, 3, 4]);
+    h.tick(6);
+    let reply = h
+        .replies
+        .iter()
+        .rev()
+        .find(|r| r.bytes[1] == (wire::PING | 128))
+        .expect("PING must be answered");
+    assert_eq!(&reply.bytes[wire::HEADER..wire::HEADER + 4], &[1, 2, 3, 4]);
+    assert_eq!(h.engine.counters().failsafe, 0);
 }
 
 #[test]
