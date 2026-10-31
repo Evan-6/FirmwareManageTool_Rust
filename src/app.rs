@@ -15,9 +15,81 @@ use std::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Device,
+    Status,
     Firmware,
     Latency,
     Mouse,
+}
+
+/// One STATUS sample. The live panel keeps a short ring of these so it can show
+/// per-second rates and a 30 s strip instead of a single frozen number.
+#[derive(Clone, Copy)]
+struct Sample {
+    at: Instant,
+    received: u32,
+    completed: u32,
+    pending: u8,
+    lease: u16,
+    rx: u16,
+    tx: u16,
+    hid: u16,
+    failsafe: u16,
+    held: usize,
+    buttons: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Counter {
+    Received,
+    Completed,
+    Pending,
+    Lease,
+    Rx,
+    Tx,
+    Hid,
+    Failsafe,
+}
+
+impl Counter {
+    /// Monotonic counters wrap at u16/u32; gauges (lease, pending, held) do not.
+    fn wraps(self) -> Option<u64> {
+        match self {
+            Self::Received | Self::Completed => Some(1 << 32),
+            Self::Rx | Self::Tx | Self::Hid | Self::Failsafe => Some(1 << 16),
+            Self::Pending | Self::Lease => None,
+        }
+    }
+}
+
+impl Sample {
+    fn of(status: &Status, at: Instant) -> Self {
+        Self {
+            at,
+            received: status.count("received") as u32,
+            completed: status.count("completed") as u32,
+            pending: status.count("pending") as u8,
+            lease: status.count("lease") as u16,
+            rx: status.count("rx") as u16,
+            tx: status.count("tx") as u16,
+            hid: status.count("hid") as u16,
+            failsafe: status.count("fs") as u16,
+            held: status.count("p") as usize,
+            buttons: status.buttons(),
+        }
+    }
+
+    fn get(self, counter: Counter) -> u32 {
+        match counter {
+            Counter::Received => self.received,
+            Counter::Completed => self.completed,
+            Counter::Pending => u32::from(self.pending),
+            Counter::Lease => u32::from(self.lease),
+            Counter::Rx => u32::from(self.rx),
+            Counter::Tx => u32::from(self.tx),
+            Counter::Hid => u32::from(self.hid),
+            Counter::Failsafe => u32::from(self.failsafe),
+        }
+    }
 }
 pub struct App {
     backend: Backend,
@@ -27,6 +99,8 @@ pub struct App {
     selected: Option<usize>,
     connected: Option<(Device, Hello)>,
     status: Option<Status>,
+    samples: VecDeque<Sample>,
+    status_at: Option<Instant>,
     logs: VecDeque<String>,
     busy: bool,
     message: String,
@@ -112,6 +186,8 @@ impl App {
             selected: None,
             connected: None,
             status: None,
+            samples: VecDeque::new(),
+            status_at: None,
             logs: VecDeque::new(),
             busy: false,
             message: "選擇裝置後連線，或前往韌體燒錄".into(),
@@ -172,8 +248,17 @@ impl App {
                 AppEvent::Disconnected => {
                     self.connected = None;
                     self.status = None;
+                    self.samples.clear();
+                    self.status_at = None;
                 }
                 AppEvent::Status(status) => {
+                    let at = Instant::now();
+                    self.samples.push_back(Sample::of(&status, at));
+                    // 600 samples at ~5 Hz is two minutes of history.
+                    while self.samples.len() > 600 {
+                        self.samples.pop_front();
+                    }
+                    self.status_at = Some(at);
                     self.status = Some(status);
                 }
                 AppEvent::Log(line) => self.log(line),
@@ -307,6 +392,226 @@ impl App {
             ui.monospace(&status.raw);
         }
     }
+
+    /// Per-second rate over roughly the last second of samples.
+    fn rate(&self, counter: Counter) -> Option<f64> {
+        let latest = *self.samples.back()?;
+        let base = self
+            .samples
+            .iter()
+            .rev()
+            .find(|sample| latest.at.duration_since(sample.at) >= Duration::from_millis(900))?;
+        let seconds = latest.at.duration_since(base.at).as_secs_f64();
+        if seconds <= 0.0 {
+            return None;
+        }
+        Some(Self::delta(counter, latest, *base) / seconds)
+    }
+
+    /// Difference between two samples, honouring the counter's wrap width.
+    fn delta(counter: Counter, newer: Sample, older: Sample) -> f64 {
+        let (a, b) = (u64::from(newer.get(counter)), u64::from(older.get(counter)));
+        let raw = match counter.wraps() {
+            Some(span) if a < b => span - b + a,
+            _ if a < b => 0,
+            _ => a - b,
+        };
+        raw as f64
+    }
+
+    /// Strip values, oldest first: activity per sample for monotonic counters,
+    /// the raw value for gauges.
+    fn series(&self, counter: Counter, len: usize) -> Vec<f32> {
+        let samples: Vec<Sample> = self.samples.iter().rev().take(len).copied().collect();
+        let zero = Sample {
+            at: Instant::now(),
+            received: 0,
+            completed: 0,
+            pending: 0,
+            lease: 0,
+            rx: 0,
+            tx: 0,
+            hid: 0,
+            failsafe: 0,
+            held: 0,
+            buttons: 0,
+        };
+        let mut values = Vec::with_capacity(samples.len());
+        for (index, sample) in samples.iter().enumerate() {
+            let previous = samples.get(index + 1).copied().unwrap_or(zero);
+            let value = match counter.wraps() {
+                Some(_) => Self::delta(counter, *sample, previous) as f32,
+                None => sample.get(counter) as f32,
+            };
+            values.push(value);
+        }
+        values.reverse();
+        values
+    }
+
+    fn status_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("RP2040 即時狀態");
+        let Some(status) = self.status.clone() else {
+            ui.label(
+                "尚未連線。連線後每秒 5 次自動送出 STATUS，這裡會顯示即時計數、租約與 30 秒走勢。",
+            );
+            return;
+        };
+        if let Some((device, hello)) = &self.connected {
+            ui.label(RichText::new(device.label()).strong());
+            let device_id = hello.raw.split("device=").nth(1).unwrap_or("-");
+            ui.label(format!(
+                "板型 2（XIAO RP2040）• 韌體 {} • protocol {} • 租約 {} ms • NKRO {} • 多媒體 {} • 序號 {}",
+                hello.firmware,
+                hello.protocol,
+                hello.lease_ms,
+                if hello.nkro { "有" } else { "無" },
+                if hello.media { "有" } else { "無" },
+                device_id
+            ));
+        } else {
+            ui.label("裝置已離線，以下是最後一次收到的狀態。");
+        }
+
+        let latest = self.samples.back().copied();
+        if let Some(sample) = latest {
+            let first = self.samples.front().copied().unwrap_or(sample);
+            ui.horizontal(|ui| {
+                metric(
+                    ui,
+                    "按住鍵數",
+                    sample.held.to_string(),
+                    &format!("滑鼠 {:02X}", sample.buttons),
+                );
+                metric(
+                    ui,
+                    "租約剩餘",
+                    format!("{} ms", sample.lease),
+                    "心跳每 500 ms",
+                );
+                metric(ui, "待送工作", sample.pending.to_string(), "上限 32");
+                metric(
+                    ui,
+                    "HID 失敗",
+                    sample.hid.to_string(),
+                    &format!("自連線 +{}", Self::delta(Counter::Hid, sample, first)),
+                );
+                metric(
+                    ui,
+                    "failsafe",
+                    sample.failsafe.to_string(),
+                    &format!("自連線 +{}", Self::delta(Counter::Failsafe, sample, first)),
+                );
+            });
+            ui.add_space(4.0);
+            let age = sample.at.elapsed().as_secs_f64();
+            let health = if sample.hid != first.hid || sample.tx != first.tx {
+                RichText::new("傳輸失敗計數增加，請檢查線材／hub").color(Color32::LIGHT_RED)
+            } else if sample.failsafe != first.failsafe {
+                RichText::new("有其他 session 失效（failsafe 增加）").color(Color32::YELLOW)
+            } else {
+                RichText::new("傳輸計數穩定").color(Color32::from_rgb(0x6c, 0xd4, 0x8f))
+            };
+            ui.horizontal(|ui| {
+                ui.label(health);
+                ui.label(
+                    RichText::new(format!(
+                        "• 最後更新 {:.1} s 前 • 樣本 {} 筆 • 更新頻率 5 Hz",
+                        age,
+                        self.samples.len()
+                    ))
+                    .weak(),
+                );
+            });
+        }
+
+        ui.separator();
+        let rows: Vec<(&str, Counter, Color32)> = vec![
+            (
+                "received",
+                Counter::Received,
+                Color32::from_rgb(0x7f, 0xa8, 0xd8),
+            ),
+            (
+                "completed",
+                Counter::Completed,
+                Color32::from_rgb(0x7f, 0xa8, 0xd8),
+            ),
+            (
+                "pending",
+                Counter::Pending,
+                Color32::from_rgb(0xd8, 0xc0, 0x7f),
+            ),
+            ("rx", Counter::Rx, Color32::from_rgb(0xd8, 0xa0, 0x7f)),
+            ("tx", Counter::Tx, Color32::from_rgb(0xd8, 0xa0, 0x7f)),
+            ("hid", Counter::Hid, Color32::from_rgb(0xd8, 0x7f, 0x7f)),
+            (
+                "failsafe",
+                Counter::Failsafe,
+                Color32::from_rgb(0xd8, 0x7f, 0x7f),
+            ),
+            ("lease", Counter::Lease, Color32::from_rgb(0x7f, 0xd8, 0xc0)),
+        ];
+        let table: Vec<(&str, u32, String, Vec<f32>, Color32)> = rows
+            .into_iter()
+            .map(|(name, counter, color)| {
+                let value = latest.map(|sample| sample.get(counter)).unwrap_or(0);
+                let rate = self
+                    .rate(counter)
+                    .map(|rate| format!("{rate:+.1}/s"))
+                    .unwrap_or_else(|| "-".into());
+                (name, value, rate, self.series(counter, 150), color)
+            })
+            .collect();
+        egui::Grid::new("live-counters")
+            .num_columns(4)
+            .spacing([18.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label(RichText::new("計數器").weak().small());
+                ui.label(RichText::new("目前").weak().small());
+                ui.label(RichText::new("每秒").weak().small());
+                ui.label(
+                    RichText::new("最近 30 秒（單調計數器畫增量、gauge 畫值）")
+                        .weak()
+                        .small(),
+                );
+                ui.end_row();
+                for (name, value, rate, values, color) in &table {
+                    ui.monospace(*name);
+                    ui.monospace(value.to_string());
+                    ui.monospace(rate);
+                    sparkline(ui, values, *color);
+                    ui.end_row();
+                }
+            });
+
+        ui.separator();
+        let keys = status
+            .fields
+            .get("keys")
+            .map(String::as_str)
+            .unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("目前按住：");
+            if keys.is_empty() {
+                ui.label(RichText::new("（無）").weak());
+            } else {
+                for key in keys.split(',') {
+                    ui.label(RichText::new(key).monospace().strong());
+                }
+            }
+            ui.label(format!(
+                "• 滑鼠按鈕 {:02X}",
+                latest.map(|s| s.buttons).unwrap_or(0)
+            ));
+        });
+        ui.add_space(4.0);
+        ui.collapsing("原始 STATUS", |ui| {
+            ui.monospace(&status.raw);
+        });
+    }
+
     fn firmware_page(&mut self, ui: &mut egui::Ui) {
         ui.heading("韌體燒錄");
         ui.label("固定目標：Seeed XIAO RP2040（純 Rust：embassy USB、Vendor HID v3）。");
@@ -584,6 +889,7 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 for (page, label) in [
                     (Page::Device, "裝置"),
+                    (Page::Status, "即時狀態"),
                     (Page::Firmware, "韌體燒錄"),
                     (Page::Latency, "鍵盤延遲"),
                     (Page::Mouse, "滑鼠測試"),
@@ -658,6 +964,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match self.page {
                 Page::Device => self.device_page(ui),
+                Page::Status => self.status_page(ui),
                 Page::Firmware => self.firmware_page(ui),
                 Page::Latency => self.latency_page(ui),
                 Page::Mouse => self.mouse_page(ui),
@@ -690,6 +997,40 @@ impl eframe::App for App {
     }
 }
 
+/// A compact "current value" card for the live panel.
+fn metric(ui: &mut egui::Ui, label: &str, value: String, hint: &str) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_width(112.0);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(label).small().weak());
+            ui.label(RichText::new(value).heading());
+            ui.label(RichText::new(hint).small().weak());
+        });
+    });
+}
+
+/// 30 s strip: filled background, step line, no axes.
+fn sparkline(ui: &mut egui::Ui, values: &[f32], color: Color32) {
+    let (response, painter) = ui.allocate_painter(egui::vec2(180.0, 22.0), egui::Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    if values.len() < 2 {
+        return;
+    }
+    let max = values.iter().copied().fold(0.0_f32, f32::max).max(1.0);
+    let step = rect.width() / (values.len() - 1) as f32;
+    let points: Vec<egui::Pos2> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let x = rect.left() + index as f32 * step;
+            let y = rect.bottom() - 1.0 - (value / max) * (rect.height() - 3.0);
+            egui::pos2(x, y)
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(1.4, color)));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,7 +1055,13 @@ mod tests {
         });
         let stats = app.report.as_ref().unwrap().statistics();
         app.stats = Some(stats);
-        for page in [Page::Device, Page::Firmware, Page::Latency, Page::Mouse] {
+        for page in [
+            Page::Device,
+            Page::Status,
+            Page::Firmware,
+            Page::Latency,
+            Page::Mouse,
+        ] {
             let mut output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -726,6 +1073,7 @@ mod tests {
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| match page {
                         Page::Device => app.device_page(ui),
+                        Page::Status => app.status_page(ui),
                         Page::Firmware => app.firmware_page(ui),
                         Page::Latency => app.latency_page(ui),
                         Page::Mouse => app.mouse_page(ui),
@@ -735,5 +1083,69 @@ mod tests {
             assert!(!output.shapes.is_empty());
             output.textures_delta.clear();
         }
+    }
+
+    /// The live page must render from a populated status, not only from "no
+    /// device": that is where the rate and sparkline maths live.
+    #[test]
+    fn live_status_page_renders_with_samples() {
+        use std::collections::BTreeMap;
+        let context = egui::Context::default();
+        let mut app = App::from_context(&context);
+        let mut fields = BTreeMap::new();
+        for (key, value) in [
+            ("received", "120"),
+            ("completed", "119"),
+            ("pending", "3"),
+            ("lease", "1750"),
+            ("rx", "4"),
+            ("tx", "1"),
+            ("hid", "2"),
+            ("fs", "7"),
+            ("p", "2"),
+            ("mb", "01"),
+            ("keys", "a,shift"),
+        ] {
+            fields.insert(key.to_string(), value.to_string());
+        }
+        app.status = Some(Status {
+            raw: "v3 live".into(),
+            fields: fields.clone(),
+        });
+        let now = Instant::now();
+        for index in 0..40u32 {
+            app.samples.push_back(Sample {
+                at: now - Duration::from_millis(200 * u64::from(40 - index)),
+                received: 100 + index,
+                completed: 99 + index,
+                pending: 3,
+                lease: 1750,
+                rx: 4,
+                tx: 1,
+                hid: 2,
+                failsafe: 7,
+                held: 2,
+                buttons: 1,
+            });
+        }
+        app.status_at = Some(now);
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1080., 780.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| app.status_page(ui));
+            },
+        );
+        assert!(!output.shapes.is_empty());
+        // Rate over one second of samples is ~5/s for `received`.
+        let rate = app.rate(Counter::Received).unwrap();
+        assert!((4.0..6.0).contains(&rate), "rate {rate}");
+        assert_eq!(app.series(Counter::Lease, 40).len(), 40);
+        output.textures_delta.clear();
     }
 }

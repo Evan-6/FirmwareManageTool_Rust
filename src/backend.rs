@@ -11,6 +11,11 @@ use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+/// How often a connected device is asked for STATUS while nothing else happens.
+/// Five samples per second is enough to watch counters move without stealing
+/// bandwidth from the 1 ms input endpoint.
+const STATUS_POLL: Duration = Duration::from_millis(150);
+
 #[derive(Debug)]
 pub enum AppCommand {
     Scan,
@@ -207,6 +212,7 @@ fn worker(
     let mut session: Option<NativeSession> = None;
     let mut held = false;
     let mut heartbeat = Instant::now();
+    let mut polled = Instant::now();
     while !exit.is_cancelled() {
         match commands.recv_timeout(Duration::from_millis(50)) {
             Ok(work) => {
@@ -343,6 +349,14 @@ fn worker(
                                 &Cancellation::default(),
                             )?;
                             heartbeat = Instant::now();
+                        }
+                        // Live telemetry: keep the STATUS panel moving even when
+                        // the user is not pressing anything.
+                        if polled.elapsed() >= STATUS_POLL {
+                            let status = active.status(&Cancellation::default())?;
+                            held = status.buttons() != 0;
+                            polled = Instant::now();
+                            let _ = events.send(AppEvent::Status(status));
                         }
                     }
                     Ok(())
