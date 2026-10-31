@@ -1,124 +1,129 @@
-# FirmwareManageTool Rust
+# FirmwareManageTool — XIAO RP2040 鍵盤／滑鼠管理工具
 
-以 Rust 2024 撰寫的 Windows 11 x64 工具：硬體層與背景工作是一個 Rust 程式庫，
-介面是 **Tauri 2 + React 19 + TypeScript + Vite**（原本的 egui／eframe 介面已移除）。
-目標板只有 Seeed XIAO RP2040，韌體是**純 Rust**（embassy-rp／embassy-usb）。本分支已移除 Leonardo／AVR、Pico、
-其他 arduino-pico 板型，以及整套 Arduino／TinyUSB／C++ 實作——不再需要 arduino-cli、Pico SDK 或 picotool。
-韌體 3.1.0 僅使用 Vendor HID v3 二進位協定，支援實體 HID usage、NKRO、七種多媒體鍵與 8 個 session。管理工具、兩個 MSCV 與 EvanRemote 均使用 v3。
+Windows 桌面程式＋裝置韌體。程式透過 USB 對 Seeed XIAO RP2040 下指令，裝置以真正的
+HID 鍵盤／滑鼠身分送出輸入，延遲約 1.5–1.8 ms（1 ms poll，實測值）。沒有 COM 埠、沒有
+序列埠回退、沒有背景服務。
 
-## 建置
+- **圖形介面**：Tauri 2 + React 19 + TypeScript，單一 exe，不連網路。
+- **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，33.7 KiB flash／30.1 KiB RAM。
+- **同時多程式**：最多八個控制程式（本工具、MSCV、EvanRemote 等）共用同一支裝置，各自獨立 session。
+- **輸入**：NKRO 鍵盤、Consumer 多媒體鍵、五鍵相對滑鼠（含雙軸滾輪）、擬人化移動、文字輸入、組合鍵、巨集。
 
-需求：Rust 2024 工具鏈、Node.js 20 以上、Windows 上的 WebView2（Windows 11 內建）。
+## 需求
 
-```bash
-npm --prefix ui ci                     # 前端相依
-npm --prefix ui run build              # 產生 ui/dist（Tauri 編譯時會嵌入）
-cargo build --release -p firmware-manage-tool-app
-```
+- Windows 10／11 x64（GUI、燒錄、打包都只在 Windows 驗證）。
+- Rust stable（以 1.98.1 驗證）＋ Visual Studio Build Tools 的「Desktop development with C++」與 Windows SDK。
+- Node.js 20+（只有從原始碼建置 GUI 時需要）。
+- 硬體：Seeed XIAO RP2040，USB 身分 `03F0:0024`、Vendor HID usage `FF60:0061`。
 
-`src-tauri` 在編譯時就把 `ui/dist` 包進執行檔，所以**任何碰到 src-tauri 的 cargo 指令之前都要先 build 前端**，
-否則會得到「frontendDist 不存在」。`scripts/preflight.sh` 已經照這個順序排好（前端 → fmt → clippy → 測試 →
-sync check → IPC 契約檢查）。
-
-開發時開兩個終端：
-
-```bash
-npm --prefix ui run dev                                  # Vite，127.0.0.1:5173
-cargo run -p firmware-manage-tool-app --no-default-features   # 連 dev server（HMR）
-```
-
-沒有板子也能看介面：`npm --prefix ui run dev` 後開 `http://127.0.0.1:5173/?mock=1`，
-假後端會實作全部命令並每 150 ms 推一次狀態；`npm --prefix ui run preview -- --host 127.0.0.1` 則用來驗打包後的 dist。
-
-前端與 Rust 的命令清單、事件清單由 `node scripts/check-ipc.mjs` 機械比對（真相來源是
-`generate_handler![...]` 與 `enum UiEvent`），改名沒同步會直接紅燈。
-
-## Windows 使用
-
-解壓可攜式 ZIP，保留 `FirmwareManageTool.exe` 旁的 `firmware` 資料夾，執行 exe。
-執行本身不需要 Rust、Visual Studio 或額外的 HID driver（只有「編譯並燒錄韌體」那一步需要 Rust 工具鏈）。
-正式建置靜態連結 MSVC CRT。
-
-1. 在「裝置」掃描並選取 Vendor HID，再連線。多裝置不自動取第一台。
-2. 「即時狀態」每 150 ms 自動查詢 STATUS：八個計數器各一張卡片（received／completed／pending／lease／
-   rx／tx／hid／failsafe），單調計數器畫每樣本增量、gauge 畫原值，保留最近 90 秒。
-   傳輸計數增加會標紅，只有 failsafe 增加則提示「有程式沒有送出 CLOSE」。
-   「診斷」區每秒讀一次 STATUS_EXT：uptime、tick 最大延遲、三條佇列水位、session 數、
-   最近故障與距今時間、reset 原因、開機次數、Caps/Num/Scroll 與 build hash。
-3. 在「韌體燒錄」直接開始編譯／上傳 XIAO 韌體：管理工具會 `cargo build` 目標
-   `thumbv6m-none-eabi`、打包 UF2，再請裝置進 BOOTSEL 並複製檔案。需要已安裝的 Rust 工具鏈
-   （可選擇略過 `rustup target add`）；也可指定 cargo.exe 的完整路徑。
-4. 正常韌體沒有 COM 埠。無法由 HID 重啟時請按住 BOOTSEL 上電。
-   可指定 UF2 磁碟；多候選由 GUI 選擇。
-5. 「鍵盤延遲」提供一般、高精度及可選的極限模式，並可匯出 CSV。
-   測試 A 鍵，請勿操作實體鍵盤。極限量測使用獨立子程序，GUI 維持一般優先權。
-6. 「滑鼠測試」包含擬人化／原始移動、拖曳、點擊、五鍵與雙軸滾輪。
-   主機計算主顯示器目標／曲線並以相對滑鼠位移輸出，請先將游標放在主顯示器內。
-   新版韌體 只有一個相對滑鼠；畫面上的目標定位不使用絕對 HID。
-
-「全部放開／停止」在工作中會取消操作並清理；正常結束送 CLOSE（立刻歸還名額、不計 failsafe）。
-連線先查詢 Feature 14，再建立獨立 session；舊 v2／serial 設備直接顯示不支援。
-釋放／屏障等待 USB 傳送完成，再由 STATUS 確認。拔線後顯示未知，重連建立自己的空狀態。
-每 500ms 續租，租約 2 秒（只當程式崩潰或直接拔線的保險）。最多八個程式同時連線；
-個別釋放、協議故障與租約到期保留其他程式，USB／共用佇列故障釋放所有 session。
-STATUS 的輸入與待送數只屬於查詢者。
-需重新燒錄 3.1.0；第一次從舊韌體升級使用 BOOTSEL。
-序號取自 RP2040 unique ID。燒錄前關閉其他控制程式並等 2 秒。
-
-設定與 UF2 建置產物儲存在
-`%LOCALAPPDATA%\FirmwareManageTool_Rust`。設定會於開始工作、保存設定及離開時保存。
-首度燒錄需要可用的 Rust 工具鏈與 `thumbv6m-none-eabi` target；缺少時會終止後續流程。
-
-## Windows 開發與發行
-
-以下開發指令在本專案原始碼目錄執行。
-
-安裝 Rust stable（目前以 1.98.1 驗證）、Visual Studio Build Tools 的「Desktop
- development with C++」及 Windows SDK。於 PowerShell 執行：
+## 快速開始
 
 ```powershell
-cargo run --locked --target x86_64-pc-windows-msvc
+# 1. 建置並打包（fmt／clippy／測試 → release exe → ZIP）
 ./scripts/build.ps1
+
+# 2. 直接開發執行（不需要先打包）
+cargo run --release -p firmware-manage-tool-app
 ```
 
-不要加 `--target x86_64-pc-windows-msvc`。在 Windows 上 host 本來就是這個 triple，而 cargo 會把
-build script／proc macro 這類 host-only 產物放在 `target/<profile>`、目標產物放在
-`target/<triple>/<profile>`；明寫 triple 等於把整套依賴編兩次（本專案曾因此累積到 17 GB）。
-維持一種慣例：不加 `--target`，只有 `target/debug` 與 `target/release`。要清掉可重建的樹：
+產物：
+
+| 檔案 | 用途 |
+| --- | --- |
+| `target/release/firmware-manage-tool-app.exe` | 主程式（Tauri 外殼，內嵌 UI） |
+| `dist/FirmwareManageTool_Rust-0.1.0-windows-x64.zip` | 可攜包：exe＋韌體原始碼＋文件＋授權 |
+
+**建置慣例**：host 建置不加 `--target`，只用 `target/debug` 與 `target/release`。
+明寫 host triple 會讓 cargo 把整套依賴編兩份（曾累積到 17 GB）。要回收空間用
+`./scripts/prune.ps1 -Apply`（只刪可重建的樹，不動 `target/release` 與韌體 UF2）。
+
+## 第一次使用
+
+1. 執行 `FirmwareManageTool.exe`（可攜包解壓後直接跑，不需要安裝）。
+2. 「裝置」頁按 **重新掃描** → 選一台 → **連線**。連線後右上角顯示韌體版本與 build hash，
+   若板上的 build 與程式不同會出現黃色提示。
+3. 「韌體」頁按 **建置並燒錄**：程式會 `cargo build` 韌體、打包 UF2、請裝置進 BOOTSEL、
+   複製檔案、重新列舉並驗證板型，全程免手動。
+4. 燒錄後裝置重新列舉，重新按 **重新掃描** → **連線** 即可使用。
+
+## 介面
+
+| 頁面 | 內容 |
+| --- | --- |
+| **裝置** | 掃描／連線／中斷、能力與身分（協定、韌體版本、build、租約、NKRO／多媒體／滑鼠）、目前按住的鍵、session 數、開機次數、reset 原因、全域熱鍵狀態 |
+| **即時狀態** | 150 ms 取樣的 STATUS 指標（received／completed／pending／剩餘租約／rx／tx／hid／failsafe）＋30 秒走勢、健康判定、`STATUS_EXT` 診斷（uptime、tick 遲到、佇列深度、上次故障、reset 原因、開機次數、鎖定鍵）、連線擁有者表格（`SESSION_LIST`：誰按著幾個鍵、剩餘租約、是否要求 BOOTSEL） |
+| **韌體** | 韌體目錄與 `cargo` 路徑、建置進度、BOOTSEL 與複製進度、燒錄後驗證 |
+| **延遲** | 1–10000 輪、模式（一般／高精度／極限 REALTIME）、逐輪結果與統計 |
+| **滑鼠** | 擬人化參數（曲率、抖動、過衝、收尾停頓、最小步距、時間曲線）＋**實際軌跡預覽**、相對移動、點擊／拖曳／滾輪、文字輸入、組合鍵、巨集錄製與重播 |
+
+**除錯模式／遊戲模式**（右上角切換，設定會保存）：
+
+| | 除錯模式 | 遊戲模式 |
+| --- | --- | --- |
+| STATUS 輪詢 | 每 150 ms | 不送 |
+| 診斷／擁有者清單 | 每 1 s | 不送 |
+| HID 每行回覆轉到介面 | 是 | 否 |
+| 心跳（維持租約） | 每 500 ms | 每 500 ms |
+| 鍵盤／滑鼠／輸入 | 照常 | 照常 |
+
+要不要輪詢只在「看數字」時有意義；遊玩或實機操作時切遊戲模式，裝置就不必回覆多餘查詢。
+**同一個 IN 端點同時只能有一個輪詢者**：GUI 在除錯模式下和 `probe --watch` 同時跑，
+兩邊會互偷回覆並讓自己的 session 失效（`failsafe` 增加）。
+
+**全域熱鍵 `Ctrl+Alt+Shift+Esc`**：立即放開所有按鍵與滑鼠鍵（`Reset`）。必須真人按，
+程式注入的按鍵不會觸發已註冊的熱鍵。
+
+## 命令列工具
+
+不需要 GUI 也能驗證裝置：
 
 ```powershell
-./scripts/prune.ps1          # 只列大小，不動檔案
-./scripts/prune.ps1 -Apply   # 刪除 target/debug、firmware/app/target/debug 等
+# 走 GUI 相同的主機路徑：enumerate → Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER
+cargo run --release --example probe
+cargo run --release --example probe -- --ext            # 讀 STATUS_EXT 診斷
+cargo run --release --example probe -- --keys           # 注入 'a'，確認鍵盤報告真的完成
+cargo run --release --example probe -- --lease          # 閒置超過租約，裝置應回收 session
+cargo run --release --example probe -- --ping 20        # 量裝置往返時間
+cargo run --release --example probe -- --settings       # 讀持久設定（亮度、開機次數）
+cargo run --release --example probe -- --brightness 8   # 設定 NeoPixel 亮度（0–64）
+cargo run --release --example probe -- --bootloader     # 請裝置進 BOOTSEL
+cargo run --release --example boot                      # 只用 raw report 進 BOOTSEL（Feature 14 壞掉時的救援）
+
+# 建置韌體＋打包 UF2＋印容量
+bash scripts/build-rust-firmware.sh
 ```
 
-`build.ps1` 執行 fmt、Clippy、測試與 MSVC Release 建置，然後輸出
-`dist/FirmwareManageTool_Rust-0.1.0-windows-x64.zip`。
-ZIP 包含 exe、韌體、文件與第三方授權資料。僅重新打包時使用 `scripts/package.ps1`。
-Windows EXE 與 ZIP 僅在 Windows 原生 MSVC 環境建置及打包；建置／打包腳本會拒絕在 Linux 執行。
-GitHub Actions workflow 已提供，但目前不代表已在遠端執行。
+## 疑難排解
 
-## Linux 開發檢查
+| 現象 | 原因與處理 |
+| --- | --- |
+| 掃不到裝置 | 只認 `03F0:0024`＋usage `FF60:0061`。檢查線材是否只有充電、換 USB 埠、確認韌體已燒錄 |
+| 「裝置忙碌」 | 同名 session 已存在，或八個名額已滿。關掉沒在用控制程式（正常結束會送 `CLOSE` 立刻歸還） |
+| 連線後數字不動 | 你切在遊戲模式。切回除錯模式即恢復輪詢 |
+| `failsafe` 一直增加 | 有程式沒有送 `CLOSE` 就結束（崩潰、強制結束、拔線），owner 要等 2 秒租約；或兩個程式同時輪詢同一端點 |
+| 無法讀取鍵盤 HID collection | Windows 獨佔鍵盤 collection，主機端 `ReadFile` 會被拒絕。輸入驗證要看裝置端 STATUS 的 `keys`／`completed` |
+| HID 進不了 BOOTSEL | 按住 BOOTSEL 上電，把 `firmware/app/target/thumbv6m-none-eabi/release/xiao-firmware.uf2` 複製到 `RPI-RP2` 磁碟 |
+| 白畫面 | exe 必須以 `custom-protocol` feature 建置（`scripts/build.ps1` 已處理），否則會去連不存在的 dev server |
 
-```bash
-cargo test --locked --workspace --no-default-features
-cargo test --locked --workspace --all-targets
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-python3 scripts/sync-input-protocol.py --check
-cargo build -p firmware-engine --release --target thumbv6m-none-eabi
-cargo test --manifest-path firmware/app/Cargo.toml
+## 專案結構
+
+```
+src/                主機 library：HID 列舉與 v3 client、滑鼠軌跡、文字／組合鍵、量測、設定、背景 worker
+src-tauri/          Tauri 2 外殼：20 個命令、事件、視窗與熱鍵
+ui/                 React 19 + TypeScript + Vite（五頁）
+shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測試向量
+firmware/engine/    協議引擎（no_std、固定容量）：session、排程、狀態、LED
+firmware/app/       正式韌體：embassy-rp USB device、boot2、NeoPixel、flash 設定
+scripts/            建置、打包、preflight、清理、契約檢查、CDP 檢查
 ```
 
-Linux 可驗證純邏輯（library、協議、引擎與韌體測試）及 XIAO 韌體編譯；GUI 是 Tauri 2 + WebView2，
-實體 HID、量測、燒錄與打包限定 Windows，Linux 不產生 EXE 或 ZIP。
+## 規格
 
-架構、期限與限制見 [docs/architecture.md](docs/architecture.md)。
-本分支的冗餘盤點與原生 Rust 遷移評估見 [docs/rp2040-xiao-only-analysis.md](docs/rp2040-xiao-only-analysis.md)。
-
-驗證紀錄與實機驗收清單見 [docs/validation.md](docs/validation.md)。
-線路協定見 [firmware/PROTOCOL.md](firmware/PROTOCOL.md)。
+- **線路協定（給要接裝置的人）**：[firmware/protocol-v3.md](firmware/protocol-v3.md)
+  — framing、opcode、STATUS／STATUS_EXT／SESSION_LIST 格式、錯誤碼、租約與完成語意。
+- **內部架構**：[docs/architecture.md](docs/architecture.md) — 主機四層、韌體六階段、建置產物規則。
+- **韌體**：[firmware/README.md](firmware/README.md)、[firmware/app/README.md](firmware/app/README.md)。
 
 ## 授權
 
-新 Rust 程式採 MIT；隨附韌體及第三方程式依原有授權。
-見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本專案程式碼採 MIT；隨附韌體與第三方程式依其原有授權，詳見 `THIRD_PARTY_NOTICES.md`。

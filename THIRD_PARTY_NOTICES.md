@@ -7,8 +7,8 @@ It does not relicense the copied `firmware/` sources or third-party Rust depende
   copyright notices and licenses remain applicable; project-specific firmware without
   an explicit license is included as supplied, without a new license grant.
 - The firmware builds from Rust sources only (embassy-rp / embassy-usb and their
-  dependencies, pinned by `firmware/app/Cargo.lock`). No Arduino core, TinyUSB or
-  Adafruit library is downloaded or linked any more.
+  dependencies, pinned by `firmware/app/Cargo.lock`). No Arduino core,
+  TinyUSB or Adafruit library is downloaded or linked.
 - Windows fonts are loaded from the operating system and are not redistributed.
 - Rust dependency versions are fixed by Cargo.lock. Packaging collects upstream
   LICENSE/LICENCE/COPYING/NOTICE files into `ThirdPartyLicenses/`, together with a

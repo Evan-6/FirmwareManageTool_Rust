@@ -1,58 +1,56 @@
-# FirmwareManageTool 鍵盤／滑鼠韌體
+# 韌體（Seeed XIAO RP2040）
 
-低延遲 USB HID 韌體：主機透過 USB 下指令，裝置以硬體鍵盤與滑鼠身分送出輸入。
-指令走 **Vendor HID**（usage page `0xFF60`），**不列舉 CDC 序列埠、對外不露出 COM 埠**；
-提供鍵盤、相對滑鼠、5 鍵、垂直／水平滾輪，以及 failsafe 自動放開。
-**可同時連線八個控制程式**（GUI／MSCV／EvanRemote）：正常結束送 `CLOSE` 立即歸還名額，
-不會留給租約回收，也不計 failsafe。
+主機透過 USB 下指令，裝置以真正的 HID 鍵盤／滑鼠身分送出輸入。沒有 CDC 序列埠、沒有 COM 埠、
+沒有 v2 或序列回退；唯一的控制通道是 Vendor HID（usage page `0xFF60`）。
 
-本分支只支援 **Seeed XIAO RP2040**，而且**只有 Rust**：Arduino sketch、TinyUSB 與 C++ 引擎
-已全部移除，正式韌體是 `firmware/app`（crate `xiao-firmware`）加 `firmware/engine`。
-線路協定索引見 **[PROTOCOL.md](PROTOCOL.md)**：只接受 Vendor HID v3，最多 8 個 session（OPEN／CLOSE），沒有 v2／serial 回退。
+純 Rust：`firmware/app`（crate `xiao-firmware`，embassy-rp + embassy-usb）加 `firmware/engine`
+（協議引擎）。建置鏈只需要 Rust：boot2 由 embassy-rp 提供，UF2 由 `uf2pack` 打包，
+不需要額外的燒錄工具或 C 編譯器。
 
-## 資料夾架構
+- 線路協定：[protocol-v3.md](protocol-v3.md)（索引：[PROTOCOL.md](PROTOCOL.md)）
+- USB：`03F0:0024`、產品字串 `HP Keyboard`、bcdDevice `0x0310`、序號取自 flash unique id
+- 容量：Flash 33,736 B（32.9 KiB／2 MiB）、RAM 30,796 B（30.1 KiB／264 KiB）
+- UF2：67,584 B、132 blocks、每塊 256-byte 對齊、首塊 `0x10000000`
+
+## 資料夾
 
 ```
 firmware/
-  README.md            ← 本檔
-  PROTOCOL.md          ← 線路協定索引
-  protocol-v3.md       ← Vendor HID v3 規範
-  engine/              ← 協議引擎（no_std、無 heap、固定容量）+ 主機測試
-  app/                 ← 正式韌體：embassy-rp USB device、boot2、UF2 打包
-  tools/
-    vendor_hid_bootloader.ps1  ← 透過 Vendor HID 送指令（含 enter_bootloader）
+  README.md       ← 本檔
+  PROTOCOL.md     ← 協定索引
+  protocol-v3.md  ← Vendor HID v3 規範（framing、opcode、診斷、租約）
+  engine/         協議引擎：no_std、無 heap、固定容量，可在主機上測試
+  app/            正式韌體：USB device、runtime loop、NeoPixel、flash 設定
 ```
 
-`firmware/engine/src/` 是唯一引擎實作；`keys_generated.rs` 由
-`scripts/sync-input-protocol.py` 從 `shared/input-protocol/keys.json` 產生，勿手改。
+`firmware/engine/src/` 是唯一引擎實作。`keys_generated.rs` 由
+`scripts/sync-input-protocol.py` 從 `shared/input-protocol/keys.json` 產生，不要手改。
 USB report descriptor 凍結在 `firmware/app/src/usb_descriptors.rs`，由
-`firmware/app/tests/descriptors.rs` 以雜湊釘住，改了會直接測試失敗。
+`firmware/app/tests/descriptors.rs` 以雜湊釘住——改了會直接測試失敗。
 
 ## 建置與燒錄
 
 ```sh
 rustup target add thumbv6m-none-eabi
-bash scripts/build-rust-firmware.sh                  # 建置 + 打包 UF2 + 印出容量
+bash scripts/build-rust-firmware.sh          # cargo build + uf2pack + 印容量
 cp firmware/app/target/thumbv6m-none-eabi/release/xiao-firmware.uf2 /e/   # E: = RPI-RP2
 ```
 
-沒有 Arduino／Pico SDK 依賴，也不需要 picotool：boot2 由 embassy-rp 提供，
-UF2 由 `uf2pack`（同一個 GUI 用的 Rust 程式碼）產生。
+管理工具會自動完成這整段：`cargo build` → 打包 UF2 → 請裝置進 BOOTSEL → 複製檔案 → 重新列舉
+並驗證板型。第一次燒錄、或無法由 HID 進入下載模式時，按住 BOOTSEL 上電後手動複製 UF2。
+正常韌體沒有 COM，也沒有 1200 bps touch reset。
 
-管理工具會自動 `cargo build`、打包 UF2、請裝置進 BOOTSEL、複製檔案，最後用 hello 驗證板型。
-第一次燒錄或無法由 HID 進入下載模式時，按住 BOOTSEL 上電後手動複製 UF2。
-正常韌體沒有 COM，也沒有 1200bps-touch reset。
+## 行為
 
-## 容量與平台
-
-output／RX／TX 佇列深度均為 32，8 個 session；滿載或最舊待送工作超過 50ms 即回報故障並優先釋放。
-USB 完成由 embassy 的 IN transfer 完成事件通知；個別釋放保留其他來源，USB／共用佇列故障才清理全部 session。
-目前全部在 core 0（`Ticker::every(1 ms)`），LED 狀態由引擎決定、尚未驅動 WS2812。
-Feature 14 的 board id 固定為 2，USB 序號取自 flash unique id。
-
-## 量測
-
-| 映像 | Flash | RAM |
-| --- | --- | --- |
-| 舊 C++ sketch（arduino-pico 6.2.0 + TinyUSB，已刪除） | 90,792 B | 29,712 B |
-| Rust `firmware/app` | 33,488 B | 30,796 B |
+- **八個 session**：GUI／MSCV／EvanRemote 可同時連。正常結束送 `CLOSE` 立刻歸還名額，
+  不留給租約回收、也不計 `failsafe`。
+- **租約 2000 ms**：OPEN、輸入、HEARTBEAT 與診斷查詢續租；STATUS／BARRIER 不續租。
+  租約是「程式崩潰或直接拔線」的保險，正常結束請送 CLOSE。
+- **佇列**：output／RX／TX 各 32 項；最舊待送超過 50 ms 或溢位即失效並釋放。
+  相對位移與滾輪單軸累計上限 ±8192。
+- **安全**：watchdog 2 s；USB suspend／reset 視為 bus loss（故障碼 7），所有 session 失效並放開
+  按住的鍵——闔蓋時按著 W，醒來不該繼續走。
+- **持久設定**：亮度存在最後一個 flash sector（`0x101FF000`），重燒韌體不會清掉。
+- **狀態燈**：NeoPixel 以 PIO + DMA 驅動（GPIO12 資料、GPIO11 電源閘），亮度 0–64，
+  顏色代表 Idle／Held／Error／Failsafe／Bootloader。
+- **Feature 14**：board id 固定 2，帶 build hash（commit 前四 bytes），主機用來比對版本。

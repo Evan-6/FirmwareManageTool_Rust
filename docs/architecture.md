@@ -1,124 +1,105 @@
-# 架構與操作保證
+# 架構
 
-GUI 只保存顯示狀態，透過型別化 AppCommand／AppEvent 與背景工作溝通。
-同時只執行一項裝置工作，HID handle 由工作端獨占。cancel 使用原子旗標，
-bootloader 選擇使用獨立 channel，長工作不阻塞 GUI。
+主機與韌體都是純 Rust。這份文件說明「東西放在哪、為什麼這樣切、改了會影響什麼」；
+線路協定本身見 [firmware/protocol-v3.md](../firmware/protocol-v3.md)。
 
-HidTransport／ProcessRunner 可替換為假裝置／假子程序。裝置傳輸在 `src/hid/transport.rs`，
-v3 I/O 在 `src/hid/v3.rs`，共用編解碼與
-session 序號在 `shared/input-protocol`。業務端使用型別化輸入，不自行組合二進位封包。
+## 主機：四層
 
-Session 先查詢 Feature 14。v3 使用 64-byte 完整封包、session／sequence，
-一般輸入無 ACK；OPEN／STATUS／BARRIER／RELEASE_ALL／BOOTLOADER 有對應回覆。
-屏障等待先前 USB report 傳送完成，不代表 Windows 應用程式已處理。
-所有短寫入、錯誤、timeout 或 failsafe 都使 session 失效，重連丟棄舊回應並建立自己的空輸入狀態。
-畫面目標位置與擬人化曲線在主機計算，`input-protocol::pointer::RelativeTracker` 共用
-Windows 游標回授的相對位移控制器；USB 只送 MOUSE_MOVE，韌體 3.1.0 只有相對滑鼠。
-末端定位最多在路徑結束後繼續修正 300ms；無法到達回錯誤，拖曳以 ReleaseGuard 清理。
-滑鼠工作最後等待屏障／ACK、查詢 status，並檢查 TX／HID 計數未增加。
-failsafe 計數是全裝置共用，其他 session 的租約到期也會增加，不能據此判定本工作失敗；
-本 session 或全裝置故障以帶 session 的 EVENT 判定，接收後立即使連線失效。
+```
+ui/                  React 19 + TS + Vite（只透過 lib/ipc.ts 呼叫命令）
+  │  Tauri invoke / app://event
+src-tauri/           Tauri 2 外殼：視窗、全域熱鍵、20 個命令、UiEvent
+  │  AppCommand / AppEvent
+src/backend.rs       背景 worker：獨占 HID handle，一次只做一件事
+  │
+src/                 library：hid（列舉／v3 client）、mouse、typing、latency、firmware、settings
+```
 
-| 階段 | 期限 |
-| --- | --- |
-| HID 寫入 | hidapi Windows C 後端 1 秒；錯誤後不再重用 handle |
-| HID ACK | 自發送起 1 秒；收取以 10ms 切片檢查取消 |
-| 按下／放開 A | 每階段 1 秒 |
-| 安裝依賴 | 每個子程序 15 分鐘 |
-| 編譯 | 10 分鐘 |
-| RP2040 bootloader | 15 秒 |
-| runtime 握手驗證 | 15 秒的偵測窗口，加上正在進行的有期限 HID 握手 |
-| 極限子程序取消 | 2 秒後強制終止，再嘗試重新連線 reset |
-| 關閉 GUI | 最多等待背景清理 5 秒 |
+- **worker 獨占裝置**：GUI 只保存顯示狀態，所有裝置操作排進同一條命令通道，任何時刻只有一項
+  工作在跑；取消用原子旗標，BOOTSEL 選擇走獨立 channel，長工作不阻塞介面。
+- **連線期間自動輪詢**：150 ms STATUS、1 s STATUS_EXT／SESSION_LIST、500 ms 心跳。命令執行期間
+  輪詢暫停，結束後恢復。除錯模式關閉時全部停止，只留心跳（見下）。
+- **契約由腳本守住**：`scripts/check-ipc.mjs` 以 `generate_handler![...]` 與 `enum UiEvent` 為真相，
+  雙向比對 `ui/src/lib/ipc.ts`／`types.ts`；命令或事件改了卻沒同步，檢查直接紅。
+- **UI 是編譯期嵌入**：`src-tauri` 以 `custom-protocol` 把 `ui/dist` 打進 exe，所以 release 只有一支
+  執行檔；改完前端一定要重建外殼，否則跑的是舊 bundle。
 
-Windows 子程序在暫停狀態建立，先加入具有 KILL_ON_JOB_CLOSE 的 Job Object，
-再恢復執行，避免子程序先啟動孫程序而逃過清理。Linux 測試使用 process group。
-stdout／stderr 串流顯示，各自保存最多 10MiB；GUI 保存最近 1000 行日誌。
+## 除錯模式與遊戲模式
 
-極限測試透過相同 exe 的內部 `--latency-worker` 入口執行，以 JSON 行傳遞要求、
-逐輪結果和報告，stdin `cancel` 或 EOF 觸發取消。REALTIME／TIME_CRITICAL 僅套用
-在量測子程序送出按下指令時，送出後先以 RAII 還原程序優先權，再觀察 Windows 輸入。
-觀察執行緒與高精度模式相同，使用 ABOVE_NORMAL、有期限自旋及定期 yield；一般模式使用短 sleep 輪詢。
-主 GUI 從不切換 REALTIME。持續以 REALTIME 忙等會阻礙 Windows 鍵盤輸入執行緒，
-因此不能將這個優先權延伸至 GetAsyncKeyState 等待區間（[Microsoft 排程說明](https://learn.microsoft.com/zh-tw/windows/win32/procthread/scheduling-priorities)）。
+`Settings::debug` 決定 worker 對裝置的說話量：
 
-QPC 計時包含 Rust 主機送出命令的 session 處理、USB 寫入、韌體、Windows driver
-及 GetAsyncKeyState 輪詢，極限模式也包含送出後還原優先權的耗時，並非 MCU 單獨處理時間。只有完整按下／放開及
-協定檢查成功的輪次納入統計；錯誤即停止，不繼續累積被污染的樣本。
-成功率以實際執行輪數為分母，另列要求及未執行輪數；提前停止後未執行的輪次不算失敗。
-每輪錯誤標明送出、Windows 觀察、USB 屏障或裝置狀態檢查階段。
-P95／P99 使用 nearest-rank；標準差使用 n−1，單樣本不計。
-
-燒錄先編譯再進 bootloader。自動重啟已選取 runtime 時，排除重啟前已存在的
-bootloader，避免自動選到另一台板子。GUI 直接呼叫 `cargo build`（`firmware/app`，target
-`thumbv6m-none-eabi`），再用同一個 Rust 程式（`src/uf2.rs`）把 ELF 打包成 UF2，
-不呼叫舊 PowerShell 上傳腳本，也不依賴 runtime CDC touch。任何 OS 複製錯誤保留為失敗，
-之後再驗證 runtime hello。
-驗證排除傳輸前已存在的 runtime 裝置，避免別台板子的 hello 被當成此次燒錄成功。
-以 v3 能力查詢與 OPEN 驗證，board id 必須是 XIAO 的 2，其他板型映像一律視為不符。
-RP2040 使用 MCU unique ID 作為 USB 序號與能力識別，未提供映像 hash 或密碼學身分證明。重複序號／多個重新列舉候選視為歧義，不能驗證成功。
-
-擬人化軌跡以主螢幕實體像素計算 minimum-jerk／Bézier，保留低振幅偏移、
-重複像素省略及精確最後目標。排程遲到跳過過期節點，不補送所有舊點。
-原始相對移動及滾輪以 ±1024 拆指令，8-bit USB report 拆分由韌體排程執行。
-點擊／拖曳有釋放 guard，閒置時也每 500ms 續租。
-斷線回報釋放狀態未知，重新連線先清空。租約為 2 秒。
-RP2040 的 32 項輸出佇列保留按鍵／按鈕順序；滿載或等待超過 50ms 時停止 session 並優先釋放。
-
-韌體 3.1.0 最多八個 v3 session 可同時控制，各自保存序號、租約與輸入狀態；
-USB 按鍵／Consumer／滑鼠按鈕取聯集，位移與滾輪依接收順序輸出。
-正常結束送 CLOSE 立即歸還名額且不計 failsafe；租約（2 秒）只在程式崩潰或直接拔線時作為保險。
-
-診斷與安全：Feature 14 尾巴帶 build hash（可判斷板子是否為目前程式燒的）、`STATUS_EXT`（08）回報 uptime／tick 抖動／佇列水位／最近故障／reset 原因／開機次數／鎖定鍵、`PING`（09）量裝置往返；裝置端有 2 秒 watchdog、suspend 即放開按鍵，以及 GPIO12／11 的 NeoPixel 狀態燈。
-排程工作記錄 session 與各來源快照，個別 RELEASE_ALL／租約／協定故障取消自己的待送工作，
-重建其他來源的歷史狀態並保留其短按、相對位移與屏障完成通知。
-STATUS 的輸入／序號／租約／待送數屬於查詢者，錯誤計數共用。
-共用 USB／佇列故障才釋放全部來源。燒錄前須關閉其他 v3 程式並等 2 秒回收 session。
-
-輸出／RX／TX 佇列深度均為 32。USB 完成依 embassy-usb 的 IN transfer 完成事件；USB reset 後舊 boot 回覆不能被誤當完成。序號取自 flash unique id。
-
-韌體是純 Rust：`firmware/app/src/main.rs` 只組裝一個 embassy USB device 與一個 `Runtime`。
-`InputEngine` 持有 session／scheduler／TX，使用傳入的 uint32 時間，不直接呼叫硬體。協議、session、
-scheduler、TX 與 BootloaderGate 位於 `firmware/engine/src/`，descriptor 凍結在
-`firmware/app/src/usb_descriptors.rs` 並由測試釘住，都是唯一來源；主機測試直接跑同一份引擎。
-
-`firmware/app/src/runtime.rs` 以 `Transport` trait 隔開 USB 與引擎：`Runtime::step` 依序處理
-reset／RX 故障、最多 4 個封包、最多 1 個輸入 report、vendor 完成與控制回覆、TX head、LED 與 boot gate。
-目前全部在 core 0（`Ticker::every(1 ms)`），LED 狀態已決定但尚未驅動 WS2812。
-重啟入口為 `reset_to_usb_boot`；gate 等待成功回覆 ACK 後 120ms，並檢查 output idle／vendor ready／TX empty，失效會取消。
-
-InputConfig 固定 32／32／32 容量與 8 個 session。SourceView 僅在排程呼叫期間借用 session 狀態，工作佇列立即複製歷史快照，不保存指標。
-
-## 介面層（Tauri 2 + React）
-
-| 層 | 位置 | 責任 |
+| | 除錯模式（預設） | 遊戲模式 |
 | --- | --- | --- |
-| 程式庫 | `src/` | HID 列舉／session、firmware 建置與 UF2、延遲測試、滑鼠、設定。不含任何 UI 框架。 |
-| 背景工作 | `src/backend.rs` | 一個 worker 執行緒吃 `AppCommand`、吐 `AppEvent`；連線時每 150 ms 輪詢 STATUS、每秒輪詢 STATUS_EXT。 |
-| 外殼 | `src-tauri/` | Tauri 2 應用：13 個命令、把 `AppEvent` 轉成 `UiEvent` 後用 `app://event` 推給 webview。`--latency-worker` 也由這支執行檔提供。 |
-| 前端 | `ui/` | React 19 + TypeScript + Vite，五個頁面；`lib/ipc.ts` 是唯一的 IPC 出入口，`lib/mock.ts` 是瀏覽器用的假後端。 |
+| STATUS | 每 150 ms | 不送 |
+| STATUS_EXT／SESSION_LIST | 每 1 s | 不送 |
+| HID 每行回覆轉到介面 | 是 | 否 |
+| HEARTBEAT | 每 500 ms | 每 500 ms |
+| 命令 | 照常 | 照常 |
 
-契約由 `scripts/check-ipc.mjs` 守住：命令清單以 `generate_handler![...]` 為真相、事件清單以
-`enum UiEvent` 為真相，和 `ui/src/lib/ipc.ts`／`ui/src/lib/types.ts` 雙向比對。
+心跳不可省：租約 2000 ms，少了心跳裝置兩秒後就回收 session，`failsafe` 也會增加。實測遊戲模式
+放著 45 秒，`received` 凍結、`failsafe` 仍為 0，切回除錯模式立刻恢復。
 
-`src-tauri` 在編譯期把 `ui/dist` 嵌進執行檔（`custom-protocol` feature），所以 release 只有一支 exe；
-少了這個 feature，執行檔會去連 dev server，關掉後就是白畫面。
+輪詢還有一個必須知道的副作用：同一個 vendor IN 端點只能有一個讀者，兩個程式同時讀會互偷回覆，
+被偷的一方序號錯亂就讓自己的 session 失效。要看裝置數字時只留一個輪詢者。
+
+## 韌體：六階段主迴圈
+
+```
+USB OUT (id 12) → Runtime::step → engine → 排程 → USB IN (id 13) / 輸入 HID (id 2,3,5)
+```
+
+`Runtime::step` 在 `firmware/app/src/runtime.rs`，與傳輸層無關（測試用 mock transport）：
+
+1. 收 OUT 報告、驗 framing
+2. 交給 `firmware-engine` 解碼（opcode、session、sequence）
+3. 佇列輸出（鍵盤／consumer／滑鼠，移動可合併）
+4. 每 1 ms tick 推進排程，送出到期的 HID 報告
+5. 送出待回覆的 vendor reply（含 Feature 14、STATUS_EXT、PING、SESSION_LIST、SETTINGS）
+6. 處理 bootloader gate、watchdog、LED 狀態
+
+引擎是 `#![forbid(unsafe_code)]`、`no_std`、無 heap、固定容量；所有時間由呼叫端傳入 `now_ms`，
+只用 `wrapping_*`，因此同一份程式也能在主機上跑測試。
+
+## Session 與租約
+
+- 八個 slot，各自獨立 session 與 sequence；OPEN 用非零 id、sequence=1，之後每個命令遞增。
+- 租約 2000 ms，OPEN／輸入／HEARTBEAT／診斷查詢續租，**STATUS 與 BARRIER 不續租**。
+- 正常結束送 `CLOSE`：立刻歸還名額、取消自己待送工作、只放開自己按住的鍵、不發 EVENT、不計
+  `failsafe`。其他 session 完全不受影響。
+- 重複／缺號只讓該 session 失效（避免重播相對位移）；未知 session 的輸入丟棄。
+- 鍵盤／consumer／滑鼠按鈕是所有 session 的位元聯集；snapshot 只替換自己的狀態。
+- 全域故障（USB reset／拔線／suspend、佇列溢位）讓所有 session 失效，各發一個 EVENT。
+
+## 時序與容量
+
+| 項目 | 值 |
+| --- | --- |
+| 主迴圈 | core 0，`Ticker::every(1 ms)`，每 tick 量 lateness 餵給 STATUS_EXT |
+| 佇列 | output／RX／TX 各 32 項 |
+| 最舊待送 | 超過 50 ms 即失效、清除並釋放 |
+| 移動累計 | 單軸上限 ±8192，超過即失效 |
+| Bootloader gate | 120 ms ＋ output 閒置 ＋ vendor ready ＋ TX 清空 |
+| Watchdog | 2 s；reset reason 與開機次數存在 watchdog scratch |
 
 ## 建置產物放在哪裡
 
-cargo 會依「profile」和「有沒有指定 `--target`」分開放產物。在 Windows 上 host triple 本來就是
-`x86_64-pc-windows-msvc`，一旦明寫 `--target`，build script／proc macro 這些 host-only 單元留在
-`target/<profile>`，其餘留在 `target/<triple>/<profile>`——同一套依賴編兩份。舊腳本正是這樣寫的，
-`target/` 曾經到 **17 GB**（11 GB `target/debug`、4.3 GB 重複的 `target/release`、1.5 GB triple）。
-現在所有腳本都不加 `--target`：`build.ps1` 改成檢查預設 toolchain 的 host 是不是 MSVC，不是就報錯。
+cargo 依「profile」和「有沒有指定 `--target`」分開放產物。在 Windows 上 host triple 本來就是
+`x86_64-pc-windows-msvc`，一旦明寫 `--target`，build script／proc macro 留在 `target/<profile>`，
+其餘留在 `target/<triple>/<profile>`——同一套依賴編兩份。所有腳本都不加 `--target`；
+`scripts/build.ps1` 改成檢查預設 toolchain 的 host 是否為 MSVC，不是就報錯。
 
 | 位置 | 內容 | 處置 |
 | --- | --- | --- |
 | `target/release` | 應用程式（唯一正式產物） | 保留 |
 | `target/thumbv6m-none-eabi` | `firmware-engine` 的嵌入式建置 | 保留（<1 MB） |
 | `firmware/app/target/thumbv6m-none-eabi` | 韌體 ELF 與 UF2 | 保留（要燒錄） |
-| `target/debug` | 測試與 clippy 的 dev 產物（含 incremental） | 可刪，下次跑測試重建 |
-| `target/x86_64-pc-windows-msvc` | 舊腳本留下的重複 triple 樹 | 可刪 |
-| `firmware/app/target/(debug|release)` | 韌體 host 測試的 dev 產物 | 可刪 |
+| `target/debug` | 測試與 clippy 的 dev 產物 | 可刪，下次重建 |
+| `firmware/app/target/debug` | 韌體 host 測試的 dev 產物 | 可刪 |
 
-`scripts/prune.ps1` 列出上述可重建的樹，`-Apply` 才真的刪。清完後整份 repo 約 **2.1 GB**。
+`scripts/prune.ps1` 列出可重建的樹，`-Apply` 才真的刪除。清完後整份 repo 約 2.1 GB。
+
+## 品質門檻
+
+`scripts/preflight.sh` 依序跑：前端建置 → `cargo fmt --check` → clippy（host 與 thumbv6m）→
+workspace 測試 → 韌體 adapter／descriptor 測試 → 協議鍵值同步 `--check` → IPC 契約檢查。
+任何一項失敗就不算完成；CI 的 windows job 跑同一組檢查，Linux job 只驗純邏輯與韌體編譯。

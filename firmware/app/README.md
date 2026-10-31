@@ -1,116 +1,88 @@
-# `xiao-firmware` — pure-Rust XIAO RP2040 firmware (3.B)
+# `xiao-firmware` — XIAO RP2040 韌體
 
-The only implementation of this device on this branch: no Arduino core, no
-TinyUSB, no C++. The protocol engine, the runtime loop, the USB device stack and
-the boot path are all Rust. The C++ sketch that used to live in
-`firmware/boards/rp2040/` was deleted once this build passed the hardware
-regression; its behaviour survives as the recorded trace golden.
+裝置唯一的實作。協議引擎、runtime loop、USB device stack 與開機路徑全部是 Rust；
+`no_std`、無 heap、固定容量。
 
 ```
 USB host
    │
-   ├─ interface 0: input HID  (NKRO id 2, consumer id 5, relative mouse id 3)
-   └─ interface 1: vendor HID (OUT 12, IN 13, Feature 14)
+   ├─ interface 0：輸入 HID（NKRO id 2、consumer id 5、相對滑鼠 id 3）
+   └─ interface 1：vendor HID（OUT 12、IN 13、Feature 14）
         │
-   embassy-usb (HID class, 64-byte reports, 1 ms poll)
+   embassy-usb（HID class、64-byte report、1 ms poll）
         │
-   Runtime::step  (src/runtime.rs, transport-agnostic, six stages)
+   Runtime::step（src/runtime.rs，與傳輸層無關，六階段）
         │
-   firmware-engine (no_std, no heap, fixed capacity)
+   firmware-engine（no_std、無 heap、固定容量）
 ```
 
-## Build
+## 建置
 
 ```bash
 rustup target add thumbv6m-none-eabi
 bash scripts/build-rust-firmware.sh
 ```
 
-That builds the crate for `thumbv6m-none-eabi`, packages `xiao-firmware.uf2`
-with `uf2pack` (the same Rust code the GUI runs) and prints the footprint with
-`scripts/elf-size.py`. Nothing in that chain needs `arduino-cli`,
-`arm-none-eabi-gcc` or `picotool`.
+這條鏈不需要額外的 C 編譯器或燒錄工具：`cargo build` 產生 ELF，
+`uf2pack`（和 GUI 共用同一份 Rust 程式碼）打包 UF2，`scripts/elf-size.py` 印出容量。
 
-Measured on the PoC (release, no LED, single core):
+| 項目 | 大小 |
+| --- | --- |
+| Flash | 33,736 B（32.9 KiB／2 MiB） |
+| RAM | 30,796 B（30.1 KiB／264 KiB） |
+| UF2 | 67,584 B、132 blocks |
 
-| image | flash | RAM |
-| --- | --- | --- |
-| C++ sketch (arduino-pico 6.2.0, TinyUSB — deleted) | 90,792 B | 29,712 B |
-| Rust `xiao-firmware` | 33,488 B | 30,796 B |
+RAM 主要是引擎（`InputEngine` 12,564 B）與 32 筆 RX 佇列（2,016 B），其餘是 USB stack 與緩衝。
 
-RAM is dominated by the engine (`InputEngine` 12,564 B) and the 32-slot RX queue
-(2,016 B); the flash difference is the Arduino core and TinyUSB that are no
-longer linked in.
+## 燒錄
 
-Flashing: put the board in BOOTSEL mode and copy the UF2 to the `RPI-RP2` drive,
-or `cargo run --release --features hardware` (the `runner` in
-`.cargo/config.toml` is `probe-rs run --chip RP2040`).
+把板子放進 BOOTSEL，把 UF2 複製到 `RPI-RP2` 磁碟；或 `cargo run --release --features hardware`
+（`.cargo/config.toml` 的 runner 是 `probe-rs run --chip RP2040`）。
 
-## Hardware test
+## 硬體驗證
 
-`examples/probe.rs` drives the same host path the GUI uses, and
-`examples/boot.rs` can reboot the board with raw vendor reports when Feature 14
-is broken:
+`examples/probe.rs` 走 GUI 相同的主機路徑；`examples/boot.rs` 只用 raw vendor report 就能讓
+Feature 14 壞掉時仍進得去 BOOTSEL：
 
 ```bash
 cargo run --release --no-default-features --example probe                # Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER
-cargo run --release --no-default-features --example probe -- --keys      # inject 'a', watch the keyboard report complete
-cargo run --release --no-default-features --example probe -- --lease     # idle past lease_ms, device must drop the session
-cargo run --release --no-default-features --example probe -- --bootloader  # reboot into BOOTSEL and check it leaves the bus
-cargo run --release --no-default-features --example boot                 # fallback BOOTSEL without touching Feature 14
+cargo run --release --no-default-features --example probe -- --keys      # 注入 'a'，確認鍵盤報告真的完成
+cargo run --release --no-default-features --example probe -- --lease     # 閒置超過租約，裝置必須回收 session
+cargo run --release --no-default-features --example probe -- --ext       # STATUS_EXT 診斷
+cargo run --release --no-default-features --example probe -- --ping 20   # 量往返時間
+cargo run --release --no-default-features --example probe -- --settings  # 讀持久設定
+cargo run --release --no-default-features --example boot                # 救援用 BOOTSEL
 ```
 
-Results on a XIAO RP2040 (serial `4250304B38353817`, 2026-10-31): all four modes
-pass. `--keys` shows `keys="a"`, `completed` advancing 2 → 4 and `p=1`, then
-`keys=""` and `p=0` after release — i.e. the keyboard report actually completes
-on the bus, not merely "accepted". `--lease` reports fault `[5]` after 2000 ms
-and the host session is invalidated. `--bootloader` produces the `RPI-RP2` drive
-within a second, and the reflashed image enumerates again with `fs=0`.
+`--keys` 的判準是裝置端數字：`keys="a"`、`completed` 前進、按著時 `p=1`，放開後 `keys=""`、
+`p=0`。Windows 獨佔鍵盤 collection，主機端 `ReadFile` 會拿到 `ERROR_ACCESS_DENIED`，所以輸入
+路徑只能從裝置側證明；要驗 OS 端就得真的打字到有焦點的視窗，目前沒有自動化。
 
-Windows refuses a raw `ReadFile` on the keyboard collection (`ERROR_ACCESS_DENIED`)
-because it owns that collection, so the input path is proven from the device side:
-STATUS counters plus report completion. Typing into a focused window is the only
-end-to-end check of the OS side and is not automated yet.
+## 測試
 
-## What is verified
+- `tests/runtime.rs`：5 個 adapter 測試（mock transport）——每輪最多四個 RX 封包、輸入報告被拒
+  產生 HID 故障、bus reset 產生 failsafe 事件並丟棄過期 RX、framing 故障計數、BOOTLOADER 回覆
+  經 120 ms gate 才重啟。
+- `tests/descriptors.rs`：以 FNV-1a 釘住輸入與 vendor report descriptor，改了會失敗。
+- `firmware-engine`：行為測試、golden vectors、37 行回歸 trace、靜態大小斷言。
+- host 與 `thumbv6m-none-eabi` 的 clippy 都必須 `-D warnings` 通過，`cargo fmt --check` 亦然。
 
-- `cargo test` — 5 adapter tests in `tests/runtime.rs` against a mock transport:
-  RX budget of four packets per pass, rejected input report → HID fault, bus
-  reset → failsafe event + stale RX discarded, framing fault propagating its
-  error count, BOOTLOADER reply → 120 ms gate → reboot request.
-- `cargo clippy --all-targets -D warnings` on the host and for
-  `thumbv6m-none-eabi`, `cargo fmt --check`.
-- `cargo build --release --target thumbv6m-none-eabi --features hardware` links
-  with boot2 at `0x10000000` (`.boot2` from embassy-rp, `BOOT_LOADER_W25Q080`)
-  and produces a 110-block UF2, every block 256-byte aligned, first at
-  `0x10000000`.
-- Report descriptors: `tests/descriptors.rs` pins the frozen bytes with a hash, so an
-  edit that changes what Windows sees fails the build instead of drifting.
-- Engine behaviour: `firmware-engine` carries the 37-line A/B trace that matches
-  the C++ engine byte for byte.
-- On hardware: enumeration (both collections, same VID/PID/serial as the C++
-  build), Feature 14, OPEN/STATUS/HEARTBEAT/BARRIER, key injection with report
-  completion, lease expiry, BOOTSEL reboot, and reflashing by copying the UF2.
+## 已驗證／未驗證
 
-## What is NOT verified
+實機驗證過（XIAO RP2040，序號 `4250304B38353817`）：列舉、Feature 14 回滿 64 bytes、
+OPEN／STATUS／HEARTBEAT／BARRIER／CLOSE、按鍵注入與報告完成、租約回收、BOOTSEL 重啟、
+重燒後設定仍在（亮度 8 → 重燒 → 仍是 8）、STATUS_EXT／PING、UF2 每塊 256-byte 對齊。
 
-- HID LED `set_report` (lock keys) is accepted and ignored, but nothing observes
-  whether Windows actually sends those reports.
-- Windows-side latency has not been measured against the C++ build.
-- NeoPixel status indication is not wired: the engine produces `LedState`
-  transitions, but nothing drives the WS2812 yet (the C++ build uses core 1).
-- All work runs on core 0. The C++ runtime splits LED rendering onto core 1;
-  that is a deliberate deferral, not an oversight.
-- The serial number comes from the flash unique id via
-  `Flash::blocking_unique_id`; it matches the C++ build on this board
-  (`4250304B38353817`), but that was a single sample.
+尚未驗證：NeoPixel 的實際顏色與亮度只用設定讀回確認過，沒有肉眼或相機比對，PIO/DMA 波形也沒量；
+`set_report` 的鎖定鍵只確認裝置有接收並回報在 STATUS_EXT，沒有觀察 Windows 是否真的送；
+滑鼠位移與擬人化的實際軌跡沒有獨立量測（預覽與送出節點由同一個函式產生）。
 
-## Layout
+## 檔案
 
-| file | role |
+| 檔案 | 角色 |
 | --- | --- |
-| `src/runtime.rs` | `Transport` trait + `Runtime::step`: the six-stage loop, transport-agnostic |
-| `src/usb_descriptors.rs` | generated report descriptors (do not edit) |
-| `src/main.rs` | embassy-rp USB device, HID interfaces, `Ticker`-driven engine loop |
-| `../engine/` | protocol engine shared with the host tests |
-| `memory.x`, `build.rs` | RP2040 linker layout (boot2, 2 MiB flash, 264 KiB RAM) |
+| `src/runtime.rs` | `Transport` trait + `Runtime::step`：六階段主迴圈，與傳輸層無關 |
+| `src/usb_descriptors.rs` | 凍結的 report descriptor（不要手改） |
+| `src/main.rs` | embassy-rp USB device、HID interface、`Ticker` 驅動的引擎迴圈、NeoPixel、flash 設定 |
+| `../engine/` | 與主機測試共用的協議引擎 |
+| `memory.x`、`build.rs` | RP2040 連結配置（boot2、2 MiB flash、264 KiB RAM）與 build hash |
