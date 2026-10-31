@@ -121,6 +121,7 @@ fn main() -> anyhow::Result<()> {
         );
         println!("keys ok: 按住→keys=a、completed 前進、放開→清空");
         session.finish(&cancel)?;
+        session.close(&cancel)?;
         return Ok(());
     }
 
@@ -168,6 +169,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     session.finish(&cancel)?;
-    println!("ok: Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER 全部通過");
+    session.close(&cancel)?;
+    println!("ok: Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER → CLOSE 全部通過");
     Ok(())
 }

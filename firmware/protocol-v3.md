@@ -21,6 +21,7 @@
 | 04 | BARRIER | 空 | 84 |
 | 05 | RELEASE_ALL | 空 | 85 |
 | 06 | BOOTLOADER | 空 | 86 |
+| 07 | CLOSE | 空 | 87 |
 | 10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
 | 11 | SNAPSHOT | 31-byte input snapshot | 無 |
 | 20 | MOUSE_MOVE | dx/dy i16，各 ±1024 | 無 |
@@ -28,13 +29,13 @@
 | 22 | MOUSE_BUTTONS | buttons u8 | 無 |
 | 23 | WHEEL | vertical/horizontal i16，各 ±1024 | 無 |
 
-OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包括心跳與查詢。耗盡 u32 前建立新連線，不在同一 session wrap。最多同時八個 session，序號各自計算。未知 session 的輸入丟棄；相同 ID 的 OPEN 或名額已滿回 busy，不覆蓋原連線。重複／缺號使所屬 session 失效，避免重播相對位移或按鍵。主機依 session、sequence、opcode 匹配回應，不能按回覆順序推測成功。
+OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包括心跳與查詢。耗盡 u32 前建立新連線，不在同一 session wrap。最多同時八個 session，序號各自計算；GUI、MSCV 與 EvanRemote 會同時連著。未知 session 的輸入丟棄；相同 ID 的 OPEN 或名額已滿回 busy，不覆蓋原連線。重複／缺號使所屬 session 失效，避免重播相對位移或按鍵。主機依 session、sequence、opcode 匹配回應，不能按回覆順序推測成功。結束時送 CLOSE 立刻歸還名額，不要靠租約。
 
-控制回應 opcode=命令|80，回應 payload 首 byte result：0=成功、1=framing、2=busy、3=invalid input、5=lease、6=HID send failed、7=USB disconnect、8=overflow/stale output、9=duplicate sequence、10=sequence gap。正常控制回應僅一個 result byte；STATUS 為固定 51-byte payload。
+控制回應 opcode=命令|80，回應 payload 首 byte result：0=成功、1=framing、2=busy（同名或名額已滿）、3=invalid input、5=lease、6=HID send failed、7=USB disconnect、8=overflow/stale output、9=duplicate sequence、10=sequence gap。正常控制回應僅一個 result byte；STATUS 為固定 51-byte payload。
 
 STATUS payload：result u8、received u32、completed u32、pending u8、lease_remaining u16、rx/tx/hid/failsafe 各 u16、input snapshot[31]。計數為 u16 wrap。snapshot、received、completed、lease、pending 是查詢 session 自己的狀態；錯誤計數為裝置共用。其他 session 的租約到期或協議錯誤也會增加 failsafe，不能僅依此判定本工作失敗。本 session 故障以匹配自身 ID 的 EVENT／控制 timeout 判定，TX／HID 共用傳輸計數變化仍須檢查。completed 序號才表示該 session 前面的 USB 輸出已完成。
 
-故障事件 opcode=7F，包含 result byte 與故障 session／最近接收序號。非法輸入、序號與租約故障只使對應 session 失效，取消該 session 待送工作並釋放其持有狀態，保留其他 session。USB／共用佇列故障使全部 session 失效，各自產生一個故障事件。TX overflow 另記計數；事件可能因傳輸問題遺失，控制 timeout 也須使主機 session 失效。
+故障事件 opcode=7F，包含 result byte 與故障 session／最近接收序號。非法輸入、序號與租約故障只使對應 session 失效，取消該 session 待送工作並釋放其持有狀態，保留其他 session。USB／共用佇列故障使全部 session 失效，各自產生一個故障事件。TX overflow 另記計數；事件可能因傳輸問題遺失，控制 timeout 也須使主機 session 失效。**CLOSE 不算故障**：它只歸還自己的名額、不發 EVENT、不增加 failsafe。
 
 ## 完成與租約
 
@@ -43,7 +44,7 @@ STATUS payload：result u8、received u32、completed u32、pending u8、lease_r
 - RELEASE_ALL 取消該 session 先前未執行輸入，釋放其 Keyboard／Consumer／滑鼠按鈕持有狀態；保留其他 session 的狀態與排程，USB 完成後才回覆。session 保留，可再輸入或續租。BOOTLOADER 若有其他 session 則回 busy；成功時再等待回覆 USB 傳送完成後重啟。仍不保證目標應用程式處理時間。
 - output／RX／TX 佇列各 32 項，最舊待送超過 50ms 或 queue overflow 即失效、清除及釋放。鍵盤與按鈕短按順序保留；相鄰待送同類移動可合併，但不跨按鈕、snapshot 或 barrier。相對／滾輪累加每軸上限 ±8192，超限亦失效。
 - 同來源最後一筆排程可承載 BARRIER 完成序號，避免單次 down/up/barrier 額外佔用佇列；完成仍等待所有先前 USB 輸出。
-- v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。
+- v3 lease=2000ms，OPEN、有效輸入與 HEARTBEAT 續租；STATUS/BARRIER 不續租。主機每 500ms 傳送完整快照或心跳，即使當下沒有按鍵。逾時終止 session，不能靠晚到心跳重播舊狀態。租約是「程式崩潰或直接拔線」的保險：正常結束必須送 CLOSE，否則 owner 要等 2 秒才釋放，而且會計入 failsafe。
 - 同時的 v3 session 各自持有 31-byte 狀態，USB 鍵盤／Consumer／按鈕輸出為位元聯集。相同按鍵須所有持有者都放開才放開；snapshot 只替換自己的狀態。不同 session 的相對位移與滾輪按接收順序作用於同一支游標，不能互相覆寫。BARRIER 回覆使用該 session 的序號，不能用另一 session 的完成序號代替。
 - 非阻塞排程由 core 0 擁有（`Ticker::every(1 ms)`），LED 狀態機也在同一核心但目前沒有驅動 WS2812。保留同一毫秒內的按下／放開；故障後不進行遲到事件補播。
 

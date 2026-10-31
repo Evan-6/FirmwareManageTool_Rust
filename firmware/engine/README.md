@@ -55,7 +55,7 @@ C++ 端已經不存在，沒有「兩邊一起改」這回事；golden 異動就
 
 ## 記憶體
 
-靜態用量與 C++ 引擎幾乎相同（`arm-none-eabi-g++ -mcpu=cortex-m0plus -Os` 量 `sizeof`，
+靜態用量（`arm-none-eabi-g++ -mcpu=cortex-m0plus -Os` 量 `sizeof`，
 Rust 用 `tests/sizes.rs`）：
 
 | 型別 | C++ | Rust |

@@ -294,3 +294,27 @@ Flash 差距主要是 Arduino core 與 TinyUSB 不再被連進來。**還沒有 
 - GUI 燒錄只要求 Rust 工具鏈（`cargo` + `thumbv6m-none-eabi`），不再需要 winget／arduino-cli／網路下載 core。
 - `UploadConfig.cli_path` 改名 `cargo_path`（保留 `cli_path` serde alias，舊設定仍可讀）。
 - UF2 打包只有一份實作：`src/uf2.rs`（GUI 與 `scripts/build-rust-firmware.sh` 共用），`scripts/elf2uf2.py` 刪除。
+
+## 8. 加上 CLOSE（2026-10-31）
+
+`fs`（failsafe）一直被誤讀成故障次數，實際上是 session 回收次數：v3 原本沒有關閉動詞，
+正常結束只送 BARRIER／RELEASE_ALL，session 留到 2000 ms 租約到期才被回收，所以每跑一次
+probe 或 GUI 斷線就 +1（實測 31→32→33）。
+
+一度改成單一 owner（`SESSIONS=1`），但 GUI、MSCV 與 EvanRemote 需要同時連線，因此改回八個
+session，只新增 `CLOSE`：
+
+| 變更 | 位置 |
+| --- | --- |
+| `CLOSE`（opcode 7）：歸還自己的名額、取消待送工作、釋放自己按住的鍵，不發 EVENT、**不計 failsafe** | `firmware/engine/src/wire.rs`、`engine.rs::close` |
+| 主機 `Command::Close` + `Session::close()`；GUI 斷線／燒錄／關程式與 `examples/probe.rs` 收尾都送它 | `shared/input-protocol/src/v3.rs`、`src/hid.rs`、`src/backend.rs` |
+| 錯誤碼改成可讀訊息（busy 會說「裝置已被其他程式佔用」） | `v3::check_response` |
+| GUI 措辭：`fs` 增加＝有程式沒送 CLOSE | `src/app.rs` |
+
+驗證：
+
+- 連跑三次 probe（間隔 3 s）都是 `fs=0`；改動前同樣操作是 31→32→33。
+- `CLOSE` 後名額立刻可用，不必等 2 秒；同一時間另一支程式仍可正常連線。
+- 行為測試 `close_frees_one_owner_without_a_fault_and_keeps_the_peer`：關掉一個 session
+  只釋放它按的鍵，另一個 session 的鍵還在，`fs` 不變。
+- `engine_trace.golden` 原封不動通過（CLOSE 不影響既有排程），映像 28,292 B flash / 17,804 B RAM。

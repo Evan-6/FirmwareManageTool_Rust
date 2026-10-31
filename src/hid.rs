@@ -159,6 +159,19 @@ impl<T: HidTransport> Session<T> {
             })
         }
     }
+    /// Tell the device this program is done. Frees the owner slot immediately
+    /// and is not a fault, so the next program does not have to wait for the
+    /// lease. Safe to call when the session is already invalid.
+    pub fn close(&mut self, cancel: &Cancellation) -> Result<()> {
+        let result = if self.binary.is_some() && self.valid {
+            self.v3_send(&input_protocol::v3::Command::Close, cancel)
+        } else {
+            Ok(())
+        };
+        self.binary = None;
+        self.valid = false;
+        result
+    }
     pub fn reset(&mut self, cancel: &Cancellation) -> Result<()> {
         self.v3_send(&input_protocol::v3::Command::ReleaseAll, cancel)?;
         ensure!(

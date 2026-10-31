@@ -194,6 +194,55 @@ fn peer_release_preserves_history_and_the_other_session() {
 }
 
 #[test]
+fn close_frees_one_owner_without_a_fault_and_keeps_the_peer() {
+    let mut h = Harness::new(0);
+    h.open();
+    h.send_as(wire::OPEN, 1, &[], 43);
+    h.tick(12);
+    h.send(wire::KEY, 2, &[7, 0, 4, 0, 1]);
+    h.send_as(wire::KEY, 2, &[7, 0, 4, 0, 1], 43);
+    h.send_as(wire::KEY, 3, &[7, 0, 5, 0, 1], 43);
+    h.tick(12);
+    assert!(h.engine.completed_state().held());
+
+    let failsafe = h.engine.counters().failsafe;
+    h.send_as(wire::CLOSE, 4, &[], 43);
+    h.tick(12);
+    assert!(
+        h.engine.session(43).is_none(),
+        "CLOSE frees the slot at once"
+    );
+    assert_eq!(
+        h.engine.counters().failsafe,
+        failsafe,
+        "CLOSE must not count a failsafe"
+    );
+    // 'a' stays because 42 still holds it; 'b' came only from 43.
+    let last = h
+        .input
+        .iter()
+        .rev()
+        .find(|r| r.id == wire::KEYBOARD_REPORT_ID)
+        .expect("a report must be sent");
+    assert!(last.data[1] & 16 != 0, "peer key must stay held");
+    assert!(
+        last.data[1] & 32 == 0,
+        "closed owner's key must be released"
+    );
+
+    // The slot is free immediately: no lease wait.
+    h.send_as(wire::OPEN, 1, &[], 44);
+    h.tick(12);
+    assert!(h.engine.session(44).is_some());
+
+    // Closing the last owner releases everything and is still not a fault.
+    h.send(wire::CLOSE, 3, &[]);
+    h.tick(12);
+    assert!(!h.engine.completed_state().held());
+    assert_eq!(h.engine.counters().failsafe, failsafe);
+}
+
+#[test]
 fn bootloader_gate_needs_120ms_and_a_quiet_bus() {
     let mut gate = BootloaderGate::default();
     let at = u32::MAX - 60;

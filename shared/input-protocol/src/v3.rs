@@ -12,6 +12,8 @@ pub const STATUS: u8 = 3;
 pub const BARRIER: u8 = 4;
 pub const RELEASE_ALL: u8 = 5;
 pub const BOOTLOADER: u8 = 6;
+/// Explicit teardown: frees the owner slot without counting a failsafe.
+pub const CLOSE: u8 = 7;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOUSE_MOVE: u8 = 32;
@@ -209,6 +211,7 @@ pub enum Command {
     Barrier,
     ReleaseAll,
     Bootloader,
+    Close,
     Key(KeyId, bool),
     Snapshot(InputState),
     MouseMove(i16, i16),
@@ -227,6 +230,7 @@ impl Command {
             Self::Barrier => (BARRIER, vec![]),
             Self::ReleaseAll => (RELEASE_ALL, vec![]),
             Self::Bootloader => (BOOTLOADER, vec![]),
+            Self::Close => (CLOSE, vec![]),
             Self::Key(k, d) => {
                 ensure!(k.valid(), "不支援的按鍵");
                 let mut p = pair(k.usage_page.to_le_bytes(), k.usage.to_le_bytes());
@@ -260,7 +264,12 @@ impl Command {
     pub fn expects_reply(&self) -> bool {
         matches!(
             self,
-            Self::Open | Self::Status | Self::Barrier | Self::ReleaseAll | Self::Bootloader
+            Self::Open
+                | Self::Status
+                | Self::Barrier
+                | Self::ReleaseAll
+                | Self::Bootloader
+                | Self::Close
         )
     }
 }
@@ -304,7 +313,21 @@ pub fn check_response(p: &Packet, session: u32, sequence: u32, opcode: u8) -> Re
     );
     let code = *p.payload.first().ok_or_else(|| anyhow::anyhow!("空回應"))?;
     if code != 0 {
-        bail!("裝置 v3 錯誤代碼 {code}");
+        bail!(
+            "{}",
+            match code {
+                1 => "裝置回報 framing 錯誤".to_string(),
+                2 => "裝置忙碌：同名 session 已存在，或八個名額已滿".to_string(),
+                3 => "裝置拒絕此輸入（參數不合法）".to_string(),
+                5 => "租約到期（超過 2 秒沒有心跳）".to_string(),
+                6 => "裝置回報 HID 傳送失敗".to_string(),
+                7 => "USB 重新連線或 reset".to_string(),
+                8 => "佇列溢位或輸出過期".to_string(),
+                9 => "序號重複".to_string(),
+                10 => "序號跳號".to_string(),
+                _ => format!("裝置 v3 錯誤代碼 {code}"),
+            }
+        );
     }
     Ok(())
 }

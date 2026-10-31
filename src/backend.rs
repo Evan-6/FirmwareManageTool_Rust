@@ -222,8 +222,9 @@ fn worker(
                             let _ = events.send(AppEvent::Devices(hid::enumerate()?));
                         }
                         AppCommand::Connect(device) => {
-                            if session.is_some() {
-                                require(&mut session)?.reset(&Cancellation::default())?;
+                            if let Some(active) = session.as_mut() {
+                                let _ = active.reset(&Cancellation::default());
+                                let _ = active.close(&Cancellation::default());
                             }
                             drop(session.take());
                             held = false;
@@ -237,13 +238,21 @@ fn worker(
                             session = Some(opened);
                         }
                         AppCommand::Disconnect => {
-                            if session.is_some() {
-                                require(&mut session)?.reset(&Cancellation::default())?;
-                            }
+                            // RELEASE_ALL proves the keys are physically up, CLOSE then
+                            // frees the slot so the next program does not have to wait
+                            // for the 2 s lease.
+                            let confirmed = match session.as_mut() {
+                                Some(active) => {
+                                    let confirmed = active.reset(&Cancellation::default()).is_ok();
+                                    let _ = active.close(&Cancellation::default());
+                                    confirmed
+                                }
+                                None => true,
+                            };
                             drop(session.take());
                             selected = None;
                             held = false;
-                            let _ = events.send(AppEvent::Cleanup(true));
+                            let _ = events.send(AppEvent::Cleanup(confirmed));
                             let _ = events.send(AppEvent::Disconnected);
                         }
                         AppCommand::Status => {
@@ -266,8 +275,9 @@ fn worker(
                             let _ = events.send(AppEvent::Status(status));
                         }
                         AppCommand::Upload(config) => {
-                            if session.is_some() {
-                                require(&mut session)?.reset(&work.cancel)?;
+                            if let Some(active) = session.as_mut() {
+                                active.reset(&work.cancel)?;
+                                let _ = active.close(&Cancellation::default());
                             }
                             drop(session.take());
                             held = false;
@@ -373,6 +383,7 @@ fn worker(
     }
     if let Some(mut active) = session.take() {
         let confirmed = active.reset(&Cancellation::default()).is_ok();
+        let _ = active.close(&Cancellation::default());
         let _ = events.send(AppEvent::Cleanup(confirmed));
     }
     let _ = events.send(AppEvent::Stopped);

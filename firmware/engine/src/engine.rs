@@ -94,6 +94,10 @@ impl InputEngine {
             self.sessions.get_mut(slot).lease_at = self.now;
             return;
         }
+        if op == wire::CLOSE {
+            self.close(slot);
+            return;
+        }
         if self.boot_requested {
             // A successful boot request has committed to an empty input state.
             return;
@@ -146,6 +150,23 @@ impl InputEngine {
                 seq,
             };
         }
+    }
+
+    /// Explicit teardown. The slot is free before the reply is written, and this
+    /// is deliberately *not* a fault: only a lease timeout counts a failsafe.
+    fn close(&mut self, slot: usize) {
+        let snapshot = *self.sessions.get(slot);
+        let id = snapshot.id;
+        let seq = snapshot.received;
+        self.discard_replies(id);
+        if self.boot_requested {
+            self.clear_boot();
+        }
+        *self.sessions.get_mut(slot) = Session::default();
+        if snapshot.state.held() || self.output.pending_for(id) != 0 {
+            self.cancel_owner(id, 0, slot);
+        }
+        self.result(wire::CLOSE, id, seq, 0);
     }
 
     fn release_or_boot(&mut self, slot: usize, op: u8, seq: u32) {

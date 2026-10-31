@@ -1,6 +1,8 @@
-//! Fixed capacities. The XIAO build has 264 KiB of RAM, so these match the
-//! shipping C++ engine exactly; they are not tuned per board.
+//! Fixed capacities. The XIAO build has 264 KiB of RAM.
 
+/// Eight concurrent owners, because the GUI, MSCV and EvanRemote are expected to
+/// run at the same time. Held state is the union of all of them; see
+/// `protocol-v3.md` for how per-session releases and leases interact.
 pub const SESSIONS: usize = 8;
 pub const OUTPUT_DEPTH: usize = 32;
 pub const RX_DEPTH: usize = 32;

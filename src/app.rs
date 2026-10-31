@@ -508,7 +508,8 @@ impl App {
             let health = if sample.hid != first.hid || sample.tx != first.tx {
                 RichText::new("傳輸失敗計數增加，請檢查線材／hub").color(Color32::LIGHT_RED)
             } else if sample.failsafe != first.failsafe {
-                RichText::new("有其他 session 失效（failsafe 增加）").color(Color32::YELLOW)
+                RichText::new("租約回收：有程式沒有送出 CLOSE（崩潰或直接拔線）")
+                    .color(Color32::YELLOW)
             } else {
                 RichText::new("傳輸計數穩定").color(Color32::from_rgb(0x6c, 0xd4, 0x8f))
             };

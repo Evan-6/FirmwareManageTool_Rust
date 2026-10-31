@@ -1,5 +1,7 @@
 //! Wire framing: the 63-byte payload that sits behind HID report id 12 (host to
-//! device) and 13 (device to host), plus the Feature 14 capability block.
+//! device) and 13 (device to host), plus the Feature 14 capability block. The
+//! header carries the session id and sequence; the device keeps up to eight of
+//! them alive at once.
 
 use crate::state::keyboard_supported;
 
@@ -9,6 +11,8 @@ pub const STATUS: u8 = 3;
 pub const BARRIER: u8 = 4;
 pub const RELEASE: u8 = 5;
 pub const BOOTLOADER: u8 = 6;
+/// Explicit teardown: frees the owner slot without counting a failsafe.
+pub const CLOSE: u8 = 7;
 pub const KEY: u8 = 16;
 pub const SNAPSHOT: u8 = 17;
 pub const MOVE: u8 = 32;
@@ -83,7 +87,7 @@ pub fn write32(p: &mut [u8], v: u32) {
 /// Payload length required by each opcode; `None` means the opcode is unknown.
 fn shape(op: u8, n: u8) -> Option<bool> {
     let expected = match op {
-        OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER => 0,
+        OPEN | HEARTBEAT | STATUS | BARRIER | RELEASE | BOOTLOADER | CLOSE => 0,
         KEY => 5,
         SNAPSHOT => 31,
         MOVE | ABSOLUTE | WHEEL => 4,

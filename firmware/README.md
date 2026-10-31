@@ -3,10 +3,12 @@
 低延遲 USB HID 韌體：主機透過 USB 下指令，裝置以硬體鍵盤與滑鼠身分送出輸入。
 指令走 **Vendor HID**（usage page `0xFF60`），**不列舉 CDC 序列埠、對外不露出 COM 埠**；
 提供鍵盤、相對滑鼠、5 鍵、垂直／水平滾輪，以及 failsafe 自動放開。
+**可同時連線八個控制程式**（GUI／MSCV／EvanRemote）：正常結束送 `CLOSE` 立即歸還名額，
+不會留給租約回收，也不計 failsafe。
 
 本分支只支援 **Seeed XIAO RP2040**，而且**只有 Rust**：Arduino sketch、TinyUSB 與 C++ 引擎
 已全部移除，正式韌體是 `firmware/app`（crate `xiao-firmware`）加 `firmware/engine`。
-線路協定索引見 **[PROTOCOL.md](PROTOCOL.md)**：只接受 Vendor HID v3，最多 8 個 session，沒有 v2／serial 回退。
+線路協定索引見 **[PROTOCOL.md](PROTOCOL.md)**：只接受 Vendor HID v3，最多 8 個 session（OPEN／CLOSE），沒有 v2／serial 回退。
 
 ## 資料夾架構
 
@@ -53,4 +55,4 @@ Feature 14 的 board id 固定為 2，USB 序號取自 flash unique id。
 | 映像 | Flash | RAM |
 | --- | --- | --- |
 | 舊 C++ sketch（arduino-pico 6.2.0 + TinyUSB，已刪除） | 90,792 B | 29,712 B |
-| Rust `firmware/app` | 28,016 B | 17,804 B |
+| Rust `firmware/app` | 28,292 B | 17,804 B |
