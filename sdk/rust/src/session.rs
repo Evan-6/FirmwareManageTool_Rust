@@ -30,7 +30,7 @@ impl Session {
         let report = transport
             .feature()?
             .ok_or_else(|| Error::new(ErrorCode::Disconnected, "no Feature 14 reply"))?;
-        let capabilities = Capabilities::parse(&report).map_err(string_error)?;
+        let capabilities = Capabilities::parse(&report).map_err(framing_error)?;
         let mut session = Self {
             transport,
             id: id.max(1),
@@ -94,7 +94,7 @@ impl Session {
             let Some(report) = self.transport.read(remaining.as_millis() as i32)? else {
                 continue;
             };
-            let packet = Packet::decode(&report, v3::IN_ID).map_err(string_error)?;
+            let packet = Packet::decode(&report, v3::IN_ID).map_err(framing_error)?;
             if packet.session != self.id {
                 crate::sdk_log!(
                     Level::Trace,
@@ -156,8 +156,15 @@ impl Drop for Session {
     }
 }
 
+/// A well-formed call failed: the caller passed something the SDK cannot encode.
 pub(crate) fn string_error(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Invalid, error.to_string())
+}
+
+/// A report did not parse. That is a wire fault, not a calling mistake, so it
+/// reports Framing like the protocol table says it should.
+pub(crate) fn framing_error(error: impl std::fmt::Display) -> Error {
+    Error::new(ErrorCode::Framing, error.to_string())
 }
 
 /// Non-zero, per-process-unique session ids.

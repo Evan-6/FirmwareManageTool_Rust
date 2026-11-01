@@ -330,13 +330,13 @@ struct Packet {
 
     std::array<std::uint8_t, REPORT_SIZE> encode(std::uint8_t id) const {
         if (id != OUT_ID && id != IN_ID) {
-            throw Error(ErrorCode::Invalid, "v3 reports use id 12 or 13");
+            throw Error(ErrorCode::Framing, "v3 reports use id 12 or 13");
         }
         if (payload.size() > MAX_PAYLOAD) {
-            throw Error(ErrorCode::Invalid, "v3 payload is at most 51 bytes");
+            throw Error(ErrorCode::Framing, "v3 payload is at most 51 bytes");
         }
         if (flags != 0) {
-            throw Error(ErrorCode::Invalid, "v3 flags must be zero");
+            throw Error(ErrorCode::Framing, "v3 flags must be zero");
         }
         std::array<std::uint8_t, REPORT_SIZE> report{};
         report[0] = id;
