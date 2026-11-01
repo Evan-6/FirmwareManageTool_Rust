@@ -108,6 +108,26 @@ func (e *Error) Error() string {
 
 type point struct{ X, Y int32 }
 
+// rawPacket mirrors gdb_packet; Payload is the DLL's allocation, released with
+// gdb_packet_free.
+type rawPacket struct {
+	Opcode   uint8
+	Flags    uint8
+	Session  uint32
+	Sequence uint32
+	Payload  *uint8
+	Len      uintptr
+}
+
+// Packet is one reply from Device.Command; every input command has none.
+type Packet struct {
+	Opcode   uint8
+	Flags    uint8
+	Session  uint32
+	Sequence uint32
+	Payload  []byte
+}
+
 type keyStep struct {
 	Page   uint16
 	Usage  uint16
@@ -172,6 +192,9 @@ var (
 	procBootloader     *syscall.LazyProc
 	procSetEvents      *syscall.LazyProc
 	procProfileDefault *syscall.LazyProc
+	procCommand        *syscall.LazyProc
+	procPacketFree     *syscall.LazyProc
+	procMoveRaw        *syscall.LazyProc
 	procMoveBy         *syscall.LazyProc
 	procMoveTo         *syscall.LazyProc
 	procMovePath       *syscall.LazyProc
@@ -234,6 +257,9 @@ func library() *syscall.LazyDLL {
 		procBootloader = dll.NewProc("gdb_bootloader")
 		procSetEvents = dll.NewProc("gdb_set_event_handler")
 		procProfileDefault = dll.NewProc("gdb_profile_default")
+		procCommand = dll.NewProc("gdb_command")
+		procPacketFree = dll.NewProc("gdb_packet_free")
+		procMoveRaw = dll.NewProc("gdb_move_raw")
 		procMoveBy = dll.NewProc("gdb_mouse_move_by")
 		procMoveTo = dll.NewProc("gdb_mouse_move_to")
 		procMovePath = dll.NewProc("gdb_mouse_move_path")
@@ -511,6 +537,46 @@ func (d *Device) Bootloader() error {
 	return check(code)
 }
 
+// Command sends one protocol command by opcode and payload and returns its
+// reply, or nil for the input commands that have none.
+//
+// This is the raw escape hatch: the same session, sequence numbers and error
+// codes as the typed calls, but the SDK's bookkeeping (held buttons, the mock
+// cursor) is not updated. The opcode and payload must name a command the
+// protocol defines; anything else fails with Invalid.
+func (d *Device) Command(opcode uint8, payload []byte) (*Packet, error) {
+	var data *uint8
+	if len(payload) > 0 {
+		data = &payload[0]
+	}
+	var raw rawPacket
+	code, _, _ := procCommand.Call(
+		d.handle,
+		uintptr(opcode),
+		uintptr(unsafe.Pointer(data)),
+		uintptr(len(payload)),
+		uintptr(unsafe.Pointer(&raw)),
+	)
+	if code != 0 {
+		return nil, check(code)
+	}
+	defer procPacketFree.Call(uintptr(unsafe.Pointer(&raw)))
+	if raw.Opcode == 0 {
+		return nil, nil
+	}
+	packet := &Packet{
+		Opcode:   raw.Opcode,
+		Flags:    raw.Flags,
+		Session:  raw.Session,
+		Sequence: raw.Sequence,
+	}
+	if raw.Payload != nil && raw.Len > 0 {
+		packet.Payload = make([]byte, raw.Len)
+		copy(packet.Payload, unsafe.Slice(raw.Payload, raw.Len))
+	}
+	return packet, nil
+}
+
 var (
 	callbackMu      sync.Mutex
 	nextCallbackID  uintptr = 1
@@ -574,6 +640,13 @@ func (m *Mouse) MoveBy(dx, dy int32, durationMs uint32, profile *Profile) error 
 		raw = &value
 	}
 	code, _, _ := procMoveBy.Call(m.device.handle, uintptr(intArg(dx)), uintptr(intArg(dy)), uintptr(durationMs), uintptr(unsafe.Pointer(raw)))
+	return check(code)
+}
+
+// MoveRaw moves relatively by any amount, split at the ±1024 report limit and
+// sent with no barrier; call Barrier where a completion guarantee matters.
+func (m *Mouse) MoveRaw(dx, dy int32) error {
+	code, _, _ := procMoveRaw.Call(m.device.handle, uintptr(intArg(dx)), uintptr(intArg(dy)))
 	return check(code)
 }
 

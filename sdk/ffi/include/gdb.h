@@ -88,6 +88,17 @@ typedef struct gdb_profile {
     int32_t min_step_px;
 } gdb_profile;
 
+/* One reply packet. The payload is owned by the caller until gdb_packet_free.
+   opcode == 0 means the command had no reply (every input opcode). */
+typedef struct gdb_packet {
+    uint8_t opcode;
+    uint8_t flags;       /* always 0 on the v3 wire */
+    uint32_t session;
+    uint32_t sequence;
+    uint8_t *payload;    /* NULL when len == 0 */
+    size_t len;
+} gdb_packet;
+
 /* user callback for connection events; message is NULL unless kind == ERROR */
 typedef void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *message);
 /* task callback: return 0 to report success, or a gdb_error value */
@@ -131,6 +142,9 @@ gdb_profile gdb_profile_default(void);
 
 /* Mouse. duration_ms == 0 picks a natural duration. profile may be NULL. */
 int32_t gdb_mouse_move_by(gdb_device *device, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile *profile);
+/* One relative move of any size: split at the +/-1024 report limit, no barrier.
+   The caller flushes with gdb_barrier() where a completion guarantee matters. */
+int32_t gdb_move_raw(gdb_device *device, int32_t dx, int32_t dy);
 int32_t gdb_mouse_move_to(gdb_device *device, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_move_path(gdb_device *device, const gdb_point *points, size_t count, uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_button(gdb_device *device, uint8_t button, bool down);
@@ -157,6 +171,17 @@ int32_t gdb_key_long_press(gdb_device *device, uint16_t page, uint16_t usage, ui
 int32_t gdb_keys_chord(gdb_device *device, const uint16_t *usages, size_t count, uint32_t hold_ms);
 int32_t gdb_keys_sequence(gdb_device *device, const gdb_key_step *steps, size_t count);
 int32_t gdb_type_text(gdb_device *device, const char *utf8, uint32_t interval_ms, uint32_t hold_ms, uint32_t jitter_ms);
+
+/* Raw command: the escape hatch, for callers that already speak the protocol.
+   It rides the same session, sequence numbers and reconnect path as every other
+   call, but the SDK's bookkeeping is skipped - held buttons and the mock cursor
+   are not updated, so prefer the typed calls. opcode and payload must name a
+   command the protocol defines; anything else fails with GDB_INVALID.
+   A control command fills *out; an input command has no reply and leaves it
+   zeroed. out may be NULL when the reply is not wanted. */
+int32_t gdb_command(gdb_device *device, uint8_t opcode, const uint8_t *payload, size_t len, gdb_packet *out);
+/* Releases the payload inside a packet from gdb_command; safe on a zeroed one. */
+void gdb_packet_free(gdb_packet *packet);
 
 /* Automation: one worker thread per scheduler, jobs run in (due, priority, seq) order. */
 gdb_scheduler *gdb_scheduler_new(gdb_device *device);

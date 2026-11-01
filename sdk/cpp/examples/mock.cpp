@@ -4,13 +4,21 @@
 //   GDBOX_LIBRARY=<repo>/target/debug/gdb.dll ./mock.exe
 
 #include <cassert>
+#include <atomic>
+#include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "gdb.hpp"
 
 int main() {
     std::cout << "abi " << gdb::abi_version() << " sdk " << gdb::version() << "\n";
+
+    // The sink is process-wide: install it before anything else can log.
+    std::atomic<int> lines{0};
+    gdb::set_log_level(5);
+    gdb::set_log_sink([&lines](int32_t, const std::string&) { ++lines; });
 
     auto device = gdb::Device::open_mock();
     const std::string info = device.info_json();
@@ -50,6 +58,21 @@ int main() {
 
     const std::string status = device.status_json();
     std::cout << "status " << status << "\n";
+
+    // Raw moves split at the report limit instead of failing.
+    device.mouse().move_raw(2400, -1200);
+
+    // Raw command: STATUS answers, MOUSE_MOVE is fire and forget.
+    const auto reply = device.command(0x06);
+    assert(reply.has_value());
+    assert(reply->opcode == 0x86);
+    assert(reply->payload.size() == 51);
+    assert(!device.command(0x12, {0x2c, 0x01, 0xd8, 0xff}).has_value());
+
+    assert(lines.load() > 0 && "the log sink saw nothing");
+    gdb::set_log_sink(nullptr);
+    gdb::set_log_level(0);
+
     device.close();
     std::cout << "cpp mock ok\n";
     return 0;

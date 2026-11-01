@@ -939,6 +939,7 @@ version = "0.1.0"
 dependencies = [
  "gdb",
  "gdb-motion",
+ "input-protocol",
  "serde_json",
 ]
 

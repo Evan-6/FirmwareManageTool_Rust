@@ -152,6 +152,52 @@ func TestLoggingReachesTheSink(t *testing.T) {
 	}
 }
 
+func TestCommandRoundTripsAStatusReply(t *testing.T) {
+	device := openMock(t)
+
+	reply, err := device.Command(0x06, nil)
+	if err != nil {
+		t.Fatalf("STATUS: %v", err)
+	}
+	if reply == nil {
+		t.Fatal("STATUS must answer")
+	}
+	if reply.Opcode != 0x86 || len(reply.Payload) != 51 || reply.Payload[0] != 0 {
+		t.Fatalf("unexpected STATUS reply: %+v", reply)
+	}
+
+	// MOUSE_MOVE has no reply: the call succeeds and returns nil.
+	reply, err = device.Command(0x12, []byte{0x2c, 0x01, 0xd8, 0xff})
+	if err != nil {
+		t.Fatalf("MOUSE_MOVE: %v", err)
+	}
+	if reply != nil {
+		t.Fatalf("an input command must not report a reply: %+v", reply)
+	}
+
+	var failure *Error
+	if _, err := device.Command(0x7f, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("expected Invalid for an unknown opcode, got %v", err)
+	}
+}
+
+func TestMoveRawSplitsLargeDeltas(t *testing.T) {
+	device := openMock(t)
+	if err := device.Mouse().MoveRaw(2400, -1200); err != nil {
+		t.Fatalf("MoveRaw: %v", err)
+	}
+	if err := device.Mouse().MoveRaw(-30000, 30000); err != nil {
+		t.Fatalf("MoveRaw with a large delta: %v", err)
+	}
+	// No barrier was sent by MoveRaw itself; the session still flushes cleanly.
+	if err := device.Barrier(); err != nil {
+		t.Fatalf("Barrier: %v", err)
+	}
+	if state, err := device.State(); err != nil || state != StateConnected {
+		t.Fatalf("state after raw moves = %v, %v", state, err)
+	}
+}
+
 func TestSchedulerOrderAndErrors(t *testing.T) {
 	device := openMock(t)
 	scheduler, err := device.Scheduler()

@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -91,6 +92,15 @@ struct KeyStep {
     uint16_t usage = 0;
     uint32_t hold_ms = 18;
     uint32_t gap_ms = 0;
+};
+
+// One reply packet from command(); opcode 0 means the command had no reply.
+struct Packet {
+    uint8_t opcode = 0;
+    uint8_t flags = 0;
+    uint32_t session = 0;
+    uint32_t sequence = 0;
+    std::vector<uint8_t> payload;
 };
 
 struct Profile {
@@ -197,6 +207,9 @@ struct Api {
     decltype(&gdb_bootloader) bootloader = nullptr;
     decltype(&gdb_set_event_handler) set_event_handler = nullptr;
     decltype(&gdb_profile_default) profile_default = nullptr;
+    decltype(&gdb_command) command = nullptr;
+    decltype(&gdb_packet_free) packet_free = nullptr;
+    decltype(&gdb_move_raw) move_raw = nullptr;
     decltype(&gdb_mouse_move_by) mouse_move_by = nullptr;
     decltype(&gdb_mouse_move_to) mouse_move_to = nullptr;
     decltype(&gdb_mouse_move_path) mouse_move_path = nullptr;
@@ -276,6 +289,9 @@ inline Api& api() {
         GDB_SYMBOL(bootloader, "gdb_bootloader")
         GDB_SYMBOL(set_event_handler, "gdb_set_event_handler")
         GDB_SYMBOL(profile_default, "gdb_profile_default")
+        GDB_SYMBOL(command, "gdb_command")
+        GDB_SYMBOL(packet_free, "gdb_packet_free")
+        GDB_SYMBOL(move_raw, "gdb_move_raw")
         GDB_SYMBOL(mouse_move_by, "gdb_mouse_move_by")
         GDB_SYMBOL(mouse_move_to, "gdb_mouse_move_to")
         GDB_SYMBOL(mouse_move_path, "gdb_mouse_move_path")
@@ -343,6 +359,36 @@ inline gdb_profile profile_or_default(const Profile* profile) {
     return api().profile_default();
 }
 
+// Frees a packet's payload however the scope is left.
+struct PacketGuard {
+    gdb_packet packet{};
+    PacketGuard() = default;
+    PacketGuard(const PacketGuard&) = delete;
+    PacketGuard& operator=(const PacketGuard&) = delete;
+    ~PacketGuard() { api().packet_free(&packet); }
+};
+
+// A log sink is process-wide, so it outlives every device. The function object
+// lives in this slot, and the ABI only ever receives its address.
+using LogSink = std::function<void(int32_t, const std::string&)>;
+
+inline std::shared_ptr<LogSink>& log_sink_slot() {
+    static std::shared_ptr<LogSink> slot;
+    return slot;
+}
+
+inline void log_trampoline(void* user, int32_t level, const char* message) {
+    auto* sink = static_cast<LogSink*>(user);
+    if (sink == nullptr || !*sink) {
+        return;
+    }
+    try {
+        (*sink)(level, message != nullptr ? std::string(message) : std::string());
+    } catch (...) {
+        // A throwing sink must not cross the ABI boundary.
+    }
+}
+
 }  // namespace detail
 
 using detail::api;
@@ -375,6 +421,11 @@ public:
                  const Profile* profile = nullptr) {
         auto raw = detail::profile_or_default(profile);
         detail::check(api().mouse_move_by(device_, dx, dy, duration_ms, &raw));
+    }
+    // One relative move of any size: split at the +/-1024 report limit and sent
+    // with no barrier, so flush with Device::barrier() where it matters.
+    void move_raw(int32_t dx, int32_t dy) {
+        detail::check(api().move_raw(device_, dx, dy));
     }
     void move_to(int32_t x, int32_t y, uint32_t duration_ms = 0,
                  const Profile* profile = nullptr) {
@@ -529,6 +580,31 @@ public:
     void barrier() { detail::check(api().barrier(raw())); }
     void bootloader() { detail::check(api().bootloader(raw())); }
 
+    // The raw escape hatch: one protocol command by opcode and payload. Same
+    // session and error codes as the typed calls, but the SDK's bookkeeping
+    // (held buttons, the mock cursor) is not updated. Input commands have no
+    // reply, so the result is empty for them.
+    std::optional<Packet> command(uint8_t opcode,
+                                  const std::vector<uint8_t>& payload = {}) {
+        detail::PacketGuard guard;
+        detail::check(api().command(raw(), opcode,
+                                    payload.empty() ? nullptr : payload.data(),
+                                    payload.size(), &guard.packet));
+        if (guard.packet.opcode == 0) {
+            return std::nullopt;
+        }
+        Packet packet;
+        packet.opcode = guard.packet.opcode;
+        packet.flags = guard.packet.flags;
+        packet.session = guard.packet.session;
+        packet.sequence = guard.packet.sequence;
+        if (guard.packet.payload != nullptr && guard.packet.len > 0) {
+            packet.payload.assign(guard.packet.payload,
+                                  guard.packet.payload + guard.packet.len);
+        }
+        return packet;
+    }
+
     void set_event_handler(std::function<void(int32_t, int32_t, std::string)> handler);
     void clear_event_handler();
 
@@ -637,6 +713,21 @@ inline std::unique_ptr<Scheduler> Device::scheduler() const {
 
 inline void set_log_level(int32_t level) {
     detail::check(api().set_log_level(static_cast<uint8_t>(level)));
+}
+
+// Routes SDK log lines to `sink`; a null sink turns it off again. The sink is
+// process-wide and stays alive until it is replaced or cleared. Logging follows
+// set_log_level(): nothing arrives while the level is off.
+inline void set_log_sink(detail::LogSink sink) {
+    if (!sink) {
+        detail::check(api().set_log_sink(nullptr, nullptr));
+        detail::log_sink_slot().reset();
+        return;
+    }
+    auto holder = std::make_shared<detail::LogSink>(std::move(sink));
+    // Stored before the ABI can call it, dropped only after it is unregistered.
+    detail::log_sink_slot() = holder;
+    detail::check(api().set_log_sink(&detail::log_trampoline, holder.get()));
 }
 
 inline std::string version() { return std::string(api().version()); }

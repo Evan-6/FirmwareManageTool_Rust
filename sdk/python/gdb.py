@@ -30,6 +30,7 @@ __all__ = [
     "Profile",
     "KeyStep",
     "Point",
+    "Packet",
     "Movement",
     "Mouse",
     "Keyboard",
@@ -116,6 +117,17 @@ class _KeyStep(ctypes.Structure):
     ]
 
 
+class _Packet(ctypes.Structure):
+    _fields_ = [
+        ("opcode", c_uint8),
+        ("flags", c_uint8),
+        ("session", c_uint32),
+        ("sequence", c_uint32),
+        ("payload", POINTER(c_uint8)),
+        ("len", c_size_t),
+    ]
+
+
 class _Profile(ctypes.Structure):
     _fields_ = [
         ("ease", c_int32),
@@ -195,10 +207,16 @@ for name in ("gdb_release_all", "gdb_barrier", "gdb_bootloader"):
     getattr(_D, name).restype = c_int32
 _D.gdb_set_event_handler.argtypes = [c_void_p, c_void_p, c_void_p]
 _D.gdb_set_event_handler.restype = c_int32
+_D.gdb_command.argtypes = [c_void_p, c_uint8, POINTER(c_uint8), c_size_t, POINTER(_Packet)]
+_D.gdb_command.restype = c_int32
+_D.gdb_packet_free.argtypes = [POINTER(_Packet)]
+_D.gdb_packet_free.restype = None
 _D.gdb_profile_default.restype = _Profile
 
 _D.gdb_mouse_move_by.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_by.restype = c_int32
+_D.gdb_move_raw.argtypes = [c_void_p, c_int32, c_int32]
+_D.gdb_move_raw.restype = c_int32
 _D.gdb_mouse_move_to.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_to.restype = c_int32
 _D.gdb_mouse_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
@@ -330,6 +348,17 @@ class KeyStep:
     gap_ms: int = 0
 
 
+@dataclass(frozen=True)
+class Packet:
+    """One reply packet; ``Device.command`` returns None instead of an empty one."""
+
+    opcode: int
+    flags: int
+    session: int
+    sequence: int
+    payload: bytes
+
+
 def _profile_pointer(profile: Profile | None):
     if profile is None:
         return POINTER(_Profile)()
@@ -382,6 +411,14 @@ class Mouse:
 
     def move_by(self, dx: int, dy: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
         _check(_D.gdb_mouse_move_by(self._handle(), dx, dy, duration_ms, _profile_pointer(profile)))
+
+    def move_raw(self, dx: int, dy: int) -> None:
+        """One relative move of any size: split at the ±1024 report limit, no barrier.
+
+        The caller flushes with ``device.barrier()`` where a completion guarantee
+        matters, which is what makes this the cheap path for remote control.
+        """
+        _check(_D.gdb_move_raw(self._handle(), dx, dy))
 
     def move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
         _check(_D.gdb_mouse_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile)))
@@ -619,6 +656,24 @@ class Device:
 
     def bootloader(self) -> None:
         _check(_D.gdb_bootloader(self._handle()))
+
+    def command(self, opcode: int, payload: bytes = b"") -> Packet | None:
+        """Sends one protocol command by opcode and payload; None when it has no reply.
+
+        The raw escape hatch for a host that already speaks the wire protocol:
+        same session, sequence numbers and error codes as the typed methods, but
+        the SDK's own bookkeeping (held buttons, the mock cursor) is not updated.
+        """
+        buffer = (c_uint8 * len(payload)).from_buffer_copy(payload) if payload else None
+        out = _Packet()
+        _check(_D.gdb_command(self._handle(), opcode, buffer, len(payload), byref(out)))
+        try:
+            if out.opcode == 0:
+                return None
+            data = ctypes.string_at(out.payload, out.len) if out.len else b""
+            return Packet(out.opcode, out.flags, out.session, out.sequence, data)
+        finally:
+            _D.gdb_packet_free(byref(out))
 
     def reconnect(self) -> None:
         _check(_D.gdb_reconnect(self._handle()))

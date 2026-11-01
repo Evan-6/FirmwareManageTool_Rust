@@ -21,6 +21,8 @@ use gdb_sdk::mock::MockHandle;
 use gdb_sdk::motion::{MotionOptions, Movement};
 use gdb_sdk::task::{Priority, Scheduler, TaskId};
 use gdb_sdk::{Button, Device, DeviceOptions, TypeTextConfig};
+use input_protocol::KeyId;
+use input_protocol::v3::{self, Command, InputState};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -174,6 +176,131 @@ impl GdbProfile {
             min_step_px: self.min_step_px,
         }
     }
+}
+
+/// One reply packet. The payload belongs to the caller until `gdb_packet_free`,
+/// and `opcode == 0` means the command had no reply at all.
+#[repr(C)]
+pub struct GdbPacket {
+    pub opcode: u8,
+    pub flags: u8,
+    pub session: u32,
+    pub sequence: u32,
+    /// Owned allocation, NULL when `len == 0`.
+    pub payload: *mut u8,
+    pub len: usize,
+}
+
+impl GdbPacket {
+    const fn empty() -> Self {
+        Self {
+            opcode: 0,
+            flags: 0,
+            session: 0,
+            sequence: 0,
+            payload: ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    fn from_packet(packet: v3::Packet) -> Self {
+        let boxed = packet.payload.into_boxed_slice();
+        let len = boxed.len();
+        let payload = if len == 0 {
+            ptr::null_mut()
+        } else {
+            Box::into_raw(boxed).cast::<u8>()
+        };
+        Self {
+            opcode: packet.opcode,
+            flags: packet.flags,
+            session: packet.session,
+            sequence: packet.sequence,
+            payload,
+            len,
+        }
+    }
+}
+
+/// Decodes one wire command into the typed command the SDK encodes.
+///
+/// The SDK sends typed `Command` values, so the C ABI translates the caller's
+/// `(opcode, payload)` into the matching variant: the frame that leaves is byte
+/// for byte the caller's, and the protocol's own range checks still apply.
+/// Opcodes the protocol does not define are `GDB_INVALID`.
+fn command_from_wire(opcode: u8, payload: &[u8]) -> gdb_sdk::Result<Command> {
+    let fixed = |command: Command| {
+        if payload.is_empty() {
+            Ok(command)
+        } else {
+            Err(Error::invalid(format!(
+                "opcode {opcode} takes no payload, got {} bytes",
+                payload.len()
+            )))
+        }
+    };
+    let pair = || -> gdb_sdk::Result<(i16, i16)> {
+        if payload.len() != 4 {
+            return Err(Error::invalid(format!(
+                "opcode {opcode} needs 4 payload bytes, got {}",
+                payload.len()
+            )));
+        }
+        Ok((
+            i16::from_le_bytes([payload[0], payload[1]]),
+            i16::from_le_bytes([payload[2], payload[3]]),
+        ))
+    };
+    Ok(match opcode {
+        v3::OPEN => fixed(Command::Open)?,
+        v3::CLOSE => fixed(Command::Close)?,
+        v3::HEARTBEAT => fixed(Command::Heartbeat)?,
+        v3::STATUS => fixed(Command::Status)?,
+        v3::BARRIER => fixed(Command::Barrier)?,
+        v3::RELEASE_ALL => fixed(Command::ReleaseAll)?,
+        v3::STATUS_EXT => fixed(Command::StatusExt)?,
+        v3::SESSION_LIST => fixed(Command::SessionList)?,
+        v3::BOOTLOADER => fixed(Command::Bootloader)?,
+        v3::KEY => {
+            if payload.len() != 5 {
+                return Err(Error::invalid(format!(
+                    "opcode {opcode} needs 5 payload bytes, got {}",
+                    payload.len()
+                )));
+            }
+            let key = KeyId {
+                usage_page: u16::from_le_bytes([payload[0], payload[1]]),
+                usage: u16::from_le_bytes([payload[2], payload[3]]),
+            };
+            Command::Key(key, payload[4] != 0)
+        }
+        v3::SNAPSHOT => Command::Snapshot(
+            InputState::decode(payload)
+                .map_err(|error| Error::invalid(format!("invalid snapshot: {error}")))?,
+        ),
+        v3::MOUSE_MOVE => {
+            let (dx, dy) = pair()?;
+            Command::MouseMove(dx, dy)
+        }
+        v3::MOUSE_BUTTONS => {
+            if payload.len() != 1 {
+                return Err(Error::invalid(format!(
+                    "opcode {opcode} needs 1 payload byte, got {}",
+                    payload.len()
+                )));
+            }
+            Command::MouseButtons(payload[0])
+        }
+        v3::WHEEL => {
+            let (vertical, horizontal) = pair()?;
+            Command::Wheel(vertical, horizontal)
+        }
+        _ => {
+            return Err(Error::invalid(format!(
+                "opcode {opcode} is not a command the protocol can send"
+            )));
+        }
+    })
 }
 
 unsafe fn motion_options(duration_ms: u32, profile: *const GdbProfile) -> MotionOptions {
@@ -464,6 +591,64 @@ pub extern "C" fn gdb_barrier(raw: *mut GdbDevice) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_bootloader(raw: *mut GdbDevice) -> i32 {
     code(guard(|| unsafe { device(raw) }?.device.bootloader()))
+}
+
+/// Sends one protocol command by its wire opcode and payload.
+///
+/// This is `Device::command`: the same session, sequence numbers and reconnect
+/// path as every other call, but the SDK's bookkeeping (held buttons, the mock
+/// cursor) is not updated. A control command leaves its reply in `out`, an
+/// input command leaves `out` zeroed. `out` may be NULL when the reply is not
+/// wanted, and its payload must be released with `gdb_packet_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_command(
+    raw: *mut GdbDevice,
+    opcode: u8,
+    payload: *const u8,
+    len: usize,
+    out: *mut GdbPacket,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let bytes: &[u8] = if len == 0 {
+            &[]
+        } else if payload.is_null() {
+            return Err(Error::invalid("payload is NULL but len is not zero"));
+        } else {
+            unsafe { std::slice::from_raw_parts(payload, len) }
+        };
+        let reply = handle.device.command(&command_from_wire(opcode, bytes)?)?;
+        if !out.is_null() {
+            let slot = unsafe { &mut *out };
+            *slot = match reply {
+                Some(packet) => GdbPacket::from_packet(packet),
+                None => GdbPacket::empty(),
+            };
+        }
+        Ok(())
+    }))
+}
+
+/// Releases a packet produced by `gdb_command`; safe on a zeroed packet.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_packet_free(raw: *mut GdbPacket) {
+    let Some(slot) = (unsafe { raw.as_mut() }) else {
+        return;
+    };
+    let (payload, len) = (slot.payload, slot.len);
+    *slot = GdbPacket::empty();
+    if !payload.is_null() && len > 0 {
+        unsafe { drop(Box::from_raw(ptr::slice_from_raw_parts_mut(payload, len))) };
+    }
+}
+
+/// One relative move of any size, split at the ±1024 report limit and sent with
+/// no barrier: `Device::mouse().move_raw`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_move_raw(raw: *mut GdbDevice, dx: i32, dy: i32) -> i32 {
+    code(guard(|| {
+        unsafe { device(raw) }?.device.mouse().move_raw(dx, dy)
+    }))
 }
 
 #[unsafe(no_mangle)]
@@ -946,4 +1131,109 @@ pub extern "C" fn gdb_scheduler_take_errors(raw: *mut GdbScheduler) -> *mut c_ch
             .collect();
         Ok(serde_json::Value::Array(body).to_string())
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn open_mock() -> *mut GdbDevice {
+        let raw = gdb_open_mock(1000, false, false);
+        assert!(!raw.is_null(), "the mock device did not open");
+        raw
+    }
+
+    fn writes(raw: *mut GdbDevice) -> Vec<v3::Packet> {
+        let handle = unsafe { &*raw };
+        handle
+            ._mock
+            .as_ref()
+            .expect("mock device without a handle")
+            .writes()
+    }
+
+    #[test]
+    fn command_writes_the_exact_frame_and_returns_the_reply() {
+        let raw = open_mock();
+        let frame = [0x2c, 0x01, 0xd8, 0xff]; // MOUSE_MOVE dx=300 dy=-40
+        let mut reply = GdbPacket::empty();
+        let result = gdb_command(raw, v3::MOUSE_MOVE, frame.as_ptr(), frame.len(), &mut reply);
+        assert_eq!(result, 0, "gdb_command rejected a valid frame");
+        assert_eq!(reply.opcode, 0, "an input command has no reply");
+
+        let sent = writes(raw);
+        let last = sent.last().expect("no frame left the session");
+        assert_eq!(last.opcode, v3::MOUSE_MOVE);
+        assert_eq!(last.payload, frame.to_vec());
+
+        // A control command hands back the device's own reply packet.
+        let result = gdb_command(raw, v3::STATUS, ptr::null(), 0, &mut reply);
+        assert_eq!(result, 0);
+        assert_eq!(reply.opcode, v3::STATUS | 0x80);
+        assert_eq!(reply.len, 51, "STATUS is 51 payload bytes");
+        assert_eq!(unsafe { *reply.payload }, 0, "STATUS result byte");
+        gdb_packet_free(&mut reply);
+        assert!(reply.payload.is_null() && reply.len == 0);
+
+        // An opcode the protocol does not define is the caller's mistake.
+        let result = gdb_command(raw, 0x7f, ptr::null(), 0, &mut reply);
+        assert_eq!(result, i32::from(ErrorCode::Invalid.as_u8()));
+        gdb_device_free(raw);
+    }
+
+    #[test]
+    fn move_raw_splits_at_the_report_limit_without_a_barrier() {
+        let raw = open_mock();
+        assert_eq!(gdb_move_raw(raw, 2400, -1200), 0);
+
+        let sent = writes(raw);
+        let moves: Vec<Vec<u8>> = sent
+            .iter()
+            .filter(|packet| packet.opcode == v3::MOUSE_MOVE)
+            .map(|packet| packet.payload.clone())
+            .collect();
+        assert_eq!(
+            moves,
+            vec![
+                vec![0x00, 0x04, 0x00, 0xfc], // (1024, -1024)
+                vec![0x00, 0x04, 0x50, 0xff], // (1024, -176)
+                vec![0x60, 0x01, 0x00, 0x00], // (352, 0)
+            ]
+        );
+        assert!(
+            sent.iter().all(|packet| packet.opcode != v3::BARRIER),
+            "move_raw must not flush the queue"
+        );
+        gdb_device_free(raw);
+    }
+
+    static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    extern "C" fn capture(_user: *mut c_void, level: i32, message: *const c_char) {
+        let text = unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned();
+        LINES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(format!("{level}:{text}"));
+    }
+
+    #[test]
+    fn log_sink_receives_a_line() {
+        gdb_set_log_level(Level::Trace as u8);
+        gdb_set_log_sink(Some(capture), ptr::null_mut());
+
+        gdb_device_free(open_mock());
+        gdb_set_log_sink(None, ptr::null_mut());
+        gdb_set_log_level(Level::Off as u8);
+
+        let lines = LINES.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(!lines.is_empty(), "the sink received nothing");
+        assert!(
+            lines.iter().any(|line| line.contains("opcode=")),
+            "no packet line reached the sink: {lines:?}"
+        );
+    }
 }

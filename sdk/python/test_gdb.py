@@ -153,6 +153,42 @@ class DeviceTests(unittest.TestCase):
         with self.assertRaises(gdb.GdbError):
             _ = device.info
 
+    def test_command_sends_a_frame_and_returns_the_reply(self):
+        with gdb.Device.open_mock() as device:
+            reply = device.command(0x06)  # STATUS
+            self.assertIsInstance(reply, gdb.Packet)
+            self.assertEqual(reply.opcode, 0x86)
+            self.assertEqual(len(reply.payload), 51)
+            self.assertEqual(reply.payload[0], 0)
+            self.assertEqual(reply.flags, 0)
+
+            # An input command is fire and forget: no reply at all.
+            self.assertIsNone(device.command(0x12, b"\x2c\x01\xd8\xff"))
+
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.command(0x7F)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+    def test_move_raw_chunks_large_deltas(self):
+        with gdb.Device.open_mock() as device:
+            device.mouse.move_raw(2400, -1200)
+            device.mouse.move_raw(-30_000, 30_000)
+            device.barrier()
+            self.assertEqual(device.state, gdb.ConnectionState.CONNECTED)
+
+    def test_log_sink_receives_a_line(self):
+        lines: list[str] = []
+        gdb.set_log_level(5)
+        gdb.set_log_sink(lambda _level, message: lines.append(message))
+        try:
+            with gdb.Device.open_mock():
+                pass
+        finally:
+            gdb.set_log_sink(None)
+            gdb.set_log_level(0)
+        self.assertTrue(lines)
+        self.assertTrue(any("opcode=" in line for line in lines))
+
 
 if __name__ == "__main__":
     os.environ.setdefault("GDBOX_LIBRARY", os.path.join("target", "debug", "gdb.dll"))
