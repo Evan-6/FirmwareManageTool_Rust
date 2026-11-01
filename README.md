@@ -90,24 +90,40 @@ bash scripts/build-rust-firmware.sh
 
 ## GDBOX SDK
 
-`sdk/` 是 Host SDK。權威實作是 Rust 的 crate `gdb`；C ABI（`gdb.dll`）加 C++／Python／Go 三個薄綁定是
-相容層，三個語言另外各有原生實作（`sdk/*/native/`），直接講 Vendor HID 協議、不載入 DLL。四份實作都以
-`shared/input-protocol` 的 vectors 對齊。本工具自己也走 SDK：裝置列舉與實體 HID 通道呼叫
+`sdk/` 是 Host SDK，只有兩層：權威實作是 Rust 的 crate `gdb`；其他語言一律走 C ABI（`gdb.dll`＋
+`include/gdb.h`），C++／Python／Go 三個薄綁定只把名字翻譯過去，本身沒有邏輯。C ABI 有兩種句柄：直接句柄
+涵蓋 session、輸入、查詢、錯誤與日誌，外加 `gdb_command`／`gdb_move_raw` 兩個逃生口；附加句柄
+（`gdb_attach`／`gdb_remote_*`）接上持有裝置的 broker 行程。燒錄、broker 的伺服端、watch、量測、
+錄製重播與螢幕目標都只在 Rust。本工具自己也走 SDK：裝置列舉與實體 HID 通道呼叫
 `gdb::Manager::list()`／`gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
 
 ```powershell
 cargo build -p gdb-ffi --release       # target/release/gdb.dll
-cargo test  -p gdb -p gdb-motion       # 44 個測試，免硬體
+cargo test  -p gdb -p gdb-motion       # 92 個測試，免硬體
 bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑）Go
 ```
 
 - 裝置管理：列舉、以序號或路徑連線、自動重連、多裝置、逾時與 11 種錯誤碼。
 - 滑鼠：相對／絕對移動、到點時間、線性／緩入／緩出／貝茲／自訂曲線、多段路徑、
   中途取消與改目標、五鍵、滾輪、拖曳、全部放開。
+- 多螢幕：絕對移動用 `MotionOptions::screen` 指定主螢幕、第 i 台螢幕或某個視窗
+  （`Primary`／`Monitor(i)`／`Window(hwnd)`，預設主螢幕），座標是虛擬桌面的實體像素，
+  點會被夾進目標矩形，只有「沒有任何螢幕涵蓋這個點」會回 `Unsupported`。
 - 鍵盤：按下／放開／單擊／長按、組合鍵、按鍵序列、文字輸入、全部放開。
 - 自動化：任務佇列、延遲、週期排程、優先級、暫停／恢復／取消、錯誤收集。
+- 多程式共用一支裝置：`gdb::broker` 讓一個行程持有裝置，其他行程透過具名管道
+  `\\.\pipe\gdbox-<名稱>` 下指令；單一指令原子、連續指令不原子，順序由呼叫端用
+  `barrier` 劃分。伺服端是 Rust，其他語言用 `gdb_attach`／`gdb_remote_*` 接上
+  （C++ `gdb::Remote`、Python `gdb.Remote`、Go `Attach`）。它不提供原始 HID 回報、
+  能力掃描、背景移動 worker 與燒錄。
+- 熱插拔：`gdb::watch` 以 500 ms 輪詢匯流排，回報插入／移除與 BOOTSEL 磁碟出現，
+  只列舉裝置、不讀寫 vendor collection，所以不會搶走擁有者的回覆。
+- 量測：`device.metrics()` 提供送收幀數、重試、重連、租約故障、逾時與往返延遲
+  （min／p50／p95／max）直方圖；記錄成本是一次 relaxed 原子加。
+- 錄製重播：`gdb::replay` 把「意圖」存成 JSON（`version` 1）再重播，可變速、
+  取消時送 RELEASE_ALL；種子與螢幕尺寸一併記錄，重播具決定性。
 - 開發者：統一錯誤碼、日誌等級與 sink（`Trace` 會記下每個送出／收到的封包與被跳過的他 session 封包）、
-  事件回呼、免硬體的模擬裝置、四語言範例與測試。
+  事件回呼、免硬體的模擬裝置、Rust 與三個綁定的範例與測試。
 
 細節與 API 對照表：[sdk/README.md](sdk/README.md)、[sdk/API.md](sdk/API.md)。
 
@@ -133,7 +149,7 @@ shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測�
 firmware/engine/    協議引擎（no_std、固定容量）：session、排程、狀態、LED
 firmware/app/       正式韌體：embassy-rp USB device、boot2、NeoPixel
 clients/            Rust／C++／Python 最小操作端（由協議常數產生）
-sdk/                GDBOX Host SDK：motion 數學、Rust 原生、C ABI、C++／Python／Go 綁定
+sdk/                GDBOX Host SDK：motion 數學、Rust 實作、C ABI、C++／Python／Go 薄綁定
 scripts/            建置、打包、preflight、清理、契約與客戶端檢查、CDP 檢查
 ```
 

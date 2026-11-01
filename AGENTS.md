@@ -10,9 +10,9 @@ firmware/               RP2040 firmware (embassy; firmware/app is its own worksp
 firmware/protocol-v3.md wire protocol: opcodes, payloads, lease rules
 shared/input-protocol   protocol constants, codecs, canonical client, test fake
 sdk/motion              gdb-motion: pure movement maths, no I/O
-sdk/rust                gdb: Device, Mouse, Keyboard, Scheduler, transport, mock, log
+sdk/rust                gdb: device, input, scheduler, broker, watch, metrics, replay, flash
 sdk/ffi                 C ABI (include/gdb.h) + cdylib
-sdk/cpp|python|go       thin bindings over the C ABI, plus native/ ports
+sdk/cpp|python|go       thin bindings over the C ABI: names only, no logic
 clients/                generated per-language protocol clients (hid_v3.*)
 docs/                   architecture: where things live and what a change touches
 examples/               hardware smoke test for the host path the GUI uses
@@ -43,9 +43,10 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
 
 ## Rules
 
-- One implementation per behaviour. The protocol lives in `shared/input-protocol`
-  and the SDK; the tool adapts, it does not reimplement. Feature logic goes into
-  `sdk/rust` first, then the C ABI if another language needs it.
+- One implementation per behaviour: the Rust crate `gdb` is it. The protocol
+  lives in `shared/input-protocol` and the SDK; the tool adapts, it does not
+  reimplement. A feature lands in `sdk/rust`, and reaches another language
+  through the C ABI — never as a second implementation.
 - `Device::command` is the only raw escape hatch; it skips SDK bookkeeping
   (held buttons, mock cursor), so prefer the typed methods.
 - The lease renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER and valid
