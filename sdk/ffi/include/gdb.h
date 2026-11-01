@@ -195,6 +195,80 @@ int32_t gdb_scheduler_wait_idle(gdb_scheduler *scheduler, uint32_t timeout_ms);
 /* JSON array of {taskId, code, message} for jobs that failed. */
 char *gdb_scheduler_take_errors(gdb_scheduler *scheduler);
 
+/* ------------------------------------------------------------------ attached
+ *
+ * A second, separate surface for the case the direct one cannot serve: only one
+ * process may read the vendor collection, so a broker process owns the device
+ * and everyone else attaches to it. The pipe is \\.\pipe\gdbox-<name> and the
+ * wire is one JSON object per line, which is gdb::broker on the Rust side.
+ *
+ * Nothing above changes: gdb_remote is its own handle type with its own symbols,
+ * so a program may link both and use a direct handle in the process that owns
+ * the device while every other process uses an attached one.
+ *
+ * Results reuse the direct shapes, so parsing does not change either:
+ *   gdb_remote_info      -> the object gdb_device_info returns
+ *   gdb_remote_status    -> the object gdb_status returns
+ *   gdb_remote_status_ext-> the object gdb_status_ext returns
+ *   gdb_remote_sessions  -> the array gdb_sessions returns
+ * Errors map to the same gdb_error codes, and a broker that is gone is
+ * GDB_DISCONNECTED.
+ *
+ * What an attached handle does not offer: raw HID reports, the capability scan,
+ * host-side motion workers (gdb_mouse_move_to, drags, typing, chords), flashing
+ * and the bootloader. Those need the collection itself, so they stay on the
+ * broker's side of the pipe.
+ */
+
+#define GDB_ABI_VERSION_MINOR 1u
+
+typedef struct gdb_remote gdb_remote;
+
+/* Attaches to the broker on \\.\pipe\gdbox-<name>; name may be NULL or "" for
+   "default". *out is zeroed first and receives the handle on success. Nothing
+   listening is GDB_DISCONNECTED; a name containing a path separator, or a NULL
+   out, is GDB_INVALID. The caller frees the handle with gdb_remote_free. */
+int32_t gdb_attach(const char* name, gdb_remote** out);
+
+/* Starts a broker when none is listening on <name>, then returns; attach
+   afterwards. The executable is taken from the GDBOX_BROKER_EXE environment
+   variable - a host built on this SDK, which serves `--gdbox-broker <name>` and
+   otherwise ignores the switch. The child is detached and outlives the caller.
+   With GDBOX_BROKER_EXE unset there is nothing to start and this returns
+   GDB_UNSUPPORTED (the ABI cannot guess the caller's own binary); when a broker
+   is already listening it returns GDB_OK and starts nothing. */
+int32_t gdb_remote_spawn(const char* name);
+
+/* Hangs up and releases the handle. */
+void gdb_remote_free(gdb_remote* remote);
+
+char* gdb_remote_info(const gdb_remote* remote);
+char* gdb_remote_status(const gdb_remote* remote);
+char* gdb_remote_status_ext(const gdb_remote* remote);
+char* gdb_remote_sessions(const gdb_remote* remote);
+
+int32_t gdb_remote_key(gdb_remote* remote, uint16_t page, uint16_t usage, bool down);
+/* One MOUSE_MOVE report; the deltas must fit the protocol's +/-1024. */
+int32_t gdb_remote_mouse_move(gdb_remote* remote, int16_t dx, int16_t dy);
+/* Relative move paced inside the broker; duration_ms == 0 picks a natural
+   speed and profile may be NULL. */
+int32_t gdb_remote_move_by(gdb_remote* remote, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile* profile);
+/* One relative move of any size: split at the +/-1024 report limit, no barrier. */
+int32_t gdb_remote_move_raw(gdb_remote* remote, int32_t dx, int32_t dy);
+/* Raw HID button mask: left=1, right=2, middle=4, back=8, forward=16. */
+int32_t gdb_remote_mouse_buttons(gdb_remote* remote, uint8_t bits);
+int32_t gdb_remote_wheel(gdb_remote* remote, int32_t vertical, int32_t horizontal);
+int32_t gdb_remote_barrier(gdb_remote* remote);
+int32_t gdb_remote_release_all(gdb_remote* remote);
+
+/* gdb_command over the pipe: the same frame leaves the broker's session and the
+   device's reply comes back in *out, filled exactly as gdb_command fills it. */
+int32_t gdb_remote_command(gdb_remote* remote, uint8_t opcode, const uint8_t* payload, size_t len, gdb_packet* out);
+
+/* Ends this client's connection. The handle stays valid and later calls report
+   GDB_DISCONNECTED until gdb_remote_free. */
+int32_t gdb_remote_close(gdb_remote* remote);
+
 #ifdef __cplusplus
 }
 #endif

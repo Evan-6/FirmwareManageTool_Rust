@@ -13,6 +13,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use gdb_motion::{Ease, HumanProfile};
+use gdb_sdk::broker;
 use gdb_sdk::error::{Error, ErrorCode};
 use gdb_sdk::event::{ConnectionState, EventHandler};
 use gdb_sdk::log::{self, Level};
@@ -20,15 +21,15 @@ use gdb_sdk::manager::Manager;
 use gdb_sdk::mock::MockHandle;
 use gdb_sdk::motion::{MotionOptions, Movement};
 use gdb_sdk::task::{Priority, Scheduler, TaskId};
-use gdb_sdk::{Button, Device, DeviceOptions, TypeTextConfig};
+use gdb_sdk::{Button, Device, DeviceInfo, DeviceOptions, TypeTextConfig};
 use input_protocol::KeyId;
-use input_protocol::v3::{self, Command, InputState};
+use input_protocol::v3::{self, Command, InputState, SessionInfo, Status, StatusExt};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 thread_local! {
     static LAST_ERROR: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
@@ -303,6 +304,54 @@ fn command_from_wire(opcode: u8, payload: &[u8]) -> gdb_sdk::Result<Command> {
     })
 }
 
+// The JSON shapes below are the binding contract: a direct handle and an
+// attached one hand out the same bytes, so a caller can switch between them
+// without touching its parsing.
+fn info_json(info: &DeviceInfo) -> gdb_sdk::Result<String> {
+    serde_json::to_string(info).map_err(|error| Error::io(error.to_string()))
+}
+
+fn status_json(status: &Status) -> String {
+    serde_json::json!({
+        "received": status.received,
+        "completed": status.completed,
+        "pending": status.pending,
+        "leaseMs": status.lease_ms,
+        "rx": status.rx,
+        "tx": status.tx,
+        "hid": status.hid,
+        "failsafe": status.failsafe,
+        "state": {
+            "modifiers": status.state.modifiers,
+            "keys": status.state.keys,
+            "consumer": status.state.consumer,
+            "buttons": status.state.buttons,
+        }
+    })
+    .to_string()
+}
+
+fn status_ext_json(ext: &StatusExt) -> String {
+    serde_json::json!({
+        "uptimeMs": ext.uptime_ms,
+        "lateMaxUs": ext.late_max_us,
+        "outDepth": ext.out_depth,
+        "rxDepth": ext.rx_depth,
+        "txDepth": ext.tx_depth,
+        "sessions": ext.sessions,
+        "lastFault": ext.last_fault,
+        "lastFaultAgeMs": ext.last_fault_age_ms,
+        "resetReason": ext.reset_reason,
+        "bootCount": ext.boot_count,
+        "build": ext.build,
+    })
+    .to_string()
+}
+
+fn sessions_json(sessions: &[SessionInfo]) -> gdb_sdk::Result<String> {
+    serde_json::to_string(sessions).map_err(|error| Error::io(error.to_string()))
+}
+
 unsafe fn motion_options(duration_ms: u32, profile: *const GdbProfile) -> MotionOptions {
     let profile = unsafe { profile.as_ref() }
         .copied()
@@ -521,7 +570,7 @@ pub extern "C" fn gdb_device_state(raw: *const GdbDevice) -> i32 {
 pub extern "C" fn gdb_device_info(raw: *const GdbDevice) -> *mut c_char {
     json_string(guard(|| {
         let info = unsafe { device(raw) }?.device.info();
-        serde_json::to_string(&info).map_err(|error| Error::io(error.to_string()))
+        info_json(&info)
     }))
 }
 
@@ -529,23 +578,7 @@ pub extern "C" fn gdb_device_info(raw: *const GdbDevice) -> *mut c_char {
 pub extern "C" fn gdb_status(raw: *const GdbDevice) -> *mut c_char {
     json_string(guard(|| {
         let status = unsafe { device(raw) }?.device.status()?;
-        Ok(serde_json::json!({
-            "received": status.received,
-            "completed": status.completed,
-            "pending": status.pending,
-            "leaseMs": status.lease_ms,
-            "rx": status.rx,
-            "tx": status.tx,
-            "hid": status.hid,
-            "failsafe": status.failsafe,
-            "state": {
-                "modifiers": status.state.modifiers,
-                "keys": status.state.keys,
-                "consumer": status.state.consumer,
-                "buttons": status.state.buttons,
-            }
-        })
-        .to_string())
+        Ok(status_json(&status))
     }))
 }
 
@@ -553,20 +586,7 @@ pub extern "C" fn gdb_status(raw: *const GdbDevice) -> *mut c_char {
 pub extern "C" fn gdb_status_ext(raw: *const GdbDevice) -> *mut c_char {
     json_string(guard(|| {
         let ext = unsafe { device(raw) }?.device.status_ext()?;
-        Ok(serde_json::json!({
-            "uptimeMs": ext.uptime_ms,
-            "lateMaxUs": ext.late_max_us,
-            "outDepth": ext.out_depth,
-            "rxDepth": ext.rx_depth,
-            "txDepth": ext.tx_depth,
-            "sessions": ext.sessions,
-            "lastFault": ext.last_fault,
-            "lastFaultAgeMs": ext.last_fault_age_ms,
-            "resetReason": ext.reset_reason,
-            "bootCount": ext.boot_count,
-            "build": ext.build,
-        })
-        .to_string())
+        Ok(status_ext_json(&ext))
     }))
 }
 
@@ -574,7 +594,7 @@ pub extern "C" fn gdb_status_ext(raw: *const GdbDevice) -> *mut c_char {
 pub extern "C" fn gdb_sessions(raw: *const GdbDevice) -> *mut c_char {
     json_string(guard(|| {
         let sessions = unsafe { device(raw) }?.device.sessions()?;
-        serde_json::to_string(&sessions).map_err(|error| Error::io(error.to_string()))
+        sessions_json(&sessions)
     }))
 }
 
@@ -610,21 +630,9 @@ pub extern "C" fn gdb_command(
 ) -> i32 {
     code(guard(|| {
         let handle = unsafe { device(raw) }?;
-        let bytes: &[u8] = if len == 0 {
-            &[]
-        } else if payload.is_null() {
-            return Err(Error::invalid("payload is NULL but len is not zero"));
-        } else {
-            unsafe { std::slice::from_raw_parts(payload, len) }
-        };
+        let bytes = unsafe { payload_bytes(payload, len) }?;
         let reply = handle.device.command(&command_from_wire(opcode, bytes)?)?;
-        if !out.is_null() {
-            let slot = unsafe { &mut *out };
-            *slot = match reply {
-                Some(packet) => GdbPacket::from_packet(packet),
-                None => GdbPacket::empty(),
-            };
-        }
+        store_packet(out, reply);
         Ok(())
     }))
 }
@@ -1133,10 +1141,261 @@ pub extern "C" fn gdb_scheduler_take_errors(raw: *mut GdbScheduler) -> *mut c_ch
     }))
 }
 
+// ------------------------------------------------------------------- remote
+//
+// A second surface, deliberately apart from the symbols above: a broker process
+// (`gdb::broker::Server`) owns the vendor collection and this handle is a
+// client of it, one JSON object per line over `\\.\pipe\gdbox-<name>`. Only one
+// process may read the collection, so this is how a second DLL client works at
+// all. The direct handle keeps its own shape, so a program may use both.
+//
+// What an attached handle does not offer: raw HID reports, the capability scan,
+// host-side motion workers (`start_move_to`, drags, `type_text`), flashing and
+// the bootloader. Those need the collection itself, which the broker holds.
+
+/// Names the executable `gdb_remote_spawn` starts: a host built on this SDK,
+/// which serves `--gdbox-broker <name>` and otherwise does its own job.
+pub const BROKER_EXE_ENV: &str = "GDBOX_BROKER_EXE";
+
+pub struct GdbRemote {
+    client: broker::Client,
+}
+
+/// `NULL` and `""` both mean the default pipe, as on the command line.
+fn remote_name(name: *const c_char) -> gdb_sdk::Result<String> {
+    if name.is_null() {
+        return Ok(broker::DEFAULT_NAME.to_string());
+    }
+    let text = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    if text.is_empty() {
+        Ok(broker::DEFAULT_NAME.to_string())
+    } else {
+        Ok(text)
+    }
+}
+
+unsafe fn remote<'a>(raw: *const GdbRemote) -> gdb_sdk::Result<&'a GdbRemote> {
+    unsafe { raw.as_ref() }.ok_or_else(|| Error::invalid("remote handle is NULL"))
+}
+
+unsafe fn payload_bytes<'a>(payload: *const u8, len: usize) -> gdb_sdk::Result<&'a [u8]> {
+    if len == 0 {
+        Ok(&[])
+    } else if payload.is_null() {
+        Err(Error::invalid("payload is NULL but len is not zero"))
+    } else {
+        Ok(unsafe { std::slice::from_raw_parts(payload, len) })
+    }
+}
+
+/// Writes the reply into the caller's slot, if it has one.
+fn store_packet(out: *mut GdbPacket, reply: Option<v3::Packet>) {
+    if out.is_null() {
+        return;
+    }
+    let slot = unsafe { &mut *out };
+    *slot = match reply {
+        Some(packet) => GdbPacket::from_packet(packet),
+        None => GdbPacket::empty(),
+    };
+}
+
+/// Attaches to the broker on `\\.\pipe\gdbox-<name>` and stores the handle in
+/// `*out`, which is zeroed first so a failure never leaves a stale pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_attach(name: *const c_char, out: *mut *mut GdbRemote) -> i32 {
+    code(guard(|| {
+        if out.is_null() {
+            return Err(Error::invalid("out pointer is NULL"));
+        }
+        unsafe { *out = ptr::null_mut() };
+        let name = remote_name(name)?;
+        let client = attach_client(&name)?;
+        unsafe { *out = Box::into_raw(Box::new(GdbRemote { client })) };
+        Ok(())
+    }))
+}
+
+/// A broker creates its next pipe instance only after the previous client has
+/// been taken, so a connect that lands in that moment is refused. Retry briefly:
+/// a listening broker answers at once, and an absent one still reports
+/// `GDB_DISCONNECTED` well inside a second.
+fn attach_client(name: &str) -> gdb_sdk::Result<broker::Client> {
+    const WAIT: Duration = Duration::from_millis(500);
+    const STEP: Duration = Duration::from_millis(20);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match broker::Client::connect(name) {
+            Ok(client) => return Ok(client),
+            Err(error) if error.code() != ErrorCode::Disconnected => return Err(error),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error);
+                }
+                std::thread::sleep(STEP);
+            }
+        }
+    }
+}
+
+/// Starts a broker when none is listening on `name`, then returns; attach
+/// afterwards. The executable comes from `GDBOX_BROKER_EXE`; without it there is
+/// nothing to start, so this is `GDB_UNSUPPORTED` (a broker already listening is
+/// `GDB_OK`). The child is detached and outlives the caller.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_spawn(name: *const c_char) -> i32 {
+    code(guard(|| {
+        let name = remote_name(name)?;
+        if broker::Client::available(&name) {
+            return Ok(());
+        }
+        let exe = std::env::var_os(BROKER_EXE_ENV)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Error::unsupported(format!(
+                    "no broker is listening on {name} and {BROKER_EXE_ENV} names no executable to \
+                     start; point it at a host that serves `--gdbox-broker {name}`"
+                ))
+            })?;
+        // The child is detached: dropping the client only ends this probe.
+        drop(broker::Client::connect_or_spawn(&name, &exe)?);
+        Ok(())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_free(raw: *mut GdbRemote) {
+    if raw.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(raw) });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_info(raw: *const GdbRemote) -> *mut c_char {
+    json_string(guard(|| {
+        let info = unsafe { remote(raw) }?.client.info()?;
+        info_json(&info)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_status(raw: *const GdbRemote) -> *mut c_char {
+    json_string(guard(|| {
+        let status = unsafe { remote(raw) }?.client.status()?;
+        Ok(status_json(&status))
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_status_ext(raw: *const GdbRemote) -> *mut c_char {
+    json_string(guard(|| {
+        let ext = unsafe { remote(raw) }?.client.status_ext()?;
+        Ok(status_ext_json(&ext))
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_sessions(raw: *const GdbRemote) -> *mut c_char {
+    json_string(guard(|| {
+        let sessions = unsafe { remote(raw) }?.client.sessions()?;
+        sessions_json(&sessions)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_key(raw: *mut GdbRemote, page: u16, usage: u16, down: bool) -> i32 {
+    code(guard(|| {
+        unsafe { remote(raw) }?.client.key(page, usage, down)
+    }))
+}
+
+/// One MOUSE_MOVE report; the deltas must fit the protocol's ±1024.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_mouse_move(raw: *mut GdbRemote, dx: i16, dy: i16) -> i32 {
+    code(guard(|| unsafe { remote(raw) }?.client.mouse_move(dx, dy)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_move_by(
+    raw: *mut GdbRemote,
+    dx: i32,
+    dy: i32,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { remote(raw) }?;
+        let options = unsafe { motion_options(duration_ms, profile) };
+        handle.client.move_by(dx, dy, options)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_move_raw(raw: *mut GdbRemote, dx: i32, dy: i32) -> i32 {
+    code(guard(|| unsafe { remote(raw) }?.client.move_raw(dx, dy)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_mouse_buttons(raw: *mut GdbRemote, bits: u8) -> i32 {
+    code(guard(|| unsafe { remote(raw) }?.client.mouse_buttons(bits)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_wheel(raw: *mut GdbRemote, vertical: i32, horizontal: i32) -> i32 {
+    code(guard(|| {
+        unsafe { remote(raw) }?.client.wheel(vertical, horizontal)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_barrier(raw: *mut GdbRemote) -> i32 {
+    code(guard(|| unsafe { remote(raw) }?.client.barrier()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_release_all(raw: *mut GdbRemote) -> i32 {
+    code(guard(|| unsafe { remote(raw) }?.client.release_all()))
+}
+
+/// `gdb_command` over the pipe: the broker sends the same frame and hands back
+/// the device's reply, and `out` is filled exactly as the direct call fills it.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_command(
+    raw: *mut GdbRemote,
+    opcode: u8,
+    payload: *const u8,
+    len: usize,
+    out: *mut GdbPacket,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { remote(raw) }?;
+        let bytes = unsafe { payload_bytes(payload, len) }?;
+        let reply = handle.client.command(&command_from_wire(opcode, bytes)?)?;
+        store_packet(out, reply);
+        Ok(())
+    }))
+}
+
+/// Hangs up on the broker; the handle stays valid and later calls report
+/// `GDB_DISCONNECTED` until it is freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_close(raw: *mut GdbRemote) -> i32 {
+    code(guard(|| {
+        unsafe { remote(raw) }?.client.close();
+        Ok(())
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::thread;
+    use std::time::Instant;
 
     fn open_mock() -> *mut GdbDevice {
         let raw = gdb_open_mock(1000, false, false);
@@ -1210,6 +1469,10 @@ mod tests {
 
     static LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+    /// The log sink is process-wide, so the two tests that touch it may not run
+    /// at the same time.
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
+
     extern "C" fn capture(_user: *mut c_void, level: i32, message: *const c_char) {
         let text = unsafe { CStr::from_ptr(message) }
             .to_string_lossy()
@@ -1222,6 +1485,7 @@ mod tests {
 
     #[test]
     fn log_sink_receives_a_line() {
+        let _serialised = LOG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         gdb_set_log_level(Level::Trace as u8);
         gdb_set_log_sink(Some(capture), ptr::null_mut());
 
@@ -1235,5 +1499,247 @@ mod tests {
             lines.iter().any(|line| line.contains("opcode=")),
             "no packet line reached the sink: {lines:?}"
         );
+    }
+
+    // ------------------------------------------------------------- remote
+
+    /// A name no other test and no other process uses.
+    fn unique_pipe(stem: &str) -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        format!(
+            "ffi-{}-{}-{stem}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn c_text(text: &str) -> CString {
+        CString::new(text).expect("the test name has no NUL")
+    }
+
+    fn message() -> String {
+        let mut buffer = [0 as c_char; 512];
+        gdb_last_error(buffer.as_mut_ptr(), buffer.len());
+        unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn last_code() -> i32 {
+        gdb_last_error(ptr::null_mut(), 0)
+    }
+
+    fn json_of(raw: *mut c_char) -> serde_json::Value {
+        assert!(!raw.is_null(), "no JSON came back: {}", message());
+        let text = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        gdb_string_free(raw);
+        serde_json::from_str(&text).expect("the reply is not JSON")
+    }
+
+    /// Top-level field names, so a test can prove two replies parse alike.
+    fn fields(value: &serde_json::Value) -> Vec<String> {
+        let mut names: Vec<String> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Attaches to a real broker on a real pipe with a mock device behind it.
+    ///
+    /// One test on purpose: the pipe, the two clients, the typed errors and the
+    /// dead broker are one story, and a second broker in the same process would
+    /// only add another name to clean up.
+    #[test]
+    fn attached_clients_share_one_device_and_a_dead_broker_is_reported() {
+        let _serialised = LOG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+
+        let name = unique_pipe("attach");
+        let (device, mock) = Manager::open_mock_with_handle(DeviceOptions::default()).unwrap();
+        let server = broker::Server::new(&name, broker::Source::Device(device)).unwrap();
+        let pipe = c_text(&name);
+
+        // Attached calls log through the same process-wide sink as direct ones.
+        gdb_set_log_level(Level::Info as u8);
+        gdb_set_log_sink(Some(capture), ptr::null_mut());
+
+        // A broker is already serving, so spawning is a no-op success.
+        assert_eq!(gdb_remote_spawn(pipe.as_ptr()), 0, "{}", message());
+
+        let mut first: *mut GdbRemote = ptr::null_mut();
+        assert_eq!(gdb_attach(pipe.as_ptr(), &mut first), 0, "{}", message());
+        assert!(!first.is_null(), "attach returned GDB_OK without a handle");
+
+        // A second client attaches while the first still holds the pipe.
+        let mut second: *mut GdbRemote = ptr::null_mut();
+        assert_eq!(
+            gdb_attach(pipe.as_ptr(), &mut second),
+            0,
+            "a second attach must work while the first is attached: {}",
+            message()
+        );
+        assert!(!second.is_null());
+
+        // The JSON is the direct call's JSON, field for field.
+        let direct = open_mock();
+        let info = json_of(gdb_remote_info(first));
+        assert_eq!(info["serial"], "MOCK");
+        assert_eq!(info["firmware"], "3.2.0");
+        assert_eq!(info["board"], 2);
+        assert_eq!(fields(&info), fields(&json_of(gdb_device_info(direct))));
+
+        let status = json_of(gdb_remote_status(second));
+        assert_eq!(status["leaseMs"], 2000);
+        assert_eq!(status["pending"], 0);
+        assert_eq!(
+            fields(&status),
+            fields(&json_of(gdb_status(direct))),
+            "attached and direct STATUS must parse alike"
+        );
+
+        let ext = json_of(gdb_remote_status_ext(first));
+        assert_eq!(ext["sessions"], 1);
+        assert_eq!(fields(&ext), fields(&json_of(gdb_status_ext(direct))));
+
+        let sessions = json_of(gdb_remote_sessions(second));
+        assert_eq!(sessions.as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            fields(&sessions[0]),
+            fields(&json_of(gdb_sessions(direct))[0])
+        );
+        gdb_device_free(direct);
+
+        // Both handles drive the same device session.
+        assert_eq!(gdb_remote_key(second, 7, 0x04, true), 0, "{}", message());
+        assert_eq!(gdb_remote_mouse_move(first, 10, -4), 0, "{}", message());
+        assert_eq!(gdb_remote_move_raw(second, 800, -300), 0, "{}", message());
+        assert_eq!(
+            gdb_remote_move_by(first, 60, -30, 10, ptr::null()),
+            0,
+            "{}",
+            message()
+        );
+        assert_eq!(gdb_remote_mouse_buttons(second, 1), 0, "{}", message());
+        assert_eq!(gdb_remote_wheel(first, -120, 0), 0, "{}", message());
+        assert_eq!(gdb_remote_barrier(first), 0, "{}", message());
+
+        let writes = mock.writes();
+        assert!(
+            writes.iter().any(|packet| packet.opcode == v3::KEY
+                && packet.payload.starts_with(&[0x07, 0x00, 0x04, 0x00])),
+            "the broker never saw the key from the second client"
+        );
+        assert!(
+            writes.iter().any(|packet| packet.opcode == v3::MOUSE_MOVE
+                && packet.payload == [0x0a, 0x00, 0xfc, 0xff]),
+            "the broker never saw the move from the first client"
+        );
+
+        assert_eq!(gdb_remote_release_all(second), 0, "{}", message());
+        assert_eq!(mock.held().buttons, 0, "release_all must reach the device");
+
+        // Errors arrive as the same codes the direct calls use.
+        let mut reply = GdbPacket::empty();
+        assert_eq!(
+            gdb_remote_command(first, 0x7f, ptr::null(), 0, &mut reply),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert!(message().contains("opcode 127"), "{}", message());
+        assert_eq!(
+            gdb_remote_command(first, v3::MOUSE_MOVE, [0x01].as_ptr(), 1, &mut reply),
+            i32::from(ErrorCode::Invalid.as_u8()),
+            "a truncated payload is the caller's mistake"
+        );
+        assert_eq!(
+            gdb_remote_command(first, v3::STATUS, ptr::null(), 0, &mut reply),
+            0,
+            "{}",
+            message()
+        );
+        assert_eq!(reply.opcode, v3::STATUS | 0x80);
+        assert_eq!(reply.len, 51);
+        gdb_packet_free(&mut reply);
+
+        // close() hangs that one client up; the other keeps working.
+        assert_eq!(gdb_remote_close(second), 0, "{}", message());
+        assert_eq!(
+            gdb_remote_key(second, 7, 0x04, false),
+            i32::from(ErrorCode::Disconnected.as_u8())
+        );
+        gdb_remote_free(second);
+        assert_eq!(gdb_remote_barrier(first), 0, "{}", message());
+
+        // A dead broker is GDB_DISCONNECTED, not a timeout or a crash.
+        server.shutdown();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !unsafe { &*first }.client.is_closed() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            unsafe { &*first }.client.is_closed(),
+            "the client never noticed the broker leaving"
+        );
+        assert!(
+            gdb_remote_status(first).is_null(),
+            "a dead broker must not answer"
+        );
+        assert_eq!(last_code(), i32::from(ErrorCode::Disconnected.as_u8()));
+        assert!(message().contains("broker"), "{}", message());
+        assert_eq!(
+            gdb_remote_move_raw(first, 10, 10),
+            i32::from(ErrorCode::Disconnected.as_u8())
+        );
+        gdb_remote_free(first);
+
+        let lines = LINES.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("broker: client attached")),
+            "an attached call must reach the process-wide sink: {lines:?}"
+        );
+        gdb_set_log_sink(None, ptr::null_mut());
+        gdb_set_log_level(Level::Off as u8);
+    }
+
+    #[test]
+    fn attach_reports_a_missing_broker_and_a_bad_name() {
+        let missing = c_text(&unique_pipe("nobody-listening"));
+
+        // The out pointer is cleared before the call can fail, so a caller that
+        // ignores the code never frees a stale handle.
+        let mut handle: *mut GdbRemote = ptr::null_mut();
+        assert_eq!(
+            gdb_attach(missing.as_ptr(), &mut handle),
+            i32::from(ErrorCode::Disconnected.as_u8())
+        );
+        assert!(handle.is_null());
+        assert!(!message().is_empty(), "a failure needs a message");
+
+        // A path separator would escape the pipe namespace.
+        let bad = c_text(r"nested/name");
+        let mut handle = ptr::null_mut();
+        assert_eq!(
+            gdb_attach(bad.as_ptr(), &mut handle),
+            i32::from(ErrorCode::Invalid.as_u8()),
+            "{}",
+            message()
+        );
+
+        // Caller mistakes, not crashes.
+        assert_eq!(
+            gdb_attach(missing.as_ptr(), ptr::null_mut()),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert_eq!(
+            gdb_remote_barrier(ptr::null_mut()),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_remote_free(ptr::null_mut());
     }
 }

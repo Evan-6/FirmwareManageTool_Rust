@@ -242,6 +242,24 @@ struct Api {
     decltype(&gdb_scheduler_resume) scheduler_resume = nullptr;
     decltype(&gdb_scheduler_wait_idle) scheduler_wait_idle = nullptr;
     decltype(&gdb_scheduler_take_errors) scheduler_take_errors = nullptr;
+    /* Attached surface: same header, separate symbols. */
+    decltype(&gdb_attach) attach = nullptr;
+    decltype(&gdb_remote_spawn) remote_spawn = nullptr;
+    decltype(&gdb_remote_free) remote_free = nullptr;
+    decltype(&gdb_remote_info) remote_info = nullptr;
+    decltype(&gdb_remote_status) remote_status = nullptr;
+    decltype(&gdb_remote_status_ext) remote_status_ext = nullptr;
+    decltype(&gdb_remote_sessions) remote_sessions = nullptr;
+    decltype(&gdb_remote_key) remote_key = nullptr;
+    decltype(&gdb_remote_mouse_move) remote_mouse_move = nullptr;
+    decltype(&gdb_remote_move_by) remote_move_by = nullptr;
+    decltype(&gdb_remote_move_raw) remote_move_raw = nullptr;
+    decltype(&gdb_remote_mouse_buttons) remote_mouse_buttons = nullptr;
+    decltype(&gdb_remote_wheel) remote_wheel = nullptr;
+    decltype(&gdb_remote_barrier) remote_barrier = nullptr;
+    decltype(&gdb_remote_release_all) remote_release_all = nullptr;
+    decltype(&gdb_remote_command) remote_command = nullptr;
+    decltype(&gdb_remote_close) remote_close = nullptr;
 };
 
 inline Api& api();
@@ -325,6 +343,28 @@ inline Api& api() {
         GDB_SYMBOL(scheduler_wait_idle, "gdb_scheduler_wait_idle")
         GDB_SYMBOL(scheduler_take_errors, "gdb_scheduler_take_errors")
 #undef GDB_SYMBOL
+        // The attached surface is loaded softly: a library from before it existed
+        // still serves every direct call, and only Remote reports the gap.
+#define GDB_OPTIONAL(field, name)                                                \
+    loaded.field = reinterpret_cast<decltype(loaded.field)>(symbol(loaded.module, name));
+        GDB_OPTIONAL(attach, "gdb_attach")
+        GDB_OPTIONAL(remote_spawn, "gdb_remote_spawn")
+        GDB_OPTIONAL(remote_free, "gdb_remote_free")
+        GDB_OPTIONAL(remote_info, "gdb_remote_info")
+        GDB_OPTIONAL(remote_status, "gdb_remote_status")
+        GDB_OPTIONAL(remote_status_ext, "gdb_remote_status_ext")
+        GDB_OPTIONAL(remote_sessions, "gdb_remote_sessions")
+        GDB_OPTIONAL(remote_key, "gdb_remote_key")
+        GDB_OPTIONAL(remote_mouse_move, "gdb_remote_mouse_move")
+        GDB_OPTIONAL(remote_move_by, "gdb_remote_move_by")
+        GDB_OPTIONAL(remote_move_raw, "gdb_remote_move_raw")
+        GDB_OPTIONAL(remote_mouse_buttons, "gdb_remote_mouse_buttons")
+        GDB_OPTIONAL(remote_wheel, "gdb_remote_wheel")
+        GDB_OPTIONAL(remote_barrier, "gdb_remote_barrier")
+        GDB_OPTIONAL(remote_release_all, "gdb_remote_release_all")
+        GDB_OPTIONAL(remote_command, "gdb_remote_command")
+        GDB_OPTIONAL(remote_close, "gdb_remote_close")
+#undef GDB_OPTIONAL
         return loaded;
     }();
     return api;
@@ -349,6 +389,7 @@ inline std::string take(char* text) {
 }
 
 using DeviceHandle = std::unique_ptr<gdb_device, decltype(&gdb_device_free)>;
+using RemoteHandle = std::unique_ptr<gdb_remote, decltype(&gdb_remote_free)>;
 using MovementHandle = std::unique_ptr<gdb_movement, decltype(&gdb_movement_free)>;
 using SchedulerHandle = std::unique_ptr<gdb_scheduler, decltype(&gdb_scheduler_free)>;
 
@@ -357,6 +398,20 @@ inline gdb_profile profile_or_default(const Profile* profile) {
         return profile->raw();
     }
     return api().profile_default();
+}
+
+// Remote needs the whole attached set: it arrived with one library version, so
+// checking one symbol's presence is enough to name the gap clearly.
+inline void require_remote_surface() {
+    const Api& loaded = api();
+    if (loaded.attach != nullptr && loaded.remote_free != nullptr &&
+        loaded.remote_info != nullptr && loaded.remote_status != nullptr &&
+        loaded.remote_command != nullptr && loaded.remote_close != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the attached surface; use a library that "
+                "exports gdb_attach");
 }
 
 // Frees a packet's payload however the scope is left.
@@ -528,6 +583,111 @@ private:
 };
 
 class Scheduler;
+
+// A client of a broker process: the device belongs to one program, and this is
+// how every other program drives it over \\.\pipe\gdbox-<name>.
+//
+//     auto remote = gdb::Remote::attach();          // "default"
+//     std::cout << remote.status_json();
+//     remote.move_raw(400, -120);
+//     remote.barrier();
+//
+// The JSON accessors return exactly what Device's return, so one parser serves
+// both. What an attached handle cannot do is what needs the collection itself:
+// absolute moves, drags, typing, chords, flashing and the bootloader.
+class Remote {
+public:
+    // NULL and "" both mean the default pipe.
+    static Remote attach(const std::string& name = std::string()) {
+        detail::require_remote_surface();
+        gdb_remote* raw = nullptr;
+        detail::check(api().attach(name.empty() ? nullptr : name.c_str(), &raw));
+        if (raw == nullptr) {
+            throw Error(ErrorCode::Io, "attach returned GDB_OK without a handle");
+        }
+        return Remote(raw);
+    }
+
+    // Starts a broker when none is listening (GDBOX_BROKER_EXE names the
+    // executable); attach afterwards.
+    static void spawn(const std::string& name = std::string()) {
+        detail::require_remote_surface();
+        detail::check(api().remote_spawn(name.empty() ? nullptr : name.c_str()));
+    }
+
+    Remote(Remote&&) noexcept = default;
+    Remote& operator=(Remote&&) noexcept = default;
+    Remote(const Remote&) = delete;
+    Remote& operator=(const Remote&) = delete;
+
+    bool valid() const { return handle_ != nullptr; }
+    gdb_remote* raw() const { return handle_.get(); }
+
+    std::string info_json() const { return detail::take(api().remote_info(raw())); }
+    std::string status_json() const { return detail::take(api().remote_status(raw())); }
+    std::string status_ext_json() const { return detail::take(api().remote_status_ext(raw())); }
+    std::string sessions_json() const { return detail::take(api().remote_sessions(raw())); }
+
+    void key(uint16_t page, uint16_t usage, bool down) {
+        detail::check(api().remote_key(raw(), page, usage, down));
+    }
+    // One MOUSE_MOVE report; the deltas must fit the +/-1024 of the protocol.
+    void mouse_move(int16_t dx, int16_t dy) {
+        detail::check(api().remote_mouse_move(raw(), dx, dy));
+    }
+    void move_by(int32_t dx, int32_t dy, uint32_t duration_ms = 0,
+                 const Profile* profile = nullptr) {
+        auto raw_profile = detail::profile_or_default(profile);
+        detail::check(api().remote_move_by(raw(), dx, dy, duration_ms, &raw_profile));
+    }
+    void move_raw(int32_t dx, int32_t dy) {
+        detail::check(api().remote_move_raw(raw(), dx, dy));
+    }
+    // Raw HID mask: left=1, right=2, middle=4, back=8, forward=16.
+    void mouse_buttons(uint8_t bits) {
+        detail::check(api().remote_mouse_buttons(raw(), bits));
+    }
+    void wheel(int32_t vertical, int32_t horizontal = 0) {
+        detail::check(api().remote_wheel(raw(), vertical, horizontal));
+    }
+    void barrier() { detail::check(api().remote_barrier(raw())); }
+    void release_all() { detail::check(api().remote_release_all(raw())); }
+
+    // Device::command over the pipe: same opcode, same reply shape.
+    std::optional<Packet> command(uint8_t opcode,
+                                  const std::vector<uint8_t>& payload = {}) {
+        detail::PacketGuard guard;
+        detail::check(api().remote_command(raw(), opcode,
+                                           payload.empty() ? nullptr : payload.data(),
+                                           payload.size(), &guard.packet));
+        if (guard.packet.opcode == 0) {
+            return std::nullopt;
+        }
+        Packet packet;
+        packet.opcode = guard.packet.opcode;
+        packet.flags = guard.packet.flags;
+        packet.session = guard.packet.session;
+        packet.sequence = guard.packet.sequence;
+        if (guard.packet.payload != nullptr && guard.packet.len > 0) {
+            packet.payload.assign(guard.packet.payload,
+                                  guard.packet.payload + guard.packet.len);
+        }
+        return packet;
+    }
+
+    // Hangs up; later calls throw ErrorCode::Disconnected.
+    void close() {
+        if (handle_) {
+            detail::check(api().remote_close(raw()));
+            handle_.reset();
+        }
+    }
+
+private:
+    explicit Remote(gdb_remote* raw) : handle_(raw, api().remote_free) {}
+
+    detail::RemoteHandle handle_{nullptr, api().remote_free};
+};
 
 class Device {
 public:
@@ -732,5 +892,7 @@ inline void set_log_sink(detail::LogSink sink) {
 
 inline std::string version() { return std::string(api().version()); }
 inline uint32_t abi_version() { return api().abi_version(); }
+// The header is the truth for the minor: gdb_attach arrived with 1.1.
+inline uint32_t abi_minor_version() { return GDB_ABI_VERSION_MINOR; }
 
 }  // namespace gdb

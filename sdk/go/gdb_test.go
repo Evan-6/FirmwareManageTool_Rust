@@ -5,6 +5,8 @@ package gdb
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,5 +253,59 @@ func TestSchedulerOrderAndErrors(t *testing.T) {
 	}
 	if atomic.LoadInt32(&ticks) < 2 {
 		t.Fatalf("periodic task did not run: %d", ticks)
+	}
+}
+
+// The attached surface. No broker runs here, so these cover what a caller can
+// rely on without one: the symbols, the parity with Device, and the typed errors.
+func TestRemoteAndDeviceShareTheSameNames(t *testing.T) {
+	// Method expressions: this stops compiling the day the two drift apart.
+	var _ func(*Device) (string, error) = (*Device).InfoJSON
+	var _ func(*Remote) (string, error) = (*Remote).InfoJSON
+	var _ func(*Device) (string, error) = (*Device).StatusJSON
+	var _ func(*Remote) (string, error) = (*Remote).StatusJSON
+	var _ func(*Device) (string, error) = (*Device).StatusExtJSON
+	var _ func(*Remote) (string, error) = (*Remote).StatusExtJSON
+	var _ func(*Device) (string, error) = (*Device).SessionsJSON
+	var _ func(*Remote) (string, error) = (*Remote).SessionsJSON
+	var _ func(*Device) error = (*Device).Barrier
+	var _ func(*Remote) error = (*Remote).Barrier
+	var _ func(*Device) error = (*Device).ReleaseAll
+	var _ func(*Remote) error = (*Remote).ReleaseAll
+	var _ func(*Device, uint8, []byte) (*Packet, error) = (*Device).Command
+	var _ func(*Remote, uint8, []byte) (*Packet, error) = (*Remote).Command
+	var _ func(*Device) error = (*Device).Close
+	var _ func(*Remote) error = (*Remote).Close
+}
+
+func TestRemoteAttachWithoutABrokerIsDisconnected(t *testing.T) {
+	remote, err := Attach(fmt.Sprintf("go-test-no-broker-%d", os.Getpid()))
+	if err == nil {
+		_ = remote.Close()
+		t.Fatal("attach succeeded with no broker listening")
+	}
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Disconnected {
+		t.Fatalf("err = %v, want a Disconnected *gdb.Error", err)
+	}
+	if failure.Message == "" {
+		t.Fatal("a failure needs a message")
+	}
+}
+
+func TestRemoteAttachRejectsABadName(t *testing.T) {
+	_, err := Attach(`nested/name`)
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("err = %v, want an Invalid *gdb.Error", err)
+	}
+}
+
+func TestRemoteSpawnWithoutAnExecutableIsUnsupported(t *testing.T) {
+	t.Setenv("GDBOX_BROKER_EXE", "")
+	err := Spawn(fmt.Sprintf("go-test-no-broker-%d", os.Getpid()))
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Unsupported {
+		t.Fatalf("err = %v, want an Unsupported *gdb.Error", err)
 	}
 }

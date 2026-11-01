@@ -29,6 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
+	ABIMinor   = 1
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -227,6 +228,24 @@ var (
 	procSchedResume    *syscall.LazyProc
 	procSchedWaitIdle  *syscall.LazyProc
 	procSchedErrors    *syscall.LazyProc
+
+	procAttach          *syscall.LazyProc
+	procRemoteSpawn     *syscall.LazyProc
+	procRemoteFree      *syscall.LazyProc
+	procRemoteClose     *syscall.LazyProc
+	procRemoteInfo      *syscall.LazyProc
+	procRemoteStatus    *syscall.LazyProc
+	procRemoteStatusExt *syscall.LazyProc
+	procRemoteSessions  *syscall.LazyProc
+	procRemoteKey       *syscall.LazyProc
+	procRemoteMouseMove *syscall.LazyProc
+	procRemoteMoveBy    *syscall.LazyProc
+	procRemoteMoveRaw   *syscall.LazyProc
+	procRemoteButtons   *syscall.LazyProc
+	procRemoteWheel     *syscall.LazyProc
+	procRemoteBarrier   *syscall.LazyProc
+	procRemoteRelease   *syscall.LazyProc
+	procRemoteCommand   *syscall.LazyProc
 )
 
 func library() *syscall.LazyDLL {
@@ -292,6 +311,23 @@ func library() *syscall.LazyDLL {
 		procSchedResume = dll.NewProc("gdb_scheduler_resume")
 		procSchedWaitIdle = dll.NewProc("gdb_scheduler_wait_idle")
 		procSchedErrors = dll.NewProc("gdb_scheduler_take_errors")
+		procAttach = dll.NewProc("gdb_attach")
+		procRemoteSpawn = dll.NewProc("gdb_remote_spawn")
+		procRemoteFree = dll.NewProc("gdb_remote_free")
+		procRemoteClose = dll.NewProc("gdb_remote_close")
+		procRemoteInfo = dll.NewProc("gdb_remote_info")
+		procRemoteStatus = dll.NewProc("gdb_remote_status")
+		procRemoteStatusExt = dll.NewProc("gdb_remote_status_ext")
+		procRemoteSessions = dll.NewProc("gdb_remote_sessions")
+		procRemoteKey = dll.NewProc("gdb_remote_key")
+		procRemoteMouseMove = dll.NewProc("gdb_remote_mouse_move")
+		procRemoteMoveBy = dll.NewProc("gdb_remote_move_by")
+		procRemoteMoveRaw = dll.NewProc("gdb_remote_move_raw")
+		procRemoteButtons = dll.NewProc("gdb_remote_mouse_buttons")
+		procRemoteWheel = dll.NewProc("gdb_remote_wheel")
+		procRemoteBarrier = dll.NewProc("gdb_remote_barrier")
+		procRemoteRelease = dll.NewProc("gdb_remote_release_all")
+		procRemoteCommand = dll.NewProc("gdb_remote_command")
 	})
 	return dll
 }
@@ -575,6 +611,202 @@ func (d *Device) Command(opcode uint8, payload []byte) (*Packet, error) {
 		copy(packet.Payload, unsafe.Slice(raw.Payload, raw.Len))
 	}
 	return packet, nil
+}
+
+// Remote is a client of a broker process: one program owns the device and this
+// is how every other program drives it, over \\.\pipe\gdbox-<name>.
+//
+//	remote, err := gdb.Attach("")          // the "default" pipe
+//	if err != nil { log.Fatal(err) }
+//	defer remote.Close()
+//	fmt.Println(remote.StatusJSON())
+//	remote.MoveRaw(400, -120)
+//	remote.Barrier()
+//
+// The JSON accessors return exactly what Device's return, so one parser serves
+// both. What an attached handle cannot do is what needs the collection itself:
+// absolute moves, drags, typing, chords, flashing and the bootloader.
+type Remote struct {
+	handle uintptr
+	name   string
+}
+
+// Attach connects to the broker on \\.\pipe\gdbox-<name>; "" means "default".
+// Nothing listening is Disconnected; a name with a path separator is Invalid.
+func Attach(name string) (*Remote, error) {
+	library()
+	var pointer uintptr
+	var code uintptr
+	if name == "" {
+		code, _, _ = procAttach.Call(0, uintptr(unsafe.Pointer(&pointer)))
+	} else {
+		value, err := syscall.BytePtrFromString(name)
+		if err != nil {
+			return nil, &Error{Code: Invalid, Message: err.Error()}
+		}
+		code, _, _ = procAttach.Call(uintptr(unsafe.Pointer(value)), uintptr(unsafe.Pointer(&pointer)))
+	}
+	if code != 0 {
+		return nil, check(code)
+	}
+	if pointer == 0 {
+		return nil, &Error{Code: IO, Message: "attach returned OK without a handle"}
+	}
+	if name == "" {
+		name = "default"
+	}
+	return &Remote{handle: pointer, name: name}, nil
+}
+
+// Spawn starts a broker when none is listening on name, then returns; attach
+// afterwards. The executable comes from GDBOX_BROKER_EXE, a host that serves
+// --gdbox-broker <name>; without it there is nothing to start and this is
+// Unsupported. A broker that is already listening is a no-op.
+func Spawn(name string) error {
+	library()
+	var code uintptr
+	if name == "" {
+		code, _, _ = procRemoteSpawn.Call(0)
+	} else {
+		value, err := syscall.BytePtrFromString(name)
+		if err != nil {
+			return &Error{Code: Invalid, Message: err.Error()}
+		}
+		code, _, _ = procRemoteSpawn.Call(uintptr(unsafe.Pointer(value)))
+	}
+	return check(code)
+}
+
+// Handle exposes the raw pointer (for debugging only).
+func (r *Remote) Handle() uintptr { return r.handle }
+
+// Name is the broker this handle is attached to ("default" when unnamed).
+func (r *Remote) Name() string { return r.name }
+
+// InfoJSON returns the device information as JSON, like Device.InfoJSON.
+func (r *Remote) InfoJSON() (string, error) {
+	pointer, _, _ := procRemoteInfo.Call(r.handle)
+	return take(pointer)
+}
+
+// StatusJSON returns STATUS as JSON, like Device.StatusJSON.
+func (r *Remote) StatusJSON() (string, error) {
+	pointer, _, _ := procRemoteStatus.Call(r.handle)
+	return take(pointer)
+}
+
+// StatusExtJSON returns STATUS_EXT as JSON, like Device.StatusExtJSON.
+func (r *Remote) StatusExtJSON() (string, error) {
+	pointer, _, _ := procRemoteStatusExt.Call(r.handle)
+	return take(pointer)
+}
+
+// SessionsJSON returns SESSION_LIST as JSON, like Device.SessionsJSON.
+func (r *Remote) SessionsJSON() (string, error) {
+	pointer, _, _ := procRemoteSessions.Call(r.handle)
+	return take(pointer)
+}
+
+// Key presses or releases one usage through the broker.
+func (r *Remote) Key(page, usage uint16, down bool) error {
+	code, _, _ := procRemoteKey.Call(r.handle, uintptr(page), uintptr(usage), boolArg(down))
+	return check(code)
+}
+
+// MouseMove sends one MOUSE_MOVE report; the deltas must fit ±1024 of the wire.
+func (r *Remote) MouseMove(dx, dy int16) error {
+	code, _, _ := procRemoteMouseMove.Call(r.handle, uintptr(intArg(int32(dx))), uintptr(intArg(int32(dy))))
+	return check(code)
+}
+
+// MoveBy moves relatively, paced inside the broker; durationMs 0 picks a
+// natural speed from the distance.
+func (r *Remote) MoveBy(dx, dy int32, durationMs uint32, profile *Profile) error {
+	var raw *rawProfile
+	if profile != nil {
+		value := profile.raw()
+		raw = &value
+	}
+	code, _, _ := procRemoteMoveBy.Call(r.handle, uintptr(intArg(dx)), uintptr(intArg(dy)), uintptr(durationMs), uintptr(unsafe.Pointer(raw)))
+	return check(code)
+}
+
+// MoveRaw moves relatively by any amount, split at the ±1024 report limit and
+// sent with no barrier; call Barrier where a completion guarantee matters.
+func (r *Remote) MoveRaw(dx, dy int32) error {
+	code, _, _ := procRemoteMoveRaw.Call(r.handle, uintptr(intArg(dx)), uintptr(intArg(dy)))
+	return check(code)
+}
+
+// MouseButtons sets the raw HID button mask: left=1, right=2, middle=4,
+// back=8, forward=16.
+func (r *Remote) MouseButtons(bits uint8) error {
+	code, _, _ := procRemoteButtons.Call(r.handle, uintptr(bits))
+	return check(code)
+}
+
+// Wheel scrolls; the range per axis is ±1024.
+func (r *Remote) Wheel(vertical, horizontal int32) error {
+	code, _, _ := procRemoteWheel.Call(r.handle, uintptr(intArg(vertical)), uintptr(intArg(horizontal)))
+	return check(code)
+}
+
+// Barrier waits for the device to finish the queued input.
+func (r *Remote) Barrier() error {
+	code, _, _ := procRemoteBarrier.Call(r.handle)
+	return check(code)
+}
+
+// ReleaseAll releases every key and button.
+func (r *Remote) ReleaseAll() error {
+	code, _, _ := procRemoteRelease.Call(r.handle)
+	return check(code)
+}
+
+// Command sends one protocol command by opcode and payload through the broker
+// and returns its reply, or nil for the input commands that have none.
+func (r *Remote) Command(opcode uint8, payload []byte) (*Packet, error) {
+	var data *uint8
+	if len(payload) > 0 {
+		data = &payload[0]
+	}
+	var raw rawPacket
+	code, _, _ := procRemoteCommand.Call(
+		r.handle,
+		uintptr(opcode),
+		uintptr(unsafe.Pointer(data)),
+		uintptr(len(payload)),
+		uintptr(unsafe.Pointer(&raw)),
+	)
+	if code != 0 {
+		return nil, check(code)
+	}
+	defer procPacketFree.Call(uintptr(unsafe.Pointer(&raw)))
+	if raw.Opcode == 0 {
+		return nil, nil
+	}
+	packet := &Packet{
+		Opcode:   raw.Opcode,
+		Flags:    raw.Flags,
+		Session:  raw.Session,
+		Sequence: raw.Sequence,
+	}
+	if raw.Payload != nil && raw.Len > 0 {
+		packet.Payload = make([]byte, raw.Len)
+		copy(packet.Payload, unsafe.Slice(raw.Payload, raw.Len))
+	}
+	return packet, nil
+}
+
+// Close hangs up on the broker and releases the handle.
+func (r *Remote) Close() error {
+	if r.handle == 0 {
+		return nil
+	}
+	code, _, _ := procRemoteClose.Call(r.handle)
+	procRemoteFree.Call(r.handle)
+	r.handle = 0
+	return check(code)
 }
 
 var (

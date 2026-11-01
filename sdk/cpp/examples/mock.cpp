@@ -69,6 +69,17 @@ int main() {
     assert(reply->payload.size() == 51);
     assert(!device.command(0x12, {0x2c, 0x01, 0xd8, 0xff}).has_value());
 
+    // The second surface loads from the same DLL and reports a missing broker
+    // as a typed error instead of crashing: attach is how a second program
+    // reaches a device another program holds.
+    try {
+        (void)gdb::Remote::attach("cpp-mock-no-broker");
+        assert(false && "no broker is listening under that name");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::Disconnected);
+        assert(std::string(error.what()).find("broker") != std::string::npos);
+    }
+
     assert(lines.load() > 0 && "the log sink saw nothing");
     gdb::set_log_sink(nullptr);
     gdb::set_log_level(0);

@@ -190,6 +190,68 @@ class DeviceTests(unittest.TestCase):
         self.assertTrue(any("opcode=" in line for line in lines))
 
 
+class RemoteTests(unittest.TestCase):
+    """The attached surface. No broker runs here, so these cover the contract a
+    caller can rely on without one: the symbols, the header, and the typed errors
+    that stand in for a broker that is not listening."""
+
+    SYMBOLS = (
+        "gdb_attach",
+        "gdb_remote_spawn",
+        "gdb_remote_free",
+        "gdb_remote_info",
+        "gdb_remote_status",
+        "gdb_remote_status_ext",
+        "gdb_remote_sessions",
+        "gdb_remote_key",
+        "gdb_remote_mouse_move",
+        "gdb_remote_move_by",
+        "gdb_remote_move_raw",
+        "gdb_remote_mouse_buttons",
+        "gdb_remote_wheel",
+        "gdb_remote_barrier",
+        "gdb_remote_release_all",
+        "gdb_remote_command",
+        "gdb_remote_close",
+    )
+
+    def test_the_library_exports_every_attached_symbol(self):
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 1)
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_attached_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        self.assertIn("typedef struct gdb_remote gdb_remote;", header)
+        self.assertIn("GDB_ABI_VERSION_MINOR", header)
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_attach_without_a_broker_is_disconnected(self):
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.Remote(f"python-test-no-broker-{os.getpid()}")
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.DISCONNECTED)
+
+    def test_attach_rejects_a_bad_name(self):
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.Remote("nested/name")
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+    def test_spawn_without_an_executable_is_unsupported(self):
+        saved = os.environ.pop("GDBOX_BROKER_EXE", None)
+        try:
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.Remote.spawn(f"python-test-no-broker-{os.getpid()}")
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
+        finally:
+            if saved is not None:
+                os.environ["GDBOX_BROKER_EXE"] = saved
+
+
 if __name__ == "__main__":
     os.environ.setdefault("GDBOX_LIBRARY", os.path.join("target", "debug", "gdb.dll"))
     unittest.main(verbosity=2)
