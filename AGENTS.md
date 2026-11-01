@@ -63,8 +63,9 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
 
 - Board firmware and tool must agree on the opcode table; a board flashed from an
   older commit answers the same bytes with different meanings.
-- Only one program may read the vendor collection: a second reader steals replies
-  and the loser's session dies.
+- Replies carry no address, so only one reader can take one: a second reader
+  steals it. `Ownership::Shared` expects that (one `Busy`, no reconnect) and
+  `probe` never touches the queue.
 - `ui/dist` is embedded at compile time; rebuild the shell after touching `ui/`.
 - FFI pointers are the caller's contract; strings returned by the library must be
   freed with `gdb_string_free`.
