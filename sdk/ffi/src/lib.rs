@@ -29,7 +29,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 thread_local! {
     static LAST_ERROR: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
@@ -1218,26 +1218,11 @@ pub extern "C" fn gdb_attach(name: *const c_char, out: *mut *mut GdbRemote) -> i
     }))
 }
 
-/// A broker creates its next pipe instance only after the previous client has
-/// been taken, so a connect that lands in that moment is refused. Retry briefly:
-/// a listening broker answers at once, and an absent one still reports
-/// `GDB_DISCONNECTED` well inside a second.
+/// A listening broker always has a spare instance, so one connect is enough; the
+/// bounded wait only distinguishes "nothing is listening" from "the broker is
+/// coming back".
 fn attach_client(name: &str) -> gdb_sdk::Result<broker::Client> {
-    const WAIT: Duration = Duration::from_millis(500);
-    const STEP: Duration = Duration::from_millis(20);
-    let deadline = Instant::now() + WAIT;
-    loop {
-        match broker::Client::connect(name) {
-            Ok(client) => return Ok(client),
-            Err(error) if error.code() != ErrorCode::Disconnected => return Err(error),
-            Err(error) => {
-                if Instant::now() >= deadline {
-                    return Err(error);
-                }
-                std::thread::sleep(STEP);
-            }
-        }
-    }
+    broker::Client::connect_timeout(name, Duration::from_millis(500))
 }
 
 /// Starts a broker when none is listening on `name`, then returns; attach
