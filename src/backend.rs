@@ -32,8 +32,8 @@ pub enum AppCommand {
     Latency(LatencyConfig),
     Mouse(crate::mouse::MouseRequest),
     TypeText(crate::typing::TypeTextConfig),
-    /// Game mode off/on: when disabled the worker stops polling the device and
-    /// only keeps the 500 ms heartbeat alive.
+    /// Game mode off/on: when disabled the worker stops polling the device; the
+    /// session's own heartbeat is what keeps the lease alive.
     SetDebug(bool),
     Chord(crate::typing::ChordConfig),
 }
@@ -235,9 +235,7 @@ fn worker(
 ) {
     let mut selected = None;
     let mut session: Option<Session> = None;
-    let mut held = false;
     let mut debug = true;
-    let mut heartbeat = Instant::now();
     let mut polled = Instant::now();
     let mut ext_polled = Instant::now();
     // Consecutive idle-poll failures; one is a hiccup, two mean the session is gone.
@@ -256,7 +254,6 @@ fn worker(
                                 let _ = active.close(&Cancellation::default());
                             }
                             drop(session.take());
-                            held = false;
                             selected = Some(device.clone());
                             let mut opened = hid::open(&device)?;
                             opened.synchronize(&work.cancel)?;
@@ -281,13 +278,11 @@ fn worker(
                             };
                             drop(session.take());
                             selected = None;
-                            held = false;
                             let _ = events.send(AppEvent::Cleanup(confirmed));
                             let _ = events.send(AppEvent::Disconnected);
                         }
                         AppCommand::Status => {
                             let status = require(&mut session)?.status(&work.cancel)?;
-                            held = status.buttons() != 0;
                             let _ = events.send(AppEvent::Status(status));
                         }
                         AppCommand::Reset if session.is_none() => {
@@ -297,7 +292,6 @@ fn worker(
                         }
                         AppCommand::Reset => {
                             require(&mut session)?.reset(&Cancellation::default())?;
-                            held = false;
                             let _ = events.send(AppEvent::Cleanup(true));
                             let status = require(&mut session)?.status(&Cancellation::default())?;
                             let _ = events.send(AppEvent::Status(status));
@@ -309,8 +303,6 @@ fn worker(
                                 &request.profile,
                                 &work.cancel,
                             )?;
-                            held = status.buttons() != 0;
-                            heartbeat = Instant::now();
                             let _ = events.send(AppEvent::Status(status));
                         }
                         AppCommand::SetDebug(enabled) => {
@@ -361,7 +353,6 @@ fn worker(
                                 ))?;
                             }
                             let status = active.status(&work.cancel)?;
-                            held = status.buttons() != 0;
                             let _ = events.send(AppEvent::Status(status));
                             let _ = events.send(AppEvent::Done);
                         }
@@ -385,7 +376,6 @@ fn worker(
                                 &work.cancel,
                             )?;
                             let status = active.status(&work.cancel)?;
-                            held = false;
                             let _ = events.send(AppEvent::Status(status));
                             let _ = events.send(AppEvent::Done);
                         }
@@ -395,7 +385,6 @@ fn worker(
                                 let _ = active.close(&Cancellation::default());
                             }
                             drop(session.take());
-                            held = false;
                             let mut observer = Observer {
                                 events: &events,
                                 choices: &choices,
@@ -417,7 +406,6 @@ fn worker(
                             let device = selected
                                 .clone()
                                 .ok_or_else(|| anyhow::anyhow!("請先連線"))?;
-                            held = false;
                             let mut report = if config.mode == Mode::Extreme {
                                 require(&mut session)?.reset(&work.cancel)?;
                                 drop(session.take());
@@ -458,7 +446,6 @@ fn worker(
                 }
                 if let Err(e) = result {
                     let _ = events.send(AppEvent::Error(format!("{e:#}")));
-                    held = false;
                     if selected.is_some() {
                         recover(&mut selected, &mut session, &events, debug);
                     }
@@ -469,22 +456,12 @@ fn worker(
                 let result = (|| -> Result<()> {
                     if let Some(active) = session.as_mut() {
                         active.poll()?;
-                        // The SDK keeps the 500 ms lease heartbeat on its own
-                        // thread, so the worker only polls the device here.
-                        if active.needs_heartbeat(held)
-                            && heartbeat.elapsed() >= active.heartbeat_interval()
-                        {
-                            active.input(
-                                input_protocol::v3::Command::Heartbeat,
-                                &Cancellation::default(),
-                            )?;
-                            heartbeat = Instant::now();
-                        }
+                        // The session's own 500 ms heartbeat keeps the lease
+                        // alive; the worker only polls the device here.
                         // Live telemetry: keep the STATUS panel moving even when
                         // the user is not pressing anything.
                         if debug && polled.elapsed() >= STATUS_POLL {
                             let status = active.status(&Cancellation::default())?;
-                            held = status.buttons() != 0;
                             polled = Instant::now();
                             let _ = events.send(AppEvent::Status(status));
                         }
@@ -519,7 +496,6 @@ fn worker(
                             misses = 0;
                             let _ =
                                 events.send(AppEvent::Error(format!("連線中斷／心跳失敗：{e:#}")));
-                            held = false;
                             recover(&mut selected, &mut session, &events, debug);
                         }
                     }

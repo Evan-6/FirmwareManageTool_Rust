@@ -14,7 +14,7 @@ use anyhow::{Result, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Mutex,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use transport::sdk_error;
 
@@ -51,24 +51,14 @@ static EVENTS: Mutex<VecDeque<ResponseEvent>> = Mutex::new(VecDeque::new());
 static TRACES: Mutex<usize> = Mutex::new(0);
 const EVENT_LINES: usize = 512;
 
-/// `false` (the default) drops heartbeat and successful-poll frames and never
-/// prints a raw payload array: the log is for the person driving the tool, not a
-/// packet dump.
-static VERBOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Shows every frame, payload included. The SDK's own log sink has the same
-/// information; this only decides what reaches the debug pane.
-pub fn set_verbose(enabled: bool) {
-    VERBOSE.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
+/// Drops heartbeat and successful-poll frames and never prints a raw payload
+/// array: the log is for the person driving the tool, not a packet dump.
 fn record(level: gdb::Level, line: &str) {
     if level != gdb::Level::Trace {
         return;
     }
-    let verbose = VERBOSE.load(std::sync::atomic::Ordering::Relaxed);
     let text = match Frame::parse(line) {
-        Some(frame) if verbose || !frame.is_noise() => frame.describe(),
+        Some(frame) if !frame.is_noise() => frame.describe(),
         Some(_) => return,
         None => line.to_string(),
     };
@@ -541,16 +531,6 @@ impl Session {
     /// SDK call below is not interruptible: it blocks up to its 1000 ms timeout.
     pub fn wait_until(&mut self, deadline: Instant, cancel: &Cancellation) -> Result<()> {
         crate::platform::wait_until(deadline, cancel)
-    }
-
-    /// The SDK keeps the 500 ms lease heartbeat on its own thread, so the worker
-    /// must not send a second one on the same session.
-    pub fn needs_heartbeat(&self, _held: bool) -> bool {
-        false
-    }
-
-    pub fn heartbeat_interval(&self) -> Duration {
-        Duration::from_millis(500)
     }
 }
 

@@ -1,13 +1,7 @@
-//! Vendor HID v3 identity and UI status models.
+//! The wire types the UI shows: `Hello` and `Status`. Identity and usage live in `gdb`.
 pub use input_protocol::{KeyId, v3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-/// The only identity this tool talks to. Older boards used a different one and are
-/// deliberately not recognised: they speak the old protocol, so connecting to them
-/// would only produce confusing failures.
-pub const IDENTITY: (u16, u16) = (0x03f0, 0x0024);
-pub const USAGE_PAGE: u16 = 0xff60;
-pub const USAGE: u16 = 0x61;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hello {

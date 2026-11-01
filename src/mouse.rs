@@ -203,6 +203,12 @@ fn move_to(
     move_along_trajectory(session, &nodes, screen, cancel, platform::screen_and_cursor)
 }
 
+/// How long past the last node the loop keeps retrying. The SDK's absolute move
+/// (`gdb::motion`) gives up after the same 500 ms, so the same target must not
+/// fail earlier here than it does through `gdb::Device::move_to`. The SDK inlines
+/// the budget instead of exporting it; this constant has to move with it.
+const ARRIVAL_SLACK: Duration = Duration::from_millis(500);
+
 // Trajectory nodes are host targets. Only relative deltas cross the USB channel.
 // Feedback compensates for Windows sensitivity/acceleration and delayed delivery.
 //
@@ -218,8 +224,7 @@ fn move_along_trajectory(
 ) -> Result<()> {
     ensure!(!nodes.is_empty(), "移動路徑不得為空");
     let started = Instant::now();
-    let deadline =
-        started + Duration::from_millis(nodes.last().unwrap().at_ms) + Duration::from_millis(300);
+    let deadline = started + Duration::from_millis(nodes.last().unwrap().at_ms) + ARRIVAL_SLACK;
     let mut tracker = RelativeTracker::default();
     let mut index = 0;
     while Instant::now() < deadline {

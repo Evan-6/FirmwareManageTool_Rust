@@ -4,56 +4,24 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Screen {
-    pub width: i32,
-    pub height: i32,
-}
+pub use gdb_motion::Screen;
 #[cfg(windows)]
 pub fn screen_and_cursor() -> Result<(Screen, (i32, i32))> {
-    use windows_sys::Win32::{
-        Foundation::POINT,
-        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint},
-        UI::WindowsAndMessaging::GetPhysicalCursorPos,
-    };
-    unsafe {
-        let mut cursor = POINT { x: 0, y: 0 };
-        if GetPhysicalCursorPos(&mut cursor) == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info: MONITORINFO = std::mem::zeroed();
-        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if GetMonitorInfoW(monitor, &mut info) == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        let screen = Screen {
-            width: info.rcMonitor.right - info.rcMonitor.left,
-            height: info.rcMonitor.bottom - info.rcMonitor.top,
-        };
-        Ok((
-            screen,
-            (
-                cursor.x - info.rcMonitor.left,
-                cursor.y - info.rcMonitor.top,
-            ),
-        ))
-    }
+    gdb::platform::screen_and_cursor().map_err(read_failure)
 }
 #[cfg(not(windows))]
 pub fn screen_and_cursor() -> Result<(Screen, (i32, i32))> {
     bail!("滑鼠實體座標功能僅支援 Windows")
 }
 
+#[cfg(windows)]
+fn read_failure(error: gdb::Error) -> anyhow::Error {
+    anyhow::anyhow!("讀取游標與螢幕資訊失敗：{error}")
+}
+
+/// The same DPI setting `gdb::platform` applies on its own paths.
 pub fn enable_dpi_awareness() {
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::UI::HiDpi::{
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
-        };
-        // The embedded manifest also sets this; ERROR_ACCESS_DENIED means already configured.
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
+    gdb::platform::enable_dpi_awareness();
 }
 pub fn key_a_down() -> bool {
     #[cfg(windows)]
@@ -200,14 +168,6 @@ pub fn firmware_dir() -> PathBuf {
         }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("firmware")
-}
-
-pub fn locate_program(name: &str) -> Option<PathBuf> {
-    gdb::platform::locate_program(name)
-}
-
-pub fn boot_drives() -> Result<Vec<PathBuf>> {
-    Ok(gdb::flash::drives()?)
 }
 
 pub fn wait_until(deadline: Instant, cancel: &crate::cancel::Cancellation) -> Result<()> {
