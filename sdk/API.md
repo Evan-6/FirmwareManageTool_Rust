@@ -1,32 +1,19 @@
 # GDBOX API reference
 
-`include/gdb.h` is the contract; this file names the same operations in every
-layer. Rust is `gdb`, C++ is `gdb::`, Python is module `gdb`, Go is package
-`gdb`. Every failure raises or returns the same `ErrorCode`.
+`include/gdb.h` is the contract; every other layer names the same operations
+differently and none of them adds behaviour. Rust is `gdb`, C++ is `gdb::`,
+Python is module `gdb`, Go is package `gdb`. Start with [README.md](README.md)
+for the handle you want and a working call.
 
-Rust is the implementation and `include/gdb.h` is the ABI every other language
-goes through. The C++ header (`sdk/cpp/gdb.hpp`), the Python module
-(`sdk/python/gdb.py`) and the Go package (`sdk/go/gdb.go`) are name translation
-over that header: same calls, adapted spellings, no behaviour of their own. A
-language without a binding calls the `gdb_*` functions directly — C#, JNI, Node
-and Godot do exactly what the three bindings do.
-
-`watch`, `metrics` and `replay` are Rust-only, as is choosing a screen for an
-absolute move, and so is the broker's server side. They are under their own
-headings below and have no counterpart in `gdb.h`, the C++ header, the Python
-module or the Go package. A broker *client* does have one: `gdb_attach` and the
-`gdb_remote_*` calls carry it, wrapped as `gdb::Remote`, `gdb.Remote` and
-`gdb.Attach`. So does presence: `gdb_probe`, `gdb_probe_all` and the
-`gdb_observer_*` handle in every layer.
-
-## Naming map
+## Symbol map
 
 | Concept | Rust | C++ | Python | Go |
 | --- | --- | --- | --- | --- |
 | open by selector | `Manager::open(sel, opts)` | `Device::open(sel)` | `Device.open(sel)` | `Open(sel, …)` |
-| open the mock | `Manager::open_mock_with_handle` | `Device::open_mock` | `Device.open_mock` | `OpenMock` |
+| open the mock | `Manager::open_mock` | `Device::open_mock` | `Device.open_mock` | `OpenMock` |
 | open for a board others drive too | `Device::open_shared(sel, opts)` | `Device::open_shared(sel)` | `Device.open(sel, shared=True)` | `OpenShared(sel, …)` |
 | open the shared mock | `Device::open_mock_shared(opts)` | `Device::open_mock_shared()` | `Device.open_mock(shared=True)` | `OpenMockShared(…)` |
+| device list | `Manager::list` | `list_json()` | `list_devices()` | `ListJSON()` |
 | replies that belonged to somebody else | `device.stolen_frames()` | `stolen_frames()` | `.stolen_frames` | `StolenFrames()` |
 | info | `device.info()` | `info_json()` | `.info` | `InfoJSON()` |
 | status | `device.status()` | `status_json()` | `.status` | `StatusJSON()` |
@@ -42,9 +29,9 @@ module or the Go package. A broker *client* does have one: `gdb_attach` and the
 | log sink | `log::set_sink(fn)` | `set_log_sink(fn)` | `set_log_sink(fn)` | `SetLogSink(fn)` |
 | relative move | `move_by(dx, dy, opts)` | `move_by(dx, dy, ms)` | `.move_by(dx, dy, ms)` | `MoveBy(dx, dy, ms, p)` |
 | raw relative move (no barrier) | `move_raw(dx, dy)` | `move_raw(dx, dy)` | `.move_raw(dx, dy)` | `MoveRaw(dx, dy)` |
-| raw command passthrough | `command(&Command)` | `command(opcode, payload)` | `.command(opcode, payload)` | `Command(opcode, payload)` |
 | absolute move | `move_to(x, y, opts)` | `move_to(x, y, ms)` | `.move_to(x, y, ms)` | `MoveTo(x, y, ms, p)` |
-| path | `move_path(&[(x,y)], opts)` | `move_path({{{…}}}, ms)` | `.move_path([(x,y)], ms)` | `MovePath([][2]int32, ms, p)` |
+| absolute move on a screen | `MotionOptions::with_screen` | `move_to(x, y, Screen::monitor(i))` | `.move_to(…, screen=Screen.monitor(1))` | `MoveToOn(x, y, ScreenMonitor(1), …)` |
+| path | `move_path(&[(x, y)], opts)` | `move_path({{…}}, ms)` | `.move_path([(x, y)], ms)` | `MovePath([][2]int32, ms, p)` |
 | async move | `start_move_to/by/path` | `start_move_to/by/path` | `.start_move_to/by/path` | `StartMoveTo/By` |
 | button | `button(Button, down)` | `button(Button, down)` | `.button(btn, down)` | `Button(btn, down)` |
 | click | `click(Button, count)` | `click(Button, n)` | `.click(btn, n)` | `Click(btn, n)` |
@@ -56,21 +43,53 @@ module or the Go package. A broker *client* does have one: `gdb_attach` and the
 | chord | `chord(&[usage], hold_ms)` | `chord({…}, hold_ms)` | `.chord([usage], hold_ms)` | `Chord([]uint16, ms)` |
 | sequence | `sequence(&[KeyStep])` | `sequence({…})` | `.sequence([KeyStep])` | `Sequence([]KeyStep)` |
 | text | `type_text(&TypeTextConfig)` | `type_text(s, interval, hold, jitter)` | `.type_text(s, interval, hold, jitter)` | `TypeText(s, interval, hold, jitter)` |
+| raw command passthrough | `command(&Command)` | `command(opcode, payload)` | `.command(opcode, payload)` | `Command(opcode, payload)` |
 | scheduler | `device.scheduler()` | `device.scheduler()` | `.scheduler()` | `Scheduler()` |
 | submit / every | `submit(delay, Priority, f)` | `submit(ms, prio, f)` | `.submit(ms, prio, f)` | `Submit(ms, prio, f)` |
+| absolute due / elapsed | `submit_at(due)`, `elapsed_ms()` | — | `.submit_at(ms, prio, f)`, `.elapsed_ms()` | `SubmitAt(ms, prio, f)`, `ElapsedMs()` |
 | cancel / pause / resume | `cancel(id)`, `pause()`, `resume()` | same | same | same |
 | wait idle | `wait_idle(dur)` | `wait_idle(ms)` | `.wait_idle(ms)` | `WaitIdle(ms)` |
 | take errors | `take_errors()` | `take_errors_json()` | `.take_errors()` | `TakeErrors()` |
-| counters | `device.metrics()` | — | — | — |
-| record / replay | `replay::Recorder`, `Recording` | — | — | — |
-| attach to a broker | `broker::Client::connect(name)` | `Remote::attach(name)` | `Remote.attach(name)` | `Attach(name)` |
-| start a broker if none is listening | `Client::connect_or_spawn(name, exe)` | `Remote::spawn(name)` | `Remote.spawn(name)` | `Spawn(name)` |
+| counters | `device.metrics()` | `metrics()` | `.metrics()` | `Metrics()` |
+| counter reset | `reset_metrics()` | `reset_metrics()` | `.reset_metrics()` | `ResetMetrics()` |
 | presence, no session | `probe::read_selector(sel)` | `probe(sel)` | `probe(sel)` | `Probe(sel)` |
 | presence for the whole bus | `probe::all()` | `probe_all()` | `probe_all()` | `ProbeAll()` |
 | presence on a timer | `Observer::start` | `Observer::start` | `Observer(...)` | `Observe(sel, ms)` |
-| monitor or window as the move target | `MotionOptions::screen` | — | — | — |
+| watch the bus | `Watch::start` | `Watch::start` | `watch(fn)` | `NewWatch(ms, fn)` |
+| attach to a broker | `broker::Client::connect(name)` | `Remote::attach(name)` | `Remote.attach(name)` | `Attach(name)` |
+| start a broker if none is listening | `Client::connect_or_spawn(name, exe)` | `Remote::spawn(name)` | `Remote.spawn(name)` | `Spawn(name)` |
+| record / replay | `replay::Recorder`, `Recording` | — | — | — |
 
 ## Device
+
+```c
+typedef struct gdb_device gdb_device;
+
+gdb_device *gdb_open(const char *selector, uint32_t timeout_ms,
+                     bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_mock(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_shared(const char *selector, uint32_t timeout_ms,
+                            bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_mock_shared(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+
+void    gdb_device_free(gdb_device *device);
+int32_t gdb_close(gdb_device *device);
+int32_t gdb_reconnect(gdb_device *device);
+int32_t gdb_set_auto_reconnect(gdb_device *device, bool enabled);
+int32_t gdb_device_state(const gdb_device *device);      /* -1 on a NULL handle */
+char   *gdb_device_list(void);                            /* JSON array */
+```
+
+`selector` is a USB serial or a HID path — exact first, then a substring of the
+serial; `NULL` takes the first attached board. `timeout_ms` is the per-command
+reply deadline (default 1000). An open returns `NULL` on failure with
+`gdb_last_error` set.
+
+`gdb_close` releases the session, stops the heartbeat and clears held input; the
+handle is then unusable. `gdb_device_free` releases the handle and closes it if
+that has not happened.
+
+Rust options, which the four booleans/arguments spell out:
 
 ```rust
 pub struct DeviceOptions { pub auto_reconnect: bool, pub timeout_ms: u32, pub heartbeat: bool }
@@ -78,11 +97,21 @@ pub struct DeviceOptions { pub auto_reconnect: bool, pub timeout_ms: u32, pub he
 
 DeviceInfo { serial, product, board, firmware, lease_ms, poll_ms,
              capabilities, device_id: [u8; 8], build: u32 }
+DeviceEntry { path, serial, product, manufacturer, vid, pid }
 ```
 
-`DeviceEntry` (device list): `{ path, serial, product, manufacturer, vid, pid }`.
+## Sharing a board
 
-### Sharing a board
+Ownership is fixed when the device is opened, because it decides whether the SDK
+may reopen the session at all; it is not a `DeviceOptions` field.
+
+| | `Exclusive` | `Shared` |
+| --- | --- | --- |
+| a reply that never arrives | `Timeout` | `Busy`, message names the command: `STATUS got no reply; another process may have taken it (no reply to opcode 6 within 120 ms)` |
+| the SDK reopens the session on its own | yes, for a fault it believes it can fix | never — `reconnect()` is the host's call |
+| heartbeat whose reply was taken | reconnects, as above | retried on the next tick, no CLOSE |
+| a frame for another session | dropped | counted in `stolen_frames`, offered to the stray hook |
+| sequence numbers, lease, counters | unchanged | unchanged |
 
 ```rust
 pub enum Ownership { Exclusive, Shared }   // default: Exclusive
@@ -98,77 +127,29 @@ impl Device {
     pub fn set_stray_hook(&self, hook: Arc<dyn Fn(&[u8]) + Send + Sync>);
     pub fn clear_stray_hook(&self);
 }
+
+uint64_t gdb_stolen_frames(const gdb_device *device);   // C ABI, 0 on a NULL handle
 ```
 
-Ownership is not a field of `DeviceOptions`: it decides whether the SDK may
-reopen the session at all, so it is fixed when the device is opened, and
-`open_shared` is the constructor that says so.
+`stolen_frames` counts frames the reply loop looked past because they answered
+another session or sequence — a subset of `retries`, which also counts reads that
+returned nothing. `over_transport` and the stray hook are Rust-only. The hook runs
+on the thread reading the queue with that device's session busy, so it must not
+call back into the same `Device`; only a foreign session reaches it.
 
-The device answers on one IN queue and the protocol does not address a reply to a
-handle, so two controllers occasionally take each other's frames. Nothing here
-arbitrates that — no lock, no queue, no broker; staying out of each other's way
-is the hosts' discipline. What sharing changes is what a collision costs:
+## Queries
 
-| | `Exclusive` | `Shared` |
-| --- | --- | --- |
-| a reply that never arrives | `Timeout` | `Busy`, message names the command: `STATUS got no reply; another process may have taken it (no reply to opcode 6 within 120 ms)` |
-| the SDK reopens the session on its own | yes, for a fault it believes it can fix | never — `reconnect()` is the host's call |
-| heartbeat whose reply was taken | reconnects, as above | retried on the next tick, no CLOSE |
-| a frame for another session | dropped | counted in `stolen_frames`, offered to the stray hook |
-| sequence numbers, lease, counters | unchanged | unchanged |
+```c
+char *gdb_device_info(const gdb_device *device);
+char *gdb_status(const gdb_device *device);
+char *gdb_status_ext(const gdb_device *device);
+char *gdb_sessions(const gdb_device *device);            /* JSON array */
+int32_t gdb_release_all(gdb_device *device);
+int32_t gdb_barrier(gdb_device *device);
+int32_t gdb_bootloader(gdb_device *device);
+```
 
-`stolen_frames` counts every frame the reply loop looked past because it answered
-another session or another sequence — a subset of `retries`, which also counts
-reads that returned nothing. `gdb_stolen_frames(dev)`, `device.stolen_frames` and
-`Device.StolenFrames()` are the same number in the other layers.
-
-The stray hook runs on the thread that is reading the queue, with that device's
-session busy, so it must not call back into the same `Device`. It is the seam a
-cooperating host uses to hand a frame on; the default, no hook, drops the frame as
-before. Only a foreign session reaches it — a late reply to this session's own
-earlier command moves the counter and nothing else.
-
-`over_transport` is the same constructor for a transport the caller owns — a
-proxy, a capture, a test fake — and takes the `Ownership` explicitly, which is how
-`sdk/rust/tests/shared.rs` puts two devices on one board.
-
-### Raw command passthrough
-
-`device.command(&Command) -> Result<Option<Packet>>` sends one protocol command
-exactly as given. It uses the same session, sequence counter, timeout and
-reconnect path as `status()` or `barrier()`, but none of the SDK's own
-bookkeeping: held buttons are not recorded and a mock device's virtual cursor is
-not advanced. A `Command::MouseMove` sent this way therefore leaves the mock
-cursor where it was, and `device`'s opinion of what is held no longer matches
-what was actually sent. Control opcodes (OPEN, CLOSE, STATUS, BARRIER,
-RELEASE_ALL, STATUS_EXT, SESSION_LIST, BOOTLOADER) return `Some(Packet)`; input
-opcodes return `None` without waiting for a reply. `Command` and `Packet` are
-`input_protocol::v3` types, so the caller needs `input-protocol` as a dependency.
-
-Reach for it when the caller already speaks the wire protocol and needs one
-opcode that the SDK does not wrap — a debug pane, a packet log, or a host porting
-an existing motion loop. Prefer the typed methods for anything the SDK covers;
-they keep the held state and the mock honest.
-
-`gdb.h` carries it as `gdb_command(device, opcode, payload, len, gdb_packet *out)`,
-with an opcode and a payload instead of a `Command` value; the packet's payload
-is released with `gdb_packet_free`, and an opcode the protocol does not define
-fails with `Invalid` before anything is sent:
-
-| | Signature | When no reply is expected |
-| --- | --- | --- |
-| Rust | `Device::command(&Command) -> Result<Option<Packet>>` | `None` |
-| C ABI | `gdb_command(device, opcode, payload, len, gdb_packet *out)` | `*out` zeroed, `opcode == 0` |
-| C++ | `Device::command(opcode, payload)` → `std::optional<Packet>` | `std::nullopt` |
-| Python | `Device.command(opcode, payload=b"")` → `Packet \| None` | `None` |
-| Go | `Device.Command(opcode, payload) (*Packet, error)` | `nil, nil` |
-
-Every row keeps the same session, sequence counter, timeout and reconnect path as
-`status()`, and none of them touches the SDK's bookkeeping. The reply is
-inferred from the opcode: OPEN, CLOSE, STATUS, BARRIER, RELEASE_ALL, STATUS_EXT,
-SESSION_LIST and BOOTLOADER answer, every input opcode is fire and forget.
-
-JSON returned by the bindings:
+Every returned string is UTF-8 JSON owned by the caller: `gdb_string_free`.
 
 ```json
 {"serial":"MOCK","product":"GDBOX mock","board":2,"firmware":"3.2.0",
@@ -188,82 +169,158 @@ JSON returned by the bindings:
 
 `SESSIONS` → array of `{ "id": 1234, "leaseMs": 2000, "held": 0, "flags": 0 }`.
 
-## Motion
+## Mouse
 
-```rust
-pub struct MotionOptions {
-    pub duration_ms: u32,
-    pub profile: HumanProfile,
-    pub screen: platform::Screen,      // Primary by default
-}
-// duration_ms = 0 → natural duration from the distance
+```c
+typedef struct gdb_point { int32_t x; int32_t y; } gdb_point;
 
-impl MotionOptions {
-    pub fn linear(duration_ms: u32) -> Self;             // linear profile
-    pub fn with_screen(self, screen: platform::Screen) -> Self;
-}
+typedef struct gdb_profile {
+    int32_t ease;        /* gdb_ease: 0 jerk, 1 in-out, 2 linear, 3 in, 4 out, 5 bezier */
+    double  bezier[4];   /* x1, y1, x2, y2 — used when ease == 5 */
+    double  curve;       /* 0 straight, 1 bow, 2 exaggerated arc */
+    double  jitter_px;
+    double  overshoot_pct;
+    uint32_t settle_ms;
+    int32_t min_step_px;
+} gdb_profile;
 
-pub struct HumanProfile {
-  curve: f64, jitter_px: f64, overshoot_pct: f64, settle_ms: u32,
-  ease: Ease, min_step_px: i32,
-}
-pub enum Ease { Jerk, EaseInOut, Linear, EaseIn, EaseOut,
-                CubicBezier { x1, y1, x2, y2 } }
+gdb_profile gdb_profile_default(void);   /* the SDK default; a NULL profile means this */
+
+int32_t gdb_mouse_move_by(gdb_device *device, int32_t dx, int32_t dy,
+                          uint32_t duration_ms, const gdb_profile *profile);
+int32_t gdb_move_raw(gdb_device *device, int32_t dx, int32_t dy);
+int32_t gdb_mouse_move_to(gdb_device *device, int32_t x, int32_t y,
+                          uint32_t duration_ms, const gdb_profile *profile);
+int32_t gdb_mouse_move_path(gdb_device *device, const gdb_point *points, size_t count,
+                            uint32_t duration_ms, const gdb_profile *profile);
+int32_t gdb_mouse_button(gdb_device *device, uint8_t button, bool down);
+int32_t gdb_mouse_click(gdb_device *device, uint8_t button, uint8_t count);
+int32_t gdb_mouse_double_click(gdb_device *device, uint8_t button);
+int32_t gdb_mouse_wheel(gdb_device *device, int32_t vertical, int32_t horizontal);
+int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y,
+                       uint32_t duration_ms, const gdb_profile *profile);
 ```
 
-Relative moves ignore `screen`; only `move_to` and `start_move_to` read it.
+`button` is `gdb_button`: left 1, right 2, middle 3, back 4, forward 5.
+`duration_ms == 0` picks a natural duration from the distance. `move_by` splits
+at ±1024 per axis and ends with a barrier; `move_raw` splits the same way with no
+barrier, so flush with `gdb_barrier` where a completion guarantee matters.
 
-C ABI `gdb_profile { ease, bezier[4], curve, jitter_px, overshoot_pct,
-settle_ms, min_step_px }`, ease codes `0 jerk, 1 in-out, 2 linear, 3 in,
-4 out, 5 cubic-bezier`. A NULL profile means the SDK default.
+Rust shapes:
 
-`Movement`: `cancel()`, `retarget(x, y)`, `is_finished()`, `wait_timeout(Duration)`
-(returns `Timeout` and leaves the movement running) and `wait()` (consumes it).
-Dropping a movement cancels it. In the C ABI the same handle answers
-`gdb_movement_cancel`, `gdb_movement_retarget`, `gdb_movement_is_finished`,
-`gdb_movement_wait(timeout_ms)` and `gdb_movement_free`, which cancels.
+```rust
+pub struct MotionOptions { pub duration_ms: u32, pub profile: HumanProfile,
+                           pub screen: platform::Screen }   // Primary by default
+impl MotionOptions {
+    pub fn linear(duration_ms: u32) -> Self;
+    pub fn with_screen(self, screen: platform::Screen) -> Self;
+}
+pub struct HumanProfile { curve, jitter_px, overshoot_pct, settle_ms, ease, min_step_px }
+pub enum Ease { Jerk, EaseInOut, Linear, EaseIn, EaseOut, CubicBezier { x1, y1, x2, y2 } }
+```
 
 ### Screen targets
 
-```rust
-pub enum platform::Screen {
-    Primary,           // the default
-    Monitor(usize),    // index in EnumDisplayMonitors order
-    Window(isize),     // HWND as an integer
-}
+```c
+typedef struct gdb_screen {
+    int32_t kind;   /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND) */
+    int64_t arg;    /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
+} gdb_screen;
+
+int32_t gdb_mouse_move_to_on(gdb_device *, int32_t x, int32_t y, gdb_screen screen,
+                             uint32_t duration_ms, const gdb_profile *);
+int32_t gdb_mouse_move_path_on(gdb_device *, const gdb_point *, size_t count,
+                               gdb_screen screen, uint32_t duration_ms, const gdb_profile *);
+gdb_movement *gdb_mouse_start_move_to_on(gdb_device *, int32_t x, int32_t y,
+                                         gdb_screen screen, uint32_t duration_ms,
+                                         const gdb_profile *);
 ```
 
-The target is the rectangle an absolute move is clamped into. Coordinates are
-physical pixels in virtual-desktop space — `GetMonitorInfoW`'s space, primary
-top-left at `(0, 0)` — and the process is per-monitor DPI aware before
-`GetPhysicalCursorPos` is read, so nothing is scaled. `Primary` follows the
-primary flag, which need not be index 0; `Monitor(i)` is enumeration order, not
-the display number Windows settings shows; `Window(hwnd)` is `GetWindowRect`'s
-rectangle. The caller's point is clamped into the rectangle, so a coarse target
-lands on the edge; the only refusal is a point no monitor covers (a gap between
-monitors, or past the last edge), which returns `Unsupported` and names the target
-and the desktop's union. An index past the end, a window that does not exist and a
-window with an empty rectangle fail the same way before the pointer moves. The
-mock reports one 1920×1080 screen, where `Primary` and `Monitor(0)` work; a
-non-Windows host has no cursor API, so absolute moves are `Unsupported` there.
+`gdb_mouse_move_to` and `gdb_mouse_drag` clamp to the primary monitor; the `_on`
+calls take the rectangle explicitly. Coordinates stay virtual-desktop physical
+pixels — the target says which rectangle the point is clamped into, not a new
+origin.
 
-The C ABI takes no target: `gdb_mouse_move_to` and `gdb_mouse_drag` use the default
-options, so a binding over `gdb.dll` always moves inside the primary monitor.
+| Target | Rust | C++ | Python | Go |
+| --- | --- | --- | --- | --- |
+| primary | `Screen::Primary` | `Screen::primary()` | `Screen.primary` | `ScreenPrimary()` |
+| monitor *i* | `Screen::Monitor(i)` | `Screen::monitor(i)` | `Screen.monitor(i)` | `ScreenMonitor(i)` |
+| window | `Screen::Window(hwnd)` | `Screen::window(hwnd)` | `Screen.window(hwnd)` | `ScreenWindow(hwnd)` |
+
+`Primary` follows the primary-monitor flag, which need not be index 0.
+`Monitor(i)` is the `i`-th rectangle in `EnumDisplayMonitors` order — not the
+display number Windows settings shows. A point no monitor covers (a gap between
+monitors, past the last edge) is `Unsupported` with a message naming target and
+desktop; a monitor index past the end, a window that no longer exists and a window
+with an empty rectangle fail the same way before the pointer moves. The mock
+reports one 1920×1080 screen, where `Primary` and `Monitor(0)` work. Relative moves
+ignore the target.
+
+### Async moves
+
+```c
+gdb_movement *gdb_mouse_start_move_to(gdb_device *, int32_t x, int32_t y,
+                                      uint32_t duration_ms, const gdb_profile *);
+gdb_movement *gdb_mouse_start_move_by(gdb_device *, int32_t dx, int32_t dy,
+                                      uint32_t duration_ms, const gdb_profile *);
+gdb_movement *gdb_mouse_start_move_path(gdb_device *, const gdb_point *, size_t count,
+                                        uint32_t duration_ms, const gdb_profile *);
+int32_t gdb_movement_cancel(gdb_movement *movement);
+int32_t gdb_movement_retarget(gdb_movement *movement, int32_t x, int32_t y);
+bool    gdb_movement_is_finished(const gdb_movement *movement);
+int32_t gdb_movement_wait(gdb_movement *movement, uint32_t timeout_ms);
+void    gdb_movement_free(gdb_movement *movement);       /* cancels */
+```
+
+`Movement` in Rust and the bindings: `cancel()`, `retarget(x, y)`, `finished()` /
+`is_finished()`, `wait(timeout)` (`Timeout` leaves the movement running).
+`gdb_movement_wait` consumes nothing; dropping the handle cancels the movement.
 
 ## Keyboard
 
+```c
+int32_t gdb_key_down(gdb_device *device, uint16_t page, uint16_t usage);
+int32_t gdb_key_up(gdb_device *device, uint16_t page, uint16_t usage);
+int32_t gdb_key_press(gdb_device *device, uint16_t page, uint16_t usage);
+int32_t gdb_key_long_press(gdb_device *device, uint16_t page, uint16_t usage, uint32_t hold_ms);
+int32_t gdb_keys_chord(gdb_device *device, const uint16_t *usages, size_t count, uint32_t hold_ms);
+int32_t gdb_keys_sequence(gdb_device *device, const gdb_key_step *steps, size_t count);
+int32_t gdb_type_text(gdb_device *device, const char *utf8, uint32_t interval_ms,
+                      uint32_t hold_ms, uint32_t jitter_ms);
+
+typedef struct gdb_key_step { uint16_t page; uint16_t usage;
+                              uint32_t hold_ms; uint32_t gap_ms; } gdb_key_step;
+```
+
 `page`/`usage` are HID usage ids: page 7 for the keyboard, page 12 for consumer
-keys. Usages outside the firmware catalog fail with `Invalid` before anything is
-sent.
+keys. A usage outside the firmware catalog is `Invalid` before anything is sent.
 
-`TypeTextConfig { text, interval_ms, hold_ms, jitter_ms }` (default 45/18/30,
-jitter is uniform per character). Newlines (`\n`) and tabs map to Enter/Tab;
-unsupported characters are dropped, so the stroke count is not the character
-count.
-
-`KeyStep { page, usage, hold_ms, gap_ms }`.
+`TypeTextConfig { text, interval_ms, hold_ms, jitter_ms }` (defaults 45/18/30;
+jitter is uniform per character). `\n` and `\t` map to Enter and Tab; unsupported
+characters are dropped, so the stroke count is not the character count.
 
 ## Scheduler
+
+```c
+typedef int32_t (*gdb_task_fn)(void *user);   /* 0 = ok, otherwise a gdb_error */
+
+gdb_scheduler *gdb_scheduler_new(gdb_device *device);
+void     gdb_scheduler_free(gdb_scheduler *scheduler);
+uint64_t gdb_scheduler_submit(gdb_scheduler *, uint32_t delay_ms, int32_t priority,
+                              gdb_task_fn func, void *user);
+uint64_t gdb_scheduler_submit_at(gdb_scheduler *, uint64_t due_ms, int32_t priority,
+                                 gdb_task_fn func, void *user);
+uint64_t gdb_scheduler_elapsed_ms(gdb_scheduler *);
+uint64_t gdb_scheduler_every(gdb_scheduler *, uint32_t interval_ms, int32_t priority,
+                             gdb_task_fn func, void *user);
+int32_t  gdb_scheduler_cancel(gdb_scheduler *, uint64_t task_id);
+int32_t  gdb_scheduler_pause(gdb_scheduler *);
+int32_t  gdb_scheduler_resume(gdb_scheduler *);
+int32_t  gdb_scheduler_wait_idle(gdb_scheduler *, uint32_t timeout_ms);
+char    *gdb_scheduler_take_errors(gdb_scheduler *);   /* JSON array of {taskId, code, message} */
+```
+
+Rust callbacks receive the device and return `Result<()>`:
 
 ```rust
 let scheduler = device.scheduler();
@@ -277,107 +334,49 @@ scheduler.wait_idle(Duration::from_secs(5))?;
 let errors = scheduler.take_errors();
 ```
 
-Callbacks receive the device and return `Result<()>`. Failures are collected
-(32 max) instead of panicking the worker. A repeating task is `every(interval,
-priority, f)`; cancel it to stop. `wait_idle` returns `Timeout` if repeating
-tasks keep the queue busy.
+`submit_at` takes an absolute due in milliseconds since the scheduler started,
+which is what `elapsed_ms` / `elapsed()` reports; jobs sharing a due are ordered by
+priority. Failures are collected (32 max) instead of killing the worker. Repeating
+tasks are stopped with `cancel`; `wait_idle` is `Timeout` while one keeps the queue
+busy. Order is due, then higher priority, then submission; a cancel wins only if
+the callback has not started.
 
-## Broker
-
-One process owns the device; the others drive it over a named pipe. This is the
-answer to the single-reader rule, not a second protocol: the broker process holds
-the `Device`, every op runs on it, and clients see typed results.
-
-```rust
-pub const DEFAULT_NAME: &str = "default";
-pub fn pipe_path(name: &str) -> String;                 // \\.\pipe\gdbox-<name>
-pub fn run_if_requested() -> bool;                      // main() hook for --gdbox-broker
-
-pub enum Source { Auto, Selector(String), Device(Device) }
-pub struct Server;                                      // Server::new(name, source)
-    // name(), state(), clients(), wait(), shutdown()  — and Drop shuts down
-
-pub struct Client;                                      // Client::connect(name)
-    // connect_timeout(name, wait), available(name), connect_or_spawn(name, exe),
-    // set_timeout(Duration), events(), is_closed(), close()  — and Drop closes
-
-pub enum Event { State(ConnectionState), Error(Error), Closed }
-```
-
-`Server::new` creates the pipe before it returns, so a `Client::connect`
-immediately afterwards succeeds. `Source::Auto` and `Source::Selector` retry every
-500 ms until a device appears; `Source::Device` takes a handle the caller already
-owns. `run_if_requested` reads `--gdbox-broker [name]` / `--gdbox-broker=<name>`,
-serves that name with `Source::Auto` and exits the process; with no such argument
-it returns `false` and does nothing. `connect_or_spawn` spawns
-`exe --gdbox-broker <name>` detached (`DETACHED_PROCESS`) and retries the pipe for
-three seconds. A call waits 30 s for its reply unless `set_timeout` says otherwise;
-`connect` waits 250 ms for a busy pipe.
-
-Client methods: `info`, `status`, `status_ext`, `sessions`, `key(page, usage, down)`,
-`mouse_move(dx, dy)`, `move_by(dx, dy, options)`, `move_raw(dx, dy)`,
-`mouse_buttons(mask)`, `wheel(vertical, horizontal)`, `barrier`, `release_all`,
-`command(&Command) -> Result<Option<Packet>>`. There is no `move_to`, no
-`start_move_*`, no `drag`, no keyboard text or chord helper and no metrics op.
-
-Wire format: one JSON object per line, UTF-8, `\n`-terminated, `id` echoed in the
-reply, events without `id`, `code` = numeric `ErrorCode`.
-
-| op | args | result |
-| --- | --- | --- |
-| `info` | `{}` | `{serial, product, board, firmware, leaseMs, pollMs, capabilities, deviceId, build}` |
-| `status` | `{}` | `{received, completed, pending, leaseMs, rx, tx, hid, failsafe, state}` |
-| `status_ext` | `{}` | `StatusExt` in camelCase |
-| `sessions` | `{}` | `[{id, leaseMs, held, flags}, …]` |
-| `key` | `{page?, usage, down?}` | `null` |
-| `mouse_move` | `{dx, dy}` (i16) | `null` |
-| `move_by` | `{dx, dy, durationMs?, profile?}` | `null` |
-| `move_raw` | `{dx, dy}` (i32) | `null` |
-| `mouse_buttons` | `{buttons}` | `null` |
-| `wheel` | `{vertical, horizontal}` | `null` |
-| `barrier` | `{}` | `null` |
-| `release_all` | `{}` | `null` |
-| `command` | `{command: {kind, …}}` | `{packet: {opcode, flags, session, sequence, payload} \| null}` |
-| `close` | `{}` | `null`, then the server hangs up |
-
-`key` defaults `page` to 7 and `down` to true. `command.kind` is one of `open`,
-`close`, `heartbeat`, `status`, `barrier`, `release_all`, `status_ext`,
-`session_list`, `bootloader`, `key {page, usage, down}`, `snapshot {state}`,
-`mouse_move {dx, dy}`, `mouse_buttons {buttons}`, `wheel {vertical, horizontal}`.
-Unparseable input ends that connection only; an unknown op is answered with
-`code: 8`; every connection is greeted with the current state event first.
-
-Fairness: one command at a time behind the device lock, so a command is atomic and
-a sequence of them is not — `barrier` is how a client draws the line. Missing by
-design: raw HID reports, the `GET_FEATURE` capabilities scan, the host-side motion
-worker, flashing (BOOTLOADER is a `command`). Windows named pipes only; elsewhere
-`Server::new` and `Client::connect` return `Unsupported`.
-
-### Attached clients outside Rust
-
-`gdb.h` carries a client under a second handle type, so C++/Python/Go/C#/JNI
-programs can attach without reimplementing the pipe:
+## Metrics
 
 ```c
-gdb_remote *remote = NULL;
-if (gdb_attach("default", &remote) != GDB_OK) { /* nothing listening */ }
-char *status = gdb_remote_status(remote);   /* the gdb_status object */
-gdb_remote_move_raw(remote, 400, -120);
-gdb_remote_barrier(remote);
-gdb_remote_free(remote);
+typedef struct gdb_metrics {
+    uint64_t frames_sent;      /* reports written, handshake and CLOSE included */
+    uint64_t frames_received;  /* replies accepted for this session */
+    uint64_t retries;          /* reads that had to be looked past */
+    uint64_t stolen_frames;    /* the part of retries that answered someone else */
+    uint64_t reconnects;
+    uint64_t lease_faults;
+    uint64_t timeouts;
+    uint64_t latency_count;
+    uint64_t latency_min_us;
+    uint64_t latency_p50_us;
+    uint64_t latency_p95_us;
+    uint64_t latency_max_us;
+} gdb_metrics;
+
+int32_t gdb_metrics_get(const gdb_device *device, gdb_metrics *out);
+int32_t gdb_metrics_reset(gdb_device *device);
 ```
 
-`gdb_attach` takes the name (`NULL`/`""` for `default`), fills a `gdb_remote` and
-reports `Disconnected` when nothing serves that pipe; `gdb_remote_spawn` starts a
-broker first, from `GDBOX_BROKER_EXE`, and reports `Unsupported` when that
-variable names nothing. The rest is `gdb_remote_info`, `_status`, `_status_ext`,
-`_sessions`, `_key`, `_mouse_move`, `_move_by`, `_move_raw`, `_mouse_buttons`,
-`_wheel`, `_barrier`, `_release_all`, `_command` and `_close`. Results reuse the
-direct shapes, so a parser written for `gdb_device` reads an attached reply
-unchanged. What an attached handle has not: `move_to`, `start_move_*`, `drag`,
-`type_text`, `keys_sequence`/`keys_chord`, the scheduler, events and metrics —
-those need the collection or the process that owns it. `gdb::Remote`,
-`gdb.Remote` and `gdb.Attach` are the bindings' spelling of these calls.
+`gdb_metrics_get` is `Invalid` on a NULL handle or NULL `out`, and leaves `out`
+untouched. Rust: `MetricsSnapshot`, the same fields plus `latency: LatencyStats`,
+read by `device.metrics()`; `reset_metrics()` zeroes everything.
+
+- `retries` counts reads the reply loop looked past. The SDK never re-sends a
+  command, so it is not a retransmission count.
+- Counters are per device, not per session: `reconnects` and `lease_faults` keep
+  adding up across a reconnect.
+- A latency sample exists only for a command that waited; an input opcode is a
+  frame without one, and a timeout is counted, never timed.
+- Percentiles come from a 4176-bucket histogram — 1 µs buckets below 4096 µs, then
+  eight per doubling up to 4,194,304 µs: exact below 4 ms, within 6% above.
+- Reading takes no session lock, two fields may be one report apart, and a report
+  racing `reset` may be lost. Nothing ever blocks the sender.
 
 ## Presence
 
@@ -387,58 +386,43 @@ pub struct Probe {                    // Serialize: camelCase, DeviceInfo's keys
     pub lease_ms: u16, pub poll_ms: u8, pub capabilities: u32,
     pub device_id: [u8; 8], pub build: u32,
 }
-
 pub fn probe::read(path: &str) -> Result<Probe>;
 pub fn probe::read_selector(selector: Option<&str>) -> Result<Probe>;
 pub fn probe::read_from(transport: Box<dyn Transport>, serial: &str, product: &str) -> Result<Probe>;
 pub fn probe::all() -> Result<Vec<Probe>>;
-// Manager::probe() and Manager::probe_all() are the same two calls without the path.
-
 pub enum ProbeEvent { Present(Probe), Gone(Error) }
-
-impl Observer {
-    pub fn open(selector: Option<&str>) -> Result<Self>;          // one read, no thread
-    pub fn start(interval: Duration,
-                 callback: impl FnMut(&ProbeEvent) + Send + 'static) -> Result<Self>;
-    pub fn start_selector(selector: Option<&str>, interval: Duration, callback: …) -> Result<Self>;
-    pub fn start_with(source: impl Fn() -> Result<Probe> + Send + 'static,
-                      interval: Duration, callback: …) -> Result<Self>;
-    pub fn stop(&mut self);                                       // and Drop stops
-    pub fn is_running(&self) -> bool;
-    pub fn probe(&self) -> Probe;                                 // the last one, kept on failure
-    pub fn info(&self) -> DeviceInfo;                             // the Device::info() shape
-    pub fn state(&self) -> ConnectionState;
-    pub fn last_error(&self) -> Option<Error>;
-    // status, status_ext, sessions, barrier, release_all, bootloader, command, reconnect:
-    // every one is Err(Unsupported) with probe::OBSERVER_REFUSAL as the message.
-}
 ```
 
-The identity a session needs — board id, firmware, lease, poll interval, capability
-bits, device id, build — arrives in `GET_FEATURE(14)`, the report `Session::open`
-reads before OPEN. A feature report is a control transfer: it never touches the
-interrupt IN queue, so a second process can read it at any time. Nothing else in
-the protocol is like that. A command consumes the shared IN queue, and the reader
-that drains a reply the owner was waiting for costs that owner one error — `Busy`
-if it opened shared, `Timeout` if it did not; OPEN takes one of the eight owner
-slots. This is why `probe` opens no session and writes no packet —
-`sdk/rust/tests/probe.rs` asserts the transport's write count is zero — and why an
-`Observer` has no command that can succeed instead of a command that happens to be
-harmless today. `probe` stays the answer for a program that only wants to read the
-board's numbers; [`Ownership::Shared`](#sharing-a-board) is for one that also
-wants to send.
+```c
+char *gdb_probe(const char *selector);        /* JSON: the gdb_device_info object, NULL when nothing matches */
+char *gdb_probe_all(void);                    /* JSON array; an empty bus is "[]" */
 
-`probe::all` skips a board that vanishes mid-listing and returns `Ok(vec![])` on
-an empty bus; a bus that cannot be enumerated is an `Err`. A selector that matches
-nothing is `Disconnected`. The observer resolves its selector again on every poll,
-so a renumbered HID path after a re-plug is not fatal, and it reports `Present`
-once when the identity is new, `Gone` once when polls start failing, and nothing
-while the answer is unchanged. `start_with` is the seam the tests use and the way
-a host that owns its own HID backend reads Feature 14 through it.
+typedef struct gdb_observer gdb_observer;
+gdb_observer *gdb_observer_start(const char *selector, uint32_t interval_ms);
+void    gdb_observer_stop(gdb_observer *observer);    /* the handle still answers info and state */
+void    gdb_observer_free(gdb_observer *observer);
+char   *gdb_observer_info(const gdb_observer *observer);
+int32_t gdb_observer_state(const gdb_observer *observer);   /* 2 connected, 0 disconnected, -1 NULL */
+int32_t gdb_observer_status(const gdb_observer *observer);        /* always GDB_UNSUPPORTED */
+int32_t gdb_observer_barrier(const gdb_observer *observer);       /* always GDB_UNSUPPORTED */
+int32_t gdb_observer_release_all(const gdb_observer *observer);   /* always GDB_UNSUPPORTED */
+int32_t gdb_observer_command(const gdb_observer *, uint8_t opcode, const uint8_t *payload,
+                             size_t len, gdb_packet *out);        /* always GDB_UNSUPPORTED, out zeroed */
+```
 
-What a host must still not do, even with this module: open an exclusive `Device`
-while another program holds the session, read the IN endpoint itself, or send
-`BOOTLOADER`.
+`GET_FEATURE(14)` carries the identity — board id, firmware, lease, poll interval,
+capability bits, device id, build — as a control transfer, so this never touches
+the interrupt IN queue, opens no session and writes no packet. It takes no owner
+slot, and an observer (an interval under 50 ms is rounded up) resolves its selector
+on every poll, so a renumbered HID path survives a replug. `gdb_observer_state` is
+2 while the last poll answered.
+
+Every command on an observer is a refusal, because a frame would land on the queue
+the owner reads — a typed refusal rather than a write it cannot take back.
+`probe::all` skips a board that vanishes mid-listing, answers `Ok(vec![])` on an
+empty bus and is `Err` when the bus cannot be enumerated; a selector that matches
+nothing is `Disconnected`. `start_with` is the seam for a host that reads Feature 14
+through its own HID backend.
 
 ## Watch
 
@@ -459,67 +443,257 @@ impl Watch {
 }
 ```
 
-The callback gets the whole current listing plus the one event and runs on the
-watch thread. The first poll reports everything already present as an arrival;
-an unchanged listing emits nothing; a bootloader volume that stays mounted is
-reported once and its removal is not an event. Devices are keyed by serial, or by
-HID path when the serial is empty. An interval below 10 ms is rounded up; a failed
-enumeration keeps the previous listing and logs once. `stop` wakes the sleep, joins
-and is safe twice.
+```c
+typedef void (*gdb_watch_fn)(void *user, int32_t kind, const char *json);
 
-## Metrics
-
-```rust
-pub struct MetricsSnapshot {
-    pub frames_sent: u64,       // output reports, handshake and closing CLOSE included
-    pub frames_received: u64,   // accepted input reports for this session
-    pub retries: u64,           // reply-loop read retries (empty read, foreign frame)
-    pub stolen_frames: u64,     // the subset of retries for another session or sequence
-    pub reconnects: u64,        // transports reopened after a fault or expired lease
-    pub lease_faults: u64,      // commands answered with a lease fault
-    pub timeouts: u64,          // commands whose reply never arrived
-    pub latency: LatencyStats,  // count, min_us, p50_us, p95_us, max_us
-}
-
-impl Device {
-    pub fn metrics(&self) -> MetricsSnapshot;
-    pub fn reset_metrics(&self);
-}
+gdb_watch *gdb_watch_start(uint32_t interval_ms, gdb_watch_fn func, void *user);
+void       gdb_watch_stop(gdb_watch *watch);      /* handle stays valid, safe twice */
+void       gdb_watch_free(gdb_watch *watch);
+char      *gdb_watch_listing(const gdb_watch *watch);   /* {"devices":[…],"volumes":["E:\\"]} */
 ```
 
-`retries` counts reads the reply loop had to look past — a read that returned
-nothing while the deadline was still running, or a frame for another session or
-sequence. The SDK never re-sends a command, so it is not a retransmission count.
-Counters are per device, not per session, so `reconnects` and `lease_faults` keep
-adding up across one.
+`kind` is 0 arrived, 1 removed (`{path, serial, product, manufacturer, vid, pid}`)
+or 2 bootloader (`{"path":"E:\\"}`). The watch enumerates the HID and drive tables
+and never reads or writes a report on the vendor collection, so it cannot steal a
+reply. The callback runs on the polling thread: it must not block and must not stop
+or free its own handle; the JSON pointer is valid only for the call.
 
-`stolen_frames` is the second half of that: `retries` minus the reads that came
-back empty. On a board several programs read, it is how a collision is told from a
-board that is merely slow — `stolen_frames` moves only when a frame that belonged
-to somebody else arrived, and a shared session reports `Busy` for exactly the
-command whose reply never came back. `device.stolen_frames()` reads the one atomic
-without walking the histogram.
+The first poll reports everything already present as an arrival; an unchanged
+listing emits nothing, and a bootloader volume that stays mounted is reported once
+with no removal event. Devices are keyed by serial, or by HID path when the serial
+is empty. An interval below 10 ms is rounded up; a failed enumeration keeps the
+previous listing and logs once, so a bus that cannot be read never invents
+removals. `stop` wakes the sleep, joins, and is safe twice.
 
-Recording is one relaxed atomic add per counter and per latency sample: no lock,
-no allocation, no formatting, which is why it can sit on the report path. A sample
-is taken only for a command that waited for a reply; input opcodes count as frames
-and timeouts count as timeouts, neither adds a sample. The histogram is 4176
-buckets — one per microsecond below 4096 µs, then eight per doubling up to 4 MiB,
-clamped at the top. Below 4 ms `min_us`/`max_us` are exact; above, they are the
-bucket's edges and percentiles are its midpoint, within 6%. `snapshot()` reads
-atomics and walks the buckets without taking the session lock, so a UI may poll it
-freely, though two fields may be one report apart. `reset_metrics` zeroes
-everything with relaxed stores: a report racing the reset may be lost, and nothing
-blocks the sender.
+## Broker
+
+One process owns the device; the others drive it over `\\.\pipe\gdbox-<name>`
+(`default` when unnamed). The wire is one JSON object per line, UTF-8,
+`\n`-terminated; a request carries an `id` the reply echoes, events carry none, and
+`code` is the numeric `ErrorCode`, so every language maps a failure the same way.
+
+```rust
+pub const DEFAULT_NAME: &str = "default";
+pub fn pipe_path(name: &str) -> String;
+pub fn run_if_requested() -> bool;                      // main() hook for --gdbox-broker
+
+pub enum Source { Auto, Selector(String), Device(Device) }
+pub struct Server;                                      // Server::new(name, source)
+    // name(), state(), clients(), wait(), shutdown()  — and Drop shuts down
+
+pub struct Client;                                      // Client::connect(name)
+    // connect_timeout(name, wait), available(name), connect_or_spawn(name, exe),
+    // set_timeout(Duration), events(), is_closed(), close()  — and Drop closes
+
+pub enum Event { State(ConnectionState), Error(Error), Closed }
+```
+
+```c
+int32_t gdb_attach(const char *name, gdb_remote **out);  /* NULL/"" = "default" */
+int32_t gdb_remote_spawn(const char *name);              /* GDBOX_BROKER_EXE, else Unsupported */
+void    gdb_remote_free(gdb_remote *remote);
+
+char *gdb_remote_info(const gdb_remote *remote);
+char *gdb_remote_status(const gdb_remote *remote);
+char *gdb_remote_status_ext(const gdb_remote *remote);
+char *gdb_remote_sessions(const gdb_remote *remote);
+
+int32_t gdb_remote_key(gdb_remote *, uint16_t page, uint16_t usage, bool down);
+int32_t gdb_remote_mouse_move(gdb_remote *, int16_t dx, int16_t dy);    /* must fit ±1024 */
+int32_t gdb_remote_move_by(gdb_remote *, int32_t dx, int32_t dy, uint32_t duration_ms,
+                           const gdb_profile *profile);
+int32_t gdb_remote_move_raw(gdb_remote *, int32_t dx, int32_t dy);
+int32_t gdb_remote_mouse_buttons(gdb_remote *, uint8_t bits);  /* 1/2/4/8/16 */
+int32_t gdb_remote_wheel(gdb_remote *, int32_t vertical, int32_t horizontal);
+int32_t gdb_remote_barrier(gdb_remote *);
+int32_t gdb_remote_release_all(gdb_remote *);
+int32_t gdb_remote_command(gdb_remote *, uint8_t opcode, const uint8_t *payload,
+                           size_t len, gdb_packet *out);
+int32_t gdb_remote_close(gdb_remote *);
+```
+
+An attached handle has no absolute move, `start_move_*`, drag, typing, chord,
+scheduler, events or metrics: each needs the collection or the process that owns
+it. Its JSON is the direct handle's JSON, so one parser serves both.
+
+`Server::new` creates the pipe before it returns, so an immediate `connect`
+succeeds. `Source::Auto` and `Source::Selector` retry every 500 ms until a device
+appears. `run_if_requested` reads `--gdbox-broker [name]` /
+`--gdbox-broker=<name>`, serves that name with `Source::Auto` and exits, or returns
+`false` and touches nothing. `connect_or_spawn` starts `exe --gdbox-broker <name>`
+detached and retries the pipe for three seconds. A call waits 30 s for its reply
+unless `set_timeout` says otherwise; `connect` waits 250 ms for a busy pipe.
+
+| op | args | result |
+| --- | --- | --- |
+| `info`, `status`, `status_ext`, `sessions` | `{}` | device info, STATUS, STATUS_EXT, `[{id, leaseMs, held, flags}]` |
+| `key` | `{page?, usage, down?}` | `null` |
+| `mouse_move` | `{dx, dy}` (i16) | `null` |
+| `move_by` | `{dx, dy, durationMs?, profile?}` | `null` |
+| `move_raw` | `{dx, dy}` (i32) | `null` |
+| `mouse_buttons` | `{buttons}` | `null` |
+| `wheel` | `{vertical, horizontal}` | `null` |
+| `barrier`, `release_all` | `{}` | `null` |
+| `command` | `{command: {kind, …}}` | `{packet: {opcode, flags, session, sequence, payload} \| null}` |
+| `close` | `{}` | `null`, then the server hangs up |
+
+`key` defaults `page` to 7 and `down` to true, so `{"usage":4}` is a tap.
+`command.kind` is one of `open`, `close`, `heartbeat`, `status`, `barrier`,
+`release_all`, `status_ext`, `session_list`, `bootloader`, `key {page, usage,
+down}`, `snapshot {state}`, `mouse_move {dx, dy}`, `mouse_buttons {buttons}`,
+`wheel {vertical, horizontal}`.
+
+```
+request  {"id":1,"op":"status","args":{}}
+reply    {"id":1,"ok":true,"result":{…}}
+reply    {"id":1,"ok":false,"error":{"code":7,"message":"device queue overflow"}}
+event    {"event":"state","state":"connected"}
+event    {"event":"error","code":3,"message":"device disconnected"}
+```
+
+Every op runs to completion behind the device lock: one command is atomic, a
+sequence of them is not, so `barrier` is where a client draws the line. A line the
+server cannot parse ends that client's connection and nothing else; an unknown op
+is answered with `code: 8` and the connection stays up; each new connection is
+greeted with the current state event first. Flashing is out of scope, but
+`BOOTLOADER` is a `command`. Named pipes are Windows-only; elsewhere `Server::new`,
+`Client::connect` and `gdb_attach` are `Unsupported`.
+
+## Raw command
+
+`Device::command(&Command) -> Result<Option<Packet>>` sends one protocol command
+with the same session, sequence counter, timeout and reconnect path as any typed
+call, but none of the SDK bookkeeping: held buttons are not recorded and a mock
+device's cursor does not move. Control opcodes (OPEN, CLOSE, STATUS, BARRIER,
+RELEASE_ALL, STATUS_EXT, SESSION_LIST, BOOTLOADER) return `Some(Packet)`; every
+input opcode is fire and forget. `Command` and `Packet` are `input_protocol::v3`
+types, so a Rust caller needs `input-protocol` as a dependency.
+
+| | Signature | No reply |
+| --- | --- | --- |
+| Rust | `Device::command(&Command) -> Result<Option<Packet>>` | `None` |
+| C ABI | `gdb_command(device, opcode, payload, len, gdb_packet *out)` | `*out` zeroed, `opcode == 0` |
+| C++ | `Device::command(opcode, payload)` → `std::optional<Packet>` | `std::nullopt` |
+| Python | `Device.command(opcode, payload=b"")` → `Packet \| None` | `None` |
+| Go | `Device.Command(opcode, payload) (*Packet, error)` | `nil, nil` |
+
+```c
+typedef struct gdb_packet {
+    uint8_t opcode;
+    uint8_t flags;       /* always 0 on the v3 wire */
+    uint32_t session;
+    uint32_t sequence;
+    uint8_t *payload;    /* NULL when len == 0 */
+    size_t len;
+} gdb_packet;
+
+void gdb_packet_free(gdb_packet *packet);   /* safe on a zeroed one */
+```
+
+An opcode the protocol does not define is `Invalid` before anything is sent.
+Prefer the typed calls: they keep the held state and the mock honest.
+
+## Errors
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 0 | Ok | — |
+| 1 | Invalid | bad argument, unknown usage, wrong session id |
+| 2 | Timeout | no reply / movement did not settle |
+| 3 | Disconnected | device gone, no match for the selector |
+| 4 | Busy | eight owners, the session id already open, or — on a shared device — a reply another process took |
+| 5 | Lease | the 2 s lease expired |
+| 6 | Framing | malformed frame or response |
+| 7 | Overflow | device queue overflow / stale output |
+| 8 | Unsupported | platform or firmware lacks the feature |
+| 9 | Cancelled | the operation was cancelled |
+| 10 | Io | HID read/write failed, or a panic at the ABI boundary |
+
+The value a failing call returns is the code, and `gdb_last_error(buffer,
+capacity)` yields the same code plus a message. Bindings convert it to
+`gdb::Error` (carrying `code()`), `gdb.GdbError` and `*gdb.Error`.
+
+`Disconnected`, `Io` and `Lease` failures trigger one reconnect and one retry when
+auto-reconnect is on; `Timeout` never retries, because retrying a half-delivered
+input command is worse than reporting it.
+
+## Logging
+
+Logging is process-wide and silent until both a level and a sink are set.
+
+| | Level | Sink |
+| --- | --- | --- |
+| Rust | `log::set_level(Level)` | `log::set_sink(Some(Box::new(f)))` |
+| C ABI | `gdb_set_log_level(uint8_t)` | `gdb_set_log_sink(gdb_log_fn, void *)` |
+| C++ | `set_log_level(int32_t)` | `set_log_sink(fn)` |
+| Python | `set_log_level(int)` | `set_log_sink(fn)` |
+| Go | `SetLogLevel(uint8_t)` | `SetLogSink(fn)` |
+
+Levels are `0 Off, 1 Error, 2 Warn, 3 Info, 4 Debug, 5 Trace`. The SDK writes at
+`Info` (connect, close, reconnect), `Warn` (a failed command, with its code) and
+`Trace`; nothing emits `Error` or `Debug`.
+
+`Trace` is the packet log. Frames are logged in `Session`, underneath the C ABI, so
+every binding prints identical lines:
+
+```
+out opcode=6 session=1234 sequence=2 payload=[…]
+in opcode=134 session=1234 sequence=2 payload=[…]
+skip opcode=134 session=4321 sequence=7 (not ours)
+```
+
+`skip` is an IN frame that belonged to another session and was dropped while
+waiting for a reply. A packet window or log pane subscribes to the sink; a second
+reader on the IN endpoint would break the sequence numbers of both sessions.
+
+## C ABI
+
+```c
+uint32_t    gdb_abi_version(void);
+const char *gdb_version(void);
+int32_t     gdb_last_error(char *buffer, size_t capacity);
+void        gdb_string_free(char *text);
+```
+
+The header is the authority on the minor revision, `GDB_ABI_VERSION_MINOR`;
+`gdb::abi_minor_version()` and `gdb.ABIMinor` read the same number. Every revision
+is additive — no existing symbol changes shape.
+
+| Handle | Opened by | Carries |
+| --- | --- | --- |
+| `gdb_device` | `gdb_open`, `gdb_open_mock`, `gdb_open_shared`, `gdb_open_mock_shared` | session, typed input, queries, errors, logging, `gdb_command`, `gdb_move_raw`, scheduler, metrics |
+| `gdb_remote` | `gdb_attach`, `gdb_remote_spawn` | the broker op set; JSON identical to the direct handle's |
+| `gdb_observer` | `gdb_observer_start` | Feature 14 on a timer, no session; commands are refusals |
+| `gdb_watch` | `gdb_watch_start` | bus enumeration and change callbacks |
+| `gdb_movement` | `gdb_mouse_start_move_*` | one running move |
+| `gdb_scheduler` | `gdb_scheduler_new` | one worker and its task queue |
+
+```c
+typedef void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *message);
+typedef int32_t (*gdb_task_fn)(void *user);
+typedef void (*gdb_log_fn)(void *user, int32_t level, const char *message);
+typedef void (*gdb_watch_fn)(void *user, int32_t kind, const char *json);
+```
+
+Event kinds: `0` state (`code` = `gdb_connection_state`: 0 disconnected, 1
+connecting, 2 connected, 3 error), `2` error (`code` = `gdb_error`, `message` set).
+`message` is NULL otherwise. Enums in the header: `gdb_error`, `gdb_button`,
+`gdb_ease`, `gdb_event_kind`, `gdb_connection_state`. Strings the library returns
+are freed with `gdb_string_free`, packets with `gdb_packet_free`.
 
 ## Replay
+
+Rust only, `gdb::replay`. A recording stores intent — "key 7:0x04 down", "move by
+40,-12", "one barrier" — not bytes, so a firmware change that keeps the opcodes
+cannot make it stale; it cannot say what the device did (use `Level::Trace` for
+that).
 
 ```rust
 pub const VERSION: u32 = 1;
 
 pub enum Op {
     Key { page: u16, usage: u16, down: bool },
-    Buttons { bits: u8 },
+    Buttons { bits: u8 },              // the whole mask, not a delta
     Wheel { dx: i16, dy: i16 },        // dx horizontal, dy vertical
     MoveBy { dx: i32, dy: i32 },       // interpolated, barrier at the end
     MoveRaw { dx: i32, dy: i32 },      // one report, no barrier
@@ -527,13 +701,11 @@ pub enum Op {
 }
 
 pub struct Entry { pub at_ms: u64, pub op: Op }
-pub struct Recording;                  // new(seed, (w, h)), push, save, load, play, len, entries()
-pub struct Recorder;                   // new(seed, (w, h)), record, record_at, save, load, play, clear
+pub struct Recording;   // new(seed, (w, h)), push, save, load, play, len, entries()
+pub struct Recorder;    // new(seed, (w, h)), record, record_at, save, load, play, clear
 pub struct Outcome { pub played: usize, pub skipped: usize, pub elapsed_ms: u64 }
-pub struct NoCancel;                   // a Cancel that never fires
+pub struct NoCancel;    // a Cancel that never fires
 ```
-
-A file is one JSON object; every field:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -550,152 +722,76 @@ A file is one JSON object; every field:
 | `move_by` / `move_raw` fields | `dx`, `dy` | relative pixels |
 
 Keys are snake_case and appear in that order. `save` writes pretty JSON with a
-trailing newline; two saves of the same recording are byte for byte identical.
-Recording stores intent, not bytes, so a recording outlives a report-layout change,
-and `play` rebuilds the frames through `Device` at run time.
+trailing newline, and two saves of one recording are byte for byte identical —
+no maps, no timestamp added at save time.
 
-`play(&mut Device, speed: f64, cancel: &dyn Cancel) -> Result<Outcome>`. `speed` is
-`0.001..=1000` and divides every `at_ms` gap. Playback is deterministic: entries
-apply in order from a fixed timeline with no random source, and `Outcome::is_complete`
-is `skipped == 0`. Cancellation is checked between entries and inside each wait; a
-cancelled playback sends RELEASE_ALL when at least one entry had played and returns
-`Ok` with the rest as `skipped`, while a device failure is an `Err`.
-
-## Errors
-
-| Code | Name | Meaning |
-| --- | --- | --- |
-| 0 | Ok | — |
-| 1 | Invalid | bad argument, unknown usage, wrong session id |
-| 2 | Timeout | no reply / movement did not settle |
-| 3 | Disconnected | device gone, no match for the selector |
-| 4 | Busy | eight owners, the session id is already open, or — on a shared device — a reply another process took |
-| 5 | Lease | the 2 s lease expired |
-| 6 | Framing | malformed frame or response |
-| 7 | Overflow | device queue overflow / stale output |
-| 8 | Unsupported | platform or firmware lacks the feature |
-| 9 | Cancelled | the operation was cancelled |
-| 10 | Io | HID read/write failed, or a panic at the ABI boundary |
-
-C ABI errors live in `gdb_last_error(buffer, capacity)`; the value returned by a
-failing call equals the code. Bindings convert this into their own exception
-type: `gdb::Error`, `gdb.GdbError`, `*gdb.Error`.
-
-## C ABI
-
-`include/gdb.h` is the contract: `gdb_abi_version() == 1` with
-`GDB_ABI_VERSION_MINOR == 7`, and `gdb_version()` is the SDK version string.
-Minor 1 added the attached handle, minor 2 the presence probe and the observer,
-minor 3 `gdb_open_shared`, `gdb_open_mock_shared` and `gdb_stolen_frames`, 4
-`gdb_scheduler_submit_at` and `gdb_scheduler_elapsed_ms`, 5 the metrics snapshot,
-6 the screen-targeted absolute moves and 7 the arrival watch; no existing symbol
-changed shape. Handles are opaque (`gdb_device`, `gdb_remote`, `gdb_observer`,
-`gdb_watch`, `gdb_movement`, `gdb_scheduler`); strings returned by the library
-must be freed with `gdb_string_free`, and a `gdb_packet` from `gdb_command` with
-`gdb_packet_free`. Callbacks:
-
-```c
-void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *msg);
-int32_t (*gdb_task_fn)(void *user);   // 0 = ok, otherwise an ErrorCode
-void (*gdb_log_fn)(void *user, int32_t level, const char *msg);
-```
-
-Event kinds: `0` state (code = `ConnectionState`), `2` error (code = ErrorCode).
-
-The header is the compatibility layer for a language with no implementation of
-its own, and it is deliberately narrower than the SDK. A direct handle
-(`gdb_device`) has the session, the typed input calls, the queries, errors,
-logging, `gdb_command` and `gdb_move_raw`; an attached handle (`gdb_remote`,
-minor version 1) has `gdb_attach`, `gdb_remote_spawn` and the broker's op set
-listed under [Broker](#broker); a probe (`gdb_probe`, `gdb_probe_all`) and an
-observer handle (`gdb_observer`, minor version 2) have the identity with no
-session at all; a shared device is the same `gdb_device` handle from
-`gdb_open_shared` (minor version 3), with `gdb_stolen_frames` for its counter.
-An observer's commands are all refusals — `gdb_observer_status`, `gdb_observer_barrier`,
-`gdb_observer_release_all` and `gdb_observer_command` exist only to return
-`GDB_UNSUPPORTED` with the reason. What the header has no symbol for: the flashing
-sequence, the broker's server side, the arrival watch, the rest of the counters,
-the stray hook, recording, a screen target — so a binding over `gdb.dll` has none
-of them either. Those are Rust-only. `gdb_stolen_frames` is the one counter that
-crossed, because a host sharing a board has to be able to tell a collision from a
-slow board.
-
-## Logging
-
-Logging is process-wide and silent until both a level and a sink are set:
-
-| | Level | Sink |
-| --- | --- | --- |
-| Rust | `log::set_level(Level)` | `log::set_sink(Some(Box::new(f)))` |
-| C ABI | `gdb_set_log_level(uint8_t)` | `gdb_set_log_sink(gdb_log_fn, void *)` |
-| C++ | `set_log_level(int32_t)` | `set_log_sink(fn)` |
-| Python | `set_log_level(int)` | `set_log_sink(fn)` |
-| Go | `SetLogLevel(uint8_t)` | `SetLogSink(fn)` |
-
-Levels are `0 Off, 1 Error, 2 Warn, 3 Info, 4 Debug, 5 Trace`. The SDK writes at
-`Info` (connect, close, reconnect), `Warn` (a command failed, with its code) and
-`Trace`; nothing emits `Error` or `Debug` today.
-
-`Trace` is the packet log. Frames are logged in `Session`, underneath the C ABI,
-so every binding prints identical lines:
-
-```
-out opcode=6 session=1234 sequence=2 payload=[…]
-in opcode=134 session=1234 sequence=2 payload=[…]
-skip opcode=134 session=4321 sequence=7 (not ours)
-```
-
-`skip` is an IN frame that belonged to another session and was dropped while
-waiting for a reply. A host that wants a packet window or a log pane subscribes
-to the sink instead of opening a second reader on the IN endpoint — two readers
-steal each other's replies and break the sequence numbers of both sessions.
+`play(&mut Device, speed: f64, cancel: &dyn Cancel) -> Result<Outcome>`: `speed` is
+`0.001..=1000` and divides every `at_ms` gap. Playback is deterministic — entries
+apply in order from a fixed timeline with no random source of its own — and
+`Outcome::is_complete` is `skipped == 0`. Cancellation is checked between entries
+and inside each wait; a cancelled playback sends RELEASE_ALL when at least one
+entry played, then returns `Ok` with the rest `skipped`, where a device failure is
+an `Err`.
 
 ## Flashing
 
-`gdb::flash` builds the firmware, packs it and copies it to the board; the C ABI
-does not expose any of it, so flashing is Rust only.
+Rust only, `gdb::flash`; `src/uf2.rs` re-exports its packer.
 
 ```rust
 gdb::flash::Config              // cargo, firmware dir, auto_bootloader, boot_drive
 gdb::flash::build(&config, &runner, &cancel, &mut report) -> Result<Image>
 gdb::flash::push(&config, Some(&device), &image, &cancel, &mut report) -> Result<Handshake>
-gdb::flash::Host                 // volumes() + devices() + verify(): what push reads
-gdb::flash::SystemHost           // the real one: drives(), Manager::list(), open and check
+gdb::flash::Host                // volumes() + devices() + verify(): what push reads
+gdb::flash::SystemHost          // the real one: drives(), Manager::list(), open and check
 gdb::flash::Waits { drive, handshake }   // 15 s each; push runs on the defaults
 gdb::flash::uf2::pack(&elf) -> Result<Vec<u8>>          // the packer on its own
 gdb::flash::write_image(path, bytes, &cancel) -> Result<()>
 gdb::flash::drives() -> Result<Vec<PathBuf>>            // mounted RPI-RP2 volumes
 ```
 
-`Image { bytes, blocks }`. `build` runs cargo for `thumbv6m-none-eabi` with the
-`hardware` feature and packs the ELF; `push` sends BOOTLOADER (opcode 9), closes
-the runtime session, waits for a volume that was not mounted before (15 s),
-copies in 16 KiB chunks and then waits (15 s) for the runtime HID to re-enumerate
-so it can read Feature 14.
+`Image { bytes, blocks }`. `build` adds the `thumbv6m-none-eabi` target
+(skippable), runs cargo with the `hardware` feature against
+`firmware/app/Cargo.toml`, and packs the ELF: flash segments
+(`0x1000_0000..0x1100_0000`) flattened in address order into one 256-byte aligned
+image, written as 512-byte UF2 blocks with family id `0xE48BFF56`. An ELF with no
+flash segment is rejected.
+
+`push` sends BOOTLOADER (opcode 9), closes the runtime session — the board refuses
+BOOTLOADER while a host keeps polling it — waits for the `RPI-RP2` volume that was
+not mounted before the call (15 s), copies `Firmware.uf2` in 16 KiB chunks, then
+waits for the runtime HID to re-enumerate and reads Feature 14 on it (15 s).
 
 `Handshake` is `Verified(Verified { board, firmware, lease_ms })` or
-`Unverified(Error)`: `Err` from `push` means the transfer failed, `Unverified`
-means the bytes are on the flash but the board never answered.
+`Unverified(Error)`: `Err` from `push` means the transfer failed, `Unverified` means
+the bytes are on the flash but the board never answered. `Host`, `Waits`, `Runner`,
+`Reporter` and `Cancel` are the seams that let the whole sequence run headless.
 
-`Host`, `Waits`, `Runner`, `Reporter` and `Cancel` are the seams: the host
-supplies the volumes and devices it reads, the two waits, the process runner, the
-progress sink and the cancel token, so the sequence needs no GUI and no drive to
-be tested.
+## Contract
 
-## Threading rules
+- **Lease** — the device renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER
+  and valid input; STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew, so
+  polling any of them is not a heartbeat. The SDK tracks the last renewing command
+  and sends HEARTBEAT after 500 ms of silence, against the 2000 ms lease.
+- **Threads** — a heartbeat thread every 500 ms (it skips a tick rather than block
+  on the session lock); one thread per async movement, where `retarget` is
+  thread-safe; one worker per scheduler, whose callbacks never overlap. Event
+  callbacks may run on the heartbeat, worker or caller thread: they must return
+  quickly and must not call back into the same device synchronously.
+- **Absolute moves** — the SDK reads the physical cursor and feeds the delta back
+  through `RelativeTracker`, so the target rectangle only decides where the point
+  is clamped.
+- **Broker** — one device per broker, one session behind it, one reader thread per
+  client; a client's `EventReceiver` is `Clone` and readable from any thread.
+- **Close** — releases the session, stops the heartbeat, clears held input; the
+  handle is unusable afterwards.
 
-* Lease: the device renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER and
-  valid input; STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew. The SDK
-  tracks the last renewing command itself and sends HEARTBEAT after 500 ms of
-  silence, against a 2000 ms lease — so a STATUS, STATUS_EXT or SESSION_LIST poll
-  is not a heartbeat.
-* Heartbeat: every 500 ms while connected. The heartbeat thread takes the session
-  lock without blocking and skips a tick while a command holds it.
-* Async movement: one thread per movement; `retarget` is thread-safe.
-* Scheduler: one worker per scheduler; callbacks never overlap.
-* Event callbacks may run on the heartbeat, worker or caller thread; they must
-  return quickly and must not call back into the same device synchronously.
-* Broker: one command at a time behind the device lock, one reader thread per
-  client, and a client's `EventReceiver` is `Clone` and readable from any thread.
-* Watch: the callback runs on the watch thread, so a slow one delays the next
-  poll; `stop` joins that thread.
+## Platform
+
+| | Physical HID | Mock |
+| --- | --- | --- |
+| Windows | yes (hidapi) | yes |
+| Linux / macOS | compiles, returns `Unsupported` | yes |
+
+The mock sits above the transport, so everything except the Go binding runs on any
+platform without hardware. `gdb::broker` needs Windows named pipes; `sdk/go/gdb.go`
+needs Windows and a built `gdb.dll`.

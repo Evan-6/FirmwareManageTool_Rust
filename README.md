@@ -32,9 +32,8 @@ cargo run --release -p firmware-manage-tool-app
 | `target/release/firmware-manage-tool-app.exe` | 主程式（Tauri 外殼，內嵌 UI） |
 | `dist/FirmwareManageTool_Rust-0.1.0-windows-x64.zip` | 可攜包：exe＋韌體原始碼＋文件＋授權 |
 
-**建置慣例**：host 建置不加 `--target`，只用 `target/debug` 與 `target/release`。
-明寫 host triple 會讓 cargo 把整套依賴編兩份（曾累積到 17 GB）。要回收空間用
-`./scripts/prune.ps1 -Apply`（只刪可重建的樹，不動 `target/release` 與韌體 UF2）。
+建置產物放在哪、為什麼 host 建置不加 `--target`、要回收空間怎麼做：見
+[docs/architecture.md](docs/architecture.md)。
 
 ## 第一次使用
 
@@ -66,8 +65,8 @@ cargo run --release -p firmware-manage-tool-app
 | 鍵盤／滑鼠／輸入 | 照常 | 照常 |
 
 要不要輪詢只在「看數字」時有意義；遊玩或實機操作時切遊戲模式，裝置就不必回覆多餘查詢。
-**同一個 IN 端點同時只能有一個輪詢者**：GUI 在除錯模式下和 `probe --watch` 同時跑，
-兩邊會互偷回覆並讓自己的 session 失效（`failsafe` 增加）。
+同一個 IN 端點同時只能有一個輪詢者：GUI 在除錯模式下和 `probe --watch` 一起跑，兩邊會互偷
+回覆並讓自己的 session 失效（`failsafe` 增加）。
 
 **全域熱鍵 `Ctrl+Alt+Shift+Esc`**：立即放開所有按鍵與滑鼠鍵（`Reset`）。必須真人按，
 程式注入的按鍵不會觸發已註冊的熱鍵。
@@ -90,44 +89,17 @@ bash scripts/build-rust-firmware.sh
 
 ## GDBOX SDK
 
-`sdk/` 是 Host SDK，只有兩層：權威實作是 Rust 的 crate `gdb`；其他語言一律走 C ABI（`gdb.dll`＋
-`include/gdb.h`），C++／Python／Go 三個薄綁定只把名字翻譯過去，本身沒有邏輯。C ABI 有三種句柄：直接句柄
-涵蓋 session、輸入、查詢、錯誤與日誌，外加 `gdb_command`／`gdb_move_raw` 兩個逃生口；附加句柄
-（`gdb_attach`／`gdb_remote_*`）接上持有裝置的 broker 行程；觀測句柄（`gdb_observer_*`）與
-`gdb_probe`／`gdb_probe_all` 只讀 `GET_FEATURE(14)`——沒有 session、不送封包，所以另一個程式拿著
-session 時也能看見板子，而它的每個指令都回 `GDB_UNSUPPORTED`。燒錄、broker 的伺服端、watch、量測、
-錄製重播與螢幕目標都只在 Rust。本工具自己也走 SDK：裝置列舉與實體 HID 通道呼叫
-`gdb::Manager::list()`／`gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
+`sdk/` 是給外部程式用的 Host SDK，只有兩層：權威實作是 Rust 的 crate `gdb`；其他語言
+一律走 C ABI（`gdb.dll` ＋ `sdk/ffi/include/gdb.h`），C++／Python／Go 三個薄綁定只把
+名字翻譯過去。本工具自己也走 SDK：裝置列舉與實體 HID 通道來自 `gdb::Manager::list()`
+與 `gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
 
 ```powershell
 cargo build -p gdb-ffi --release       # target/release/gdb.dll
-cargo test  -p gdb -p gdb-motion       # 92 個測試，免硬體
-bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑）Go
 ```
 
-- 裝置管理：列舉、以序號或路徑連線、自動重連、多裝置、逾時與 11 種錯誤碼。
-- 滑鼠：相對／絕對移動、到點時間、線性／緩入／緩出／貝茲／自訂曲線、多段路徑、
-  中途取消與改目標、五鍵、滾輪、拖曳、全部放開。
-- 多螢幕：絕對移動用 `MotionOptions::screen` 指定主螢幕、第 i 台螢幕或某個視窗
-  （`Primary`／`Monitor(i)`／`Window(hwnd)`，預設主螢幕），座標是虛擬桌面的實體像素，
-  點會被夾進目標矩形，只有「沒有任何螢幕涵蓋這個點」會回 `Unsupported`。
-- 鍵盤：按下／放開／單擊／長按、組合鍵、按鍵序列、文字輸入、全部放開。
-- 自動化：任務佇列、延遲、週期排程、優先級、暫停／恢復／取消、錯誤收集。
-- 多程式共用一支裝置：`gdb::broker` 讓一個行程持有裝置，其他行程透過具名管道
-  `\\.\pipe\gdbox-<名稱>` 下指令；單一指令原子、連續指令不原子，順序由呼叫端用
-  `barrier` 劃分。伺服端是 Rust，其他語言用 `gdb_attach`／`gdb_remote_*` 接上
-  （C++ `gdb::Remote`、Python `gdb.Remote`、Go `Attach`）。它不提供原始 HID 回報、
-  能力掃描、背景移動 worker 與燒錄。
-- 熱插拔：`gdb::watch` 以 500 ms 輪詢匯流排，回報插入／移除與 BOOTSEL 磁碟出現，
-  只列舉裝置、不讀寫 vendor collection，所以不會搶走擁有者的回覆。
-- 量測：`device.metrics()` 提供送收幀數、重試、重連、租約故障、逾時與往返延遲
-  （min／p50／p95／max）直方圖；記錄成本是一次 relaxed 原子加。
-- 錄製重播：`gdb::replay` 把「意圖」存成 JSON（`version` 1）再重播，可變速、
-  取消時送 RELEASE_ALL；種子與螢幕尺寸一併記錄，重播具決定性。
-- 開發者：統一錯誤碼、日誌等級與 sink（`Trace` 會記下每個送出／收到的封包與被跳過的他 session 封包）、
-  事件回呼、免硬體的模擬裝置、Rust 與三個綁定的範例與測試。
-
-細節與 API 對照表：[sdk/README.md](sdk/README.md)、[sdk/API.md](sdk/API.md)。
+選哪種句柄、各語言五分鐘上手的範例、涵蓋範圍與限制：[sdk/README.md](sdk/README.md)。
+完整符號與欄位：[sdk/API.md](sdk/API.md)。
 
 ## 疑難排解
 
@@ -145,7 +117,7 @@ bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑�
 
 ```
 src/                主機 library：v3 client（列舉與 HID 通道來自 SDK）、滑鼠軌跡、文字／組合鍵、量測、設定、背景 worker
-src-tauri/          Tauri 2 外殼：20 個命令、事件、視窗與熱鍵
+src-tauri/          Tauri 2 外殼：命令、事件、視窗與熱鍵
 ui/                 React 19 + TypeScript + Vite（五頁）
 shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測試向量
 firmware/engine/    協議引擎（no_std、固定容量）：session、排程、狀態、LED
@@ -155,12 +127,15 @@ sdk/                GDBOX Host SDK：motion 數學、Rust 實作、C ABI、C++�
 scripts/            建置、打包、preflight、清理、契約與客戶端檢查、CDP 檢查
 ```
 
+各層誰依賴誰、改一個東西要動哪些地方：[docs/architecture.md](docs/architecture.md)。
+
 ## 規格
 
 - **線路協定（給要接裝置的人）**：[firmware/protocol-v3.md](firmware/protocol-v3.md)
   — framing、opcode、STATUS／STATUS_EXT／SESSION_LIST 格式、錯誤碼、租約與完成語意，
   以及 Rust／C++／Python 三個最小操作端的用法。
-- **內部架構**：[docs/architecture.md](docs/architecture.md) — 主機四層、韌體六階段、建置產物規則。
+- **內部架構**：[docs/architecture.md](docs/architecture.md) — 依賴方向、改動落點、三個共用關卡。
+- **SDK**：[sdk/README.md](sdk/README.md)（入口）、[sdk/API.md](sdk/API.md)（符號表）。
 - **韌體**：[firmware/README.md](firmware/README.md)、[firmware/app/README.md](firmware/app/README.md)。
 
 ## 授權
