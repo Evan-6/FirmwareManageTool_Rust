@@ -46,6 +46,8 @@ enum class ErrorCode : int32_t {
     Unsupported = GDB_UNSUPPORTED,
     Cancelled = GDB_CANCELLED,
     Io = GDB_IO,
+    InvalidScreen = GDB_INVALID_SCREEN,
+    StaleWindow = GDB_STALE_WINDOW,
 };
 
 enum class ConnectionState : int32_t {
@@ -184,10 +186,34 @@ struct Metrics {
     }
 };
 
+// Clamped absolute moves, as gdb_metrics_clamps fills them. A move whose
+// destination was outside the anchor rectangle is pulled back into it: it still
+// converges and the click still lands inside the window, and only these numbers
+// say the requested pixel was never reached. The four coordinates are meaningful
+// when clamped_total is not zero.
+struct Clamps {
+    uint64_t clamped_total = 0;
+    int32_t requested_x = 0;
+    int32_t requested_y = 0;
+    int32_t applied_x = 0;
+    int32_t applied_y = 0;
+
+    static Clamps from_raw(const gdb_clamps& raw) {
+        Clamps clamps;
+        clamps.clamped_total = raw.clamped_total;
+        clamps.requested_x = raw.requested_x;
+        clamps.requested_y = raw.requested_y;
+        clamps.applied_x = raw.applied_x;
+        clamps.applied_y = raw.applied_y;
+        return clamps;
+    }
+};
+
 // Which rectangle an absolute move is clamped into. Coordinates stay
 // virtual-desktop physical pixels: the target is not a new origin.
 struct Screen {
-    int32_t kind = 0;  // 0 primary, 1 monitor (arg = index), 2 window (arg = HWND)
+    int32_t kind = 0;  // 0 primary, 1 monitor (arg = index), 2 window (arg = HWND),
+                       // 3 the monitor containing a packed point
     int64_t arg = 0;
 
     static Screen primary() { return Screen{0, 0}; }
@@ -195,6 +221,13 @@ struct Screen {
     // Windows settings shows.
     static Screen monitor(int32_t index) { return Screen{1, index}; }
     static Screen window(int64_t hwnd) { return Screen{2, hwnd}; }
+    // The monitor holding the point, so a caller that starts a move from a
+    // coordinate does not have to know which display that is. The point is
+    // packed into the same 64-bit argument every target uses.
+    static Screen containing(int32_t x, int32_t y) {
+        const gdb_screen packed = gdb_screen_containing(x, y);
+        return Screen{packed.kind, packed.arg};
+    }
 
     gdb_screen raw() const { return gdb_screen{kind, arg}; }
 };
@@ -330,6 +363,8 @@ struct Api {
     /* Counters, screen targets and the arrival watch: loaded softly as well. */
     decltype(&gdb_metrics_get) metrics_get = nullptr;
     decltype(&gdb_metrics_reset) metrics_reset = nullptr;
+    decltype(&gdb_metrics_clamps) metrics_clamps = nullptr;
+    decltype(&gdb_monitors_json) monitors_json = nullptr;
     decltype(&gdb_mouse_move_to_on) mouse_move_to_on = nullptr;
     decltype(&gdb_mouse_move_path_on) mouse_move_path_on = nullptr;
     decltype(&gdb_mouse_start_move_to_on) mouse_start_move_to_on = nullptr;
@@ -457,6 +492,8 @@ inline Api& api() {
         GDB_OPTIONAL(observer_command, "gdb_observer_command")
         GDB_OPTIONAL(metrics_get, "gdb_metrics_get")
         GDB_OPTIONAL(metrics_reset, "gdb_metrics_reset")
+        GDB_OPTIONAL(metrics_clamps, "gdb_metrics_clamps")
+        GDB_OPTIONAL(monitors_json, "gdb_monitors_json")
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
@@ -549,6 +586,17 @@ inline void require_metrics_surface() {
                 "exports gdb_metrics_get");
 }
 
+// The clamp counters and the monitor listing arrived with the containing anchor,
+// so they are loaded softly too: only the calls that read them report the gap.
+inline void require_clamps_surface() {
+    if (api().metrics_clamps != nullptr && api().monitors_json != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the clamp counters; use a library that "
+                "exports gdb_metrics_clamps");
+}
+
 inline void require_screen_surface() {
     if (api().mouse_move_to_on != nullptr && api().mouse_move_path_on != nullptr &&
         api().mouse_start_move_to_on != nullptr) {
@@ -616,6 +664,16 @@ inline std::string probe(const std::string& selector = std::string()) {
 inline std::string probe_all() {
     detail::require_presence_surface();
     return detail::take(api().probe_all());
+}
+
+// Every monitor, as the JSON array the ABI sends: one object per display with
+// left/top/right/bottom in virtual-desktop pixels, `primary` on the entry kind 0
+// resolves to, and the effective `dpi` (96 = 100%, 0 when the system will not
+// say). No handle is needed and no packet is sent, so it is safe beside a
+// session. The order is the enumeration order kind 1 indexes.
+inline std::string monitors_json() {
+    detail::require_clamps_surface();
+    return detail::take(api().monitors_json());
 }
 
 class Movement {
@@ -1086,6 +1144,15 @@ public:
     void reset_metrics() {
         detail::require_metrics_surface();
         detail::check(api().metrics_reset(raw()));
+    }
+    /// The absolute moves the anchor rectangle pulled back, and the last one's
+    /// coordinates: the numbers that say a requested pixel was never reached.
+    /// Meaningful when clamped_total is not zero.
+    Clamps clamps() const {
+        detail::require_clamps_surface();
+        gdb_clamps counters{};
+        detail::check(api().metrics_clamps(raw(), &counters));
+        return Clamps::from_raw(counters);
     }
 
     ConnectionState state() const {

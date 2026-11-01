@@ -9,6 +9,7 @@
 
 use crate::error::{Error, ErrorCode, Result};
 use gdb_motion::Screen as ScreenSize;
+use serde::Serialize;
 
 /// A physical-pixel rectangle in virtual-desktop coordinates.
 ///
@@ -37,6 +38,14 @@ impl Rect {
 
     pub fn contains(&self, point: (i32, i32)) -> bool {
         point.0 >= self.left && point.0 < self.right && point.1 >= self.top && point.1 < self.bottom
+    }
+
+    /// Whether the two rectangles share at least one pixel.
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.left < other.right
+            && other.left < self.right
+            && self.top < other.bottom
+            && other.top < self.bottom
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -83,7 +92,16 @@ pub enum Screen {
     /// That order is the order the system enumerates the displays, so it is not
     /// the display number Windows settings shows and index 0 need not be the
     /// primary monitor; a caller that wants the primary one asks for `Primary`.
+    /// [`monitors`] reports the layout so a caller can pick an index it has seen.
     Monitor(usize),
+    /// The monitor whose rectangle contains this point, found at resolve time.
+    ///
+    /// This is the anchor to use when the destination is a coordinate rather
+    /// than a known display: it follows the point onto whichever monitor holds
+    /// it, instead of silently clamping to the primary monitor. A point on no
+    /// monitor falls back to the union of every screen, so the failure message
+    /// can name the desktop.
+    Containing(i32, i32),
     /// A window's bounding rectangle, `hwnd` being the caller's pointer value.
     Window(isize),
 }
@@ -93,9 +111,62 @@ impl std::fmt::Display for Screen {
         match self {
             Self::Primary => formatter.write_str("the primary monitor"),
             Self::Monitor(index) => write!(formatter, "monitor {index}"),
+            Self::Containing(x, y) => write!(formatter, "the monitor containing ({x}, {y})"),
             Self::Window(hwnd) => write!(formatter, "window {hwnd:#x}"),
         }
     }
+}
+
+/// One monitor as the system reports it, for callers that need to pick an index
+/// for [`Screen::Monitor`] instead of guessing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Monitor {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    /// Whether this is the monitor Windows treats as the primary one, which is
+    /// what [`Screen::Primary`] resolves to.
+    pub primary: bool,
+    /// Effective DPI (96 = 100%). 0 when the system will not report it.
+    pub dpi: u32,
+}
+
+impl Monitor {
+    pub fn rect(&self) -> Rect {
+        Rect {
+            left: self.left,
+            top: self.top,
+            right: self.right,
+            bottom: self.bottom,
+        }
+    }
+}
+
+/// Every monitor in `EnumDisplayMonitors` order: the index is exactly the one
+/// [`Screen::Monitor`] takes, and `primary` says which entry `Screen::Primary`
+/// uses.
+pub fn monitors() -> Result<Vec<Monitor>> {
+    #[cfg(windows)]
+    {
+        // Without per-monitor awareness the rectangles and DPI come back
+        // virtualized, and a caller that then feeds an index into a move would
+        // anchor on a scaled rectangle.
+        enable_dpi_awareness();
+        enumerate()
+    }
+    #[cfg(not(windows))]
+    {
+        Err(Error::unsupported(
+            "monitor enumeration needs Windows display APIs",
+        ))
+    }
+}
+
+/// [`monitors`] as a JSON array, the shape hosts log and dashboards read.
+pub fn monitors_json() -> Result<String> {
+    serde_json::to_string(&monitors()?).map_err(|error| Error::io(error.to_string()))
 }
 
 /// The pointer, the rectangle a move is anchored to, and every monitor the system
@@ -122,20 +193,16 @@ impl Target {
     /// The single 1920x1080 desktop a mock device pretends to have.
     pub fn mock(screen: Screen, cursor: (i32, i32)) -> Result<Self> {
         match screen {
-            Screen::Primary | Screen::Monitor(0) => {}
+            Screen::Primary | Screen::Monitor(0) | Screen::Containing(..) => {}
             Screen::Monitor(index) => {
-                return Err(Error::new(
-                    ErrorCode::Unsupported,
-                    format!(
-                        "monitor index {index} is out of range: a mock device has one 1920x1080 screen"
-                    ),
-                ));
+                return Err(Error::invalid_screen(format!(
+                    "monitor index {index} is out of range: a mock device has one 1920x1080 screen"
+                )));
             }
             Screen::Window(hwnd) => {
-                return Err(Error::new(
-                    ErrorCode::Unsupported,
-                    format!("window {hwnd:#x} has no rectangle: a mock device has no windows"),
-                ));
+                return Err(Error::stale_window(format!(
+                    "window {hwnd:#x} has no rectangle: a mock device has no windows"
+                )));
             }
         }
         let rect = Rect {
@@ -199,25 +266,37 @@ pub fn resolve(desktop: &dyn Desktop, screen: Screen) -> Result<Target> {
             })?
         }
         Screen::Monitor(index) => *screens.get(index).ok_or_else(|| {
-            Error::new(
-                ErrorCode::Unsupported,
-                format!(
-                    "monitor index {index} is out of range: the system reports {} monitor(s)",
-                    screens.len()
-                ),
-            )
+            Error::invalid_screen(format!(
+                "monitor index {index} is out of range: the system reports {} monitor(s)",
+                screens.len()
+            ))
         })?,
+        Screen::Containing(x, y) => screens
+            .iter()
+            .copied()
+            .find(|rect| rect.contains((x, y)))
+            .unwrap_or_else(|| {
+                screens
+                    .iter()
+                    .copied()
+                    .reduce(|left, right| left.union(&right))
+                    .unwrap_or_default()
+            }),
         Screen::Window(hwnd) => {
             let rect = desktop.window(hwnd)?;
             if rect.width() <= 0 || rect.height() <= 0 {
-                return Err(Error::new(
-                    ErrorCode::Unsupported,
-                    format!(
-                        "window {hwnd:#x} has an empty rectangle ({}x{})",
-                        rect.width(),
-                        rect.height()
-                    ),
-                ));
+                return Err(Error::stale_window(format!(
+                    "window {hwnd:#x} has an empty rectangle ({}x{}): it may be minimised or hidden",
+                    rect.width(),
+                    rect.height()
+                )));
+            }
+            if !screens.iter().any(|screen| screen.intersects(&rect)) {
+                return Err(Error::stale_window(format!(
+                    "window {hwnd:#x} is on no monitor, its rectangle is ({}, {})-({}, {}): \
+                     it may be minimised or hidden",
+                    rect.left, rect.top, rect.right, rect.bottom
+                )));
             }
             rect
         }
@@ -273,14 +352,13 @@ pub struct System;
 #[cfg(windows)]
 impl Desktop for System {
     fn monitors(&self) -> Result<Vec<Rect>> {
-        Ok(enumerate()?.into_iter().map(|(rect, _)| rect).collect())
+        Ok(enumerate()?.iter().map(Monitor::rect).collect())
     }
 
     fn primary(&self) -> Result<usize> {
-        use windows_sys::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
         Ok(enumerate()?
             .iter()
-            .position(|(_, flags)| flags & MONITORINFOF_PRIMARY != 0)
+            .position(|monitor| monitor.primary)
             .unwrap_or(0))
     }
 
@@ -305,13 +383,10 @@ impl Desktop for System {
         use windows_sys::Win32::{Foundation::RECT, UI::WindowsAndMessaging::GetWindowRect};
         let mut rect: RECT = unsafe { std::mem::zeroed() };
         if unsafe { GetWindowRect(hwnd as *mut core::ffi::c_void, &mut rect) } == 0 {
-            return Err(Error::new(
-                ErrorCode::Unsupported,
-                format!(
-                    "GetWindowRect failed for window {hwnd:#x}: {}",
-                    std::io::Error::last_os_error()
-                ),
-            ));
+            return Err(Error::stale_window(format!(
+                "GetWindowRect failed for window {hwnd:#x}: {}",
+                std::io::Error::last_os_error()
+            )));
         }
         Ok(Rect {
             left: rect.left,
@@ -322,12 +397,15 @@ impl Desktop for System {
     }
 }
 
-/// Every monitor rectangle and its flags, in `EnumDisplayMonitors` order.
+/// Every monitor in `EnumDisplayMonitors` order, with its primary flag and its
+/// effective DPI.
 #[cfg(windows)]
-fn enumerate() -> Result<Vec<(Rect, u32)>> {
+fn enumerate() -> Result<Vec<Monitor>> {
     use windows_sys::Win32::{
         Foundation::{LPARAM, RECT},
         Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
+        UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
+        UI::WindowsAndMessaging::MONITORINFOF_PRIMARY,
     };
     use windows_sys::core::BOOL;
 
@@ -337,30 +415,36 @@ fn enumerate() -> Result<Vec<(Rect, u32)>> {
         _clip: *mut RECT,
         data: LPARAM,
     ) -> BOOL {
-        let out = unsafe { &mut *(data as *mut Vec<(Rect, u32)>) };
+        let out = unsafe { &mut *(data as *mut Vec<Monitor>) };
         let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
         info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if unsafe { GetMonitorInfoW(monitor, &mut info) } != 0 {
-            out.push((
-                Rect {
-                    left: info.rcMonitor.left,
-                    top: info.rcMonitor.top,
-                    right: info.rcMonitor.right,
-                    bottom: info.rcMonitor.bottom,
-                },
-                info.dwFlags,
-            ));
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+            return 1;
         }
+        let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+        let dpi =
+            match unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) } {
+                0 => dpi_x,
+                _ => 0,
+            };
+        out.push(Monitor {
+            left: info.rcMonitor.left,
+            top: info.rcMonitor.top,
+            right: info.rcMonitor.right,
+            bottom: info.rcMonitor.bottom,
+            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            dpi,
+        });
         1
     }
 
-    let mut out: Vec<(Rect, u32)> = Vec::new();
+    let mut out: Vec<Monitor> = Vec::new();
     let ok = unsafe {
         EnumDisplayMonitors(
             std::ptr::null_mut(),
             std::ptr::null(),
             Some(collect),
-            &mut out as *mut Vec<(Rect, u32)> as LPARAM,
+            &mut out as *mut Vec<Monitor> as LPARAM,
         )
     };
     if ok == 0 {
@@ -494,11 +578,20 @@ mod tests {
         }
 
         fn window(&self, hwnd: isize) -> Result<Rect> {
+            if hwnd == 0x5678 {
+                // What a minimised window reports: a small rectangle parked far
+                // outside every monitor.
+                return Ok(Rect {
+                    left: -32000,
+                    top: -32000,
+                    right: -31840,
+                    bottom: -31972,
+                });
+            }
             if hwnd != 0x1234 {
-                return Err(Error::new(
-                    ErrorCode::Unsupported,
-                    format!("GetWindowRect failed for window {hwnd:#x}: no such window"),
-                ));
+                return Err(Error::stale_window(format!(
+                    "GetWindowRect failed for window {hwnd:#x}: no such window"
+                )));
             }
             Ok(Rect {
                 left: 2000,
@@ -538,10 +631,40 @@ mod tests {
         assert!(second.reaches((1920, 1023)) && !second.reaches((1920, 1024)));
 
         let failure = resolve(&desktop, Screen::Monitor(2)).unwrap_err();
-        assert_eq!(failure.code(), ErrorCode::Unsupported);
+        assert_eq!(failure.code(), ErrorCode::InvalidScreen);
         assert_eq!(
             failure.message,
             "monitor index 2 is out of range: the system reports 2 monitor(s)"
+        );
+    }
+
+    #[test]
+    fn a_containing_anchor_follows_the_point_onto_that_monitor() {
+        let desktop = Fake::new((2500, 500), 0);
+        let second = resolve(&desktop, Screen::Containing(2500, 900)).expect("second monitor");
+        assert_eq!(second.rect.origin(), (1920, 0));
+        assert_eq!((second.rect.width(), second.rect.height()), (1280, 1024));
+        assert_eq!(
+            second.rect.clamp((2000, 300)),
+            (2000, 300),
+            "a point inside the found monitor is not clamped away"
+        );
+
+        let first = resolve(&desktop, Screen::Containing(100, 100)).expect("first monitor");
+        assert_eq!(first.rect.origin(), (0, 0));
+        assert_eq!(first.rect.width(), 1920);
+    }
+
+    #[test]
+    fn a_containing_point_on_no_monitor_falls_back_to_the_union() {
+        let desktop = Fake::new((2500, 500), 0);
+        let target = resolve(&desktop, Screen::Containing(4000, 2000)).expect("union fallback");
+        assert_eq!(target.rect, target.bounds(), "the fallback is the union");
+        assert_eq!(target.rect.origin(), (0, 0));
+        assert_eq!((target.rect.width(), target.rect.height()), (3200, 1080));
+        assert!(
+            !target.reaches((4000, 2000)),
+            "the move is still refused, but by aim_at with a message naming the desktop"
         );
     }
 
@@ -554,11 +677,40 @@ mod tests {
         assert_eq!(window.bounds().right, 3200, "bounds stay the whole desktop");
 
         let failure = resolve(&desktop, Screen::Window(0x44)).unwrap_err();
-        assert_eq!(failure.code(), ErrorCode::Unsupported);
+        assert_eq!(failure.code(), ErrorCode::StaleWindow);
         assert!(
             failure.message.contains("GetWindowRect failed"),
             "{failure}"
         );
+    }
+
+    #[test]
+    fn a_window_off_every_monitor_is_a_stale_window() {
+        let desktop = Fake::new((100, 100), 0);
+        let failure = resolve(&desktop, Screen::Window(0x5678)).unwrap_err();
+        assert_eq!(failure.code(), ErrorCode::StaleWindow);
+        assert!(
+            failure.message.contains("is on no monitor"),
+            "a minimised window must not read as `unsupported`: {failure}"
+        );
+    }
+
+    #[test]
+    fn monitor_json_carries_the_rect_the_primary_flag_and_the_dpi() {
+        let monitor = Monitor {
+            left: 1920,
+            top: 0,
+            right: 3200,
+            bottom: 1024,
+            primary: false,
+            dpi: 144,
+        };
+        assert_eq!(
+            serde_json::to_string(&monitor).unwrap(),
+            "{\"left\":1920,\"top\":0,\"right\":3200,\"bottom\":1024,\
+             \"primary\":false,\"dpi\":144}"
+        );
+        assert_eq!(monitor.rect().origin(), (1920, 0));
     }
 
     #[test]
@@ -585,7 +737,49 @@ mod tests {
         assert_eq!(target.cursor, (10, 20));
         assert_eq!(
             Target::mock(Screen::Monitor(1), (0, 0)).unwrap_err().code(),
-            ErrorCode::Unsupported
+            ErrorCode::InvalidScreen
         );
+        assert_eq!(
+            Target::mock(Screen::Window(1), (0, 0)).unwrap_err().code(),
+            ErrorCode::StaleWindow
+        );
+        assert!(
+            Target::mock(Screen::Containing(5000, 5000), (0, 0)).is_ok(),
+            "a mock has one screen, so a containing anchor resolves to it"
+        );
+    }
+
+    /// The real desktop, not a fake: this is the check that a coordinate on a
+    /// second monitor anchors on that monitor instead of the primary one.
+    #[cfg(windows)]
+    #[test]
+    fn the_system_anchors_a_containing_point_on_the_monitor_that_holds_it() {
+        let monitors = super::monitors().expect("the system lists its displays");
+        assert!(!monitors.is_empty());
+        assert_eq!(
+            monitors.iter().filter(|monitor| monitor.primary).count(),
+            1,
+            "exactly one monitor is the primary one"
+        );
+
+        let first = monitors[0];
+        let point = (
+            (first.left + first.right) / 2,
+            (first.top + first.bottom) / 2,
+        );
+        let target = resolve(&System, Screen::Containing(point.0, point.1)).expect("containing");
+        assert_eq!(target.rect.origin(), (first.left, first.top));
+        assert!(target.rect.contains(point));
+
+        let bounds = monitors
+            .iter()
+            .map(Monitor::rect)
+            .reduce(|left, right| left.union(&right))
+            .expect("a desktop");
+        let outside = (bounds.right + 10, bounds.top + 10);
+        let fallback =
+            resolve(&System, Screen::Containing(outside.0, outside.1)).expect("union fallback");
+        assert_eq!(fallback.rect, fallback.bounds());
+        assert!(!fallback.reaches(outside));
     }
 }

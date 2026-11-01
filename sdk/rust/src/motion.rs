@@ -196,6 +196,14 @@ pub(crate) fn run_move_by(
 /// monitor the mock does not really have.
 pub(crate) type TargetProbe = fn(&Device, platform::Screen) -> Result<platform::Target>;
 
+/// How long a movement may go without closing the gap before it is a timeout.
+///
+/// A long jump paired with a short duration is not a failure: the trajectory
+/// ends sooner than the device can report the steps, and every step that shrinks
+/// the gap pushes this window forward again, so only a movement that has stopped
+/// making progress fails.
+const STALL: Duration = Duration::from_millis(400);
+
 fn probe(device: &Device, screen: platform::Screen) -> Result<platform::Target> {
     if device.is_mock() {
         return platform::Target::mock(screen, device.cursor());
@@ -252,15 +260,20 @@ pub(crate) fn run_move_to_with(
     let screen = options.screen;
     let target = probe(device, screen)?;
     let mut aim = aim_at(&target, (x, y), screen)?;
+    if aim != (x, y) {
+        device.record_clamp((x, y), aim);
+    }
     let mut plan = Plan::around(&target);
     let mut rng = SplitMix64::from_entropy();
     let mut nodes = plan_nodes(&plan, target.cursor, aim, options, &mut rng)?;
     let mut started = Instant::now();
     let mut index = 0usize;
     let mut tracker = RelativeTracker::default();
-    let mut deadline = started
-        + Duration::from_millis(nodes.last().map(|node| node.at_ms).unwrap_or(0))
-        + Duration::from_millis(500);
+    // The trajectory duration is a lower bound, not the budget: the pointer can
+    // only close the gap as fast as the device reports, so the deadline is the
+    // stall window after the last improvement rather than a fixed span.
+    let mut best = gap(target.cursor, aim);
+    let mut deadline = started + trajectory_span(&nodes) + STALL;
     loop {
         if shared.cancelled() {
             return Err(Error::cancelled());
@@ -270,26 +283,25 @@ pub(crate) fn run_move_to_with(
             if moved.rect.width() != target.rect.width()
                 || moved.rect.height() != target.rect.height()
             {
-                return Err(Error::new(
-                    ErrorCode::Unsupported,
-                    format!(
-                        "monitor layout changed during the movement ({}x{} -> {}x{})",
-                        target.rect.width(),
-                        target.rect.height(),
-                        moved.rect.width(),
-                        moved.rect.height()
-                    ),
-                ));
+                return Err(Error::invalid_screen(format!(
+                    "monitor layout changed during the movement ({}x{} -> {}x{})",
+                    target.rect.width(),
+                    target.rect.height(),
+                    moved.rect.width(),
+                    moved.rect.height()
+                )));
             }
             aim = aim_at(&moved, next, screen)?;
+            if aim != next {
+                device.record_clamp(next, aim);
+            }
             plan = Plan::around(&moved);
             nodes = plan_nodes(&plan, moved.cursor, aim, options, &mut rng)?;
             started = Instant::now();
             index = 0;
             tracker = RelativeTracker::default();
-            deadline = started
-                + Duration::from_millis(nodes.last().map(|node| node.at_ms).unwrap_or(0))
-                + Duration::from_millis(500);
+            best = gap(moved.cursor, aim);
+            deadline = started + trajectory_span(&nodes) + STALL;
         }
         let Some(node) = nodes.get(index).copied() else {
             return Ok(());
@@ -301,7 +313,31 @@ pub(crate) fn run_move_to_with(
             thread::sleep(wait);
             continue;
         }
-        let position = plan.local(probe(device, screen)?.cursor);
+        let cursor = probe(device, screen)?.cursor;
+        let remaining = gap(cursor, aim);
+        if remaining < best {
+            best = remaining;
+            let extended = Instant::now() + STALL;
+            if extended > deadline {
+                deadline = extended;
+            }
+        }
+        let position = plan.local(cursor);
+        // A device whose reports arrive late or with acceleration can put the
+        // pointer past the node it was aiming at. Walking the path backwards from
+        // there would fight the pointer, so the path advances to the closest node
+        // still ahead of it.
+        while index + 1 < nodes.len() {
+            let here = (position.0, position.1);
+            let next = nodes[index + 1];
+            let current = nodes[index];
+            if gap(here, (next.x, next.y)) <= gap(here, (current.x, current.y)) {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        let node = nodes[index];
         match tracker.step(position, (node.x, node.y), Instant::now()) {
             Step::Wait => thread::sleep(Duration::from_millis(1)),
             Step::Move(dx, dy) => {
@@ -317,9 +353,24 @@ pub(crate) fn run_move_to_with(
             }
         }
         if Instant::now() > deadline {
-            return Err(Error::timeout("pointer did not reach the target"));
+            return Err(Error::timeout(format!(
+                "pointer did not reach ({}, {}) targeting {screen}: off by {remaining} px after {} ms",
+                aim.0,
+                aim.1,
+                started.elapsed().as_millis()
+            )));
         }
     }
+}
+
+/// The largest axis gap between two points, which is the number of pixels the
+/// pointer still has to travel.
+fn gap(from: (i32, i32), to: (i32, i32)) -> i32 {
+    (to.0 - from.0).abs().max((to.1 - from.1).abs())
+}
+
+fn trajectory_span(nodes: &[Node]) -> Duration {
+    Duration::from_millis(nodes.last().map(|node| node.at_ms).unwrap_or(0))
 }
 
 /// Clamps the caller's point into the target rectangle. A point no monitor covers
@@ -400,6 +451,137 @@ mod tests {
         crate::manager::Manager::open_mock_with_handle(DeviceOptions::default())
             .expect("mock device")
             .0
+    }
+
+    /// The monitor that holds the point the caller aimed at: what a
+    /// `Screen::Containing` anchor must reach.
+    fn containing_pointer(device: &Device, screen: platform::Screen) -> Result<platform::Target> {
+        let left = Rect {
+            left: 0,
+            top: 0,
+            right: 960,
+            bottom: 540,
+        };
+        let right = Rect {
+            left: 960,
+            top: 0,
+            right: 1920,
+            bottom: 540,
+        };
+        let rect = match screen {
+            platform::Screen::Containing(x, _) if x >= right.left => right,
+            _ => left,
+        };
+        Ok(platform::Target::new(
+            rect,
+            device.cursor(),
+            vec![left, right],
+        ))
+    }
+
+    /// A pointer that moves 200 px per report and takes 60 ms to answer: a long
+    /// jump paced far below the trajectory's own duration.
+    static LAGGING_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+    fn lagging_pointer(_device: &Device, _screen: platform::Screen) -> Result<platform::Target> {
+        thread::sleep(Duration::from_millis(60));
+        let moved = (LAGGING_X.load(Ordering::Relaxed) + 200).min(4000);
+        LAGGING_X.store(moved, Ordering::Relaxed);
+        let rect = Rect {
+            left: 0,
+            top: 0,
+            right: 4096,
+            bottom: 1080,
+        };
+        Ok(platform::Target::new(rect, (moved, 500), vec![rect]))
+    }
+
+    /// A pointer that never moves: whatever the SDK asks for, the report says the
+    /// same position again.
+    fn stuck_pointer(_device: &Device, _screen: platform::Screen) -> Result<platform::Target> {
+        let rect = Rect {
+            left: 0,
+            top: 0,
+            right: 2400,
+            bottom: 1080,
+        };
+        Ok(platform::Target::new(rect, (100, 100), vec![rect]))
+    }
+
+    #[test]
+    fn a_containing_anchor_reaches_the_monitor_that_holds_the_point() {
+        let device = mock();
+        let options =
+            MotionOptions::linear(80).with_screen(platform::Screen::Containing(1400, 300));
+        let shared = MovementShared::default();
+        run_move_to_with(&device, containing_pointer, 1400, 300, &options, &shared)
+            .expect("containing move");
+        let landed = device.cursor();
+        assert!(
+            (landed.0 - 1400).abs() <= 1 && (landed.1 - 300).abs() <= 1,
+            "the anchor must follow the point to the second screen, not {landed:?}"
+        );
+    }
+
+    #[test]
+    fn a_move_that_keeps_closing_the_gap_outlives_its_short_duration() {
+        LAGGING_X.store(0, Ordering::Relaxed);
+        let device = mock();
+        let options = MotionOptions::linear(40);
+        let shared = MovementShared::default();
+        // 4000 px at 200 px per 60 ms report is 1.2 s, three times the deadline a
+        // fixed `trajectory + 500 ms` would have given.
+        run_move_to_with(&device, lagging_pointer, 4000, 500, &options, &shared)
+            .expect("a slow but progressing pointer must not time out");
+        assert_eq!(LAGGING_X.load(Ordering::Relaxed), 4000);
+    }
+
+    #[test]
+    fn a_stalled_move_reports_the_remaining_distance_and_the_time_spent() {
+        let device = mock();
+        let options = MotionOptions::linear(20);
+        let shared = MovementShared::default();
+        let failure = run_move_to_with(&device, stuck_pointer, 1000, 500, &options, &shared)
+            .expect_err("a pointer that never moves cannot arrive");
+        assert_eq!(failure.code(), ErrorCode::Timeout);
+        assert!(
+            failure.message.contains("off by 900 px"),
+            "the timeout must say how far off it stopped: {failure}"
+        );
+        assert!(
+            failure.message.contains(" ms"),
+            "the timeout must say how long it waited: {failure}"
+        );
+    }
+
+    #[test]
+    fn a_clamped_move_is_counted_in_the_metrics() {
+        let device = mock();
+        let shared = MovementShared::default();
+        // The probe anchors on the right monitor, but (500, 300) is on the left
+        // one: the move converges inside the anchor and only the counter says the
+        // requested pixel was never reached.
+        run_move_to_with(
+            &device,
+            two_screens,
+            500,
+            300,
+            &MotionOptions::linear(60),
+            &shared,
+        )
+        .expect("clamped move");
+        let metrics = device.metrics();
+        assert_eq!(metrics.clamped_total, 1);
+        let clamp = metrics.last_clamp.expect("one clamp");
+        assert_eq!(
+            (
+                clamp.requested_x,
+                clamp.requested_y,
+                clamp.applied_x,
+                clamp.applied_y
+            ),
+            (500, 300, 960, 300)
+        );
     }
 
     #[test]

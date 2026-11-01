@@ -46,6 +46,20 @@ pub struct LatencyStats {
     pub max_us: u64,
 }
 
+/// The last time a move was pulled back into its target rectangle.
+///
+/// A clamp is how a multi-monitor mistake looks in the counters: the move
+/// converged, the click landed inside the target window, and only these numbers
+/// say the point asked for was never reached.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Clamp {
+    pub requested_x: i32,
+    pub requested_y: i32,
+    pub applied_x: i32,
+    pub applied_y: i32,
+}
+
 /// One device's counters as a host displays them. Cheap to clone and to
 /// serialize; it owns nothing shared.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -71,6 +85,11 @@ pub struct MetricsSnapshot {
     pub lease_faults: u64,
     /// Commands whose reply never arrived inside the timeout.
     pub timeouts: u64,
+    /// Absolute moves whose destination was outside the anchor rectangle and
+    /// were clamped into it: the click still happened, at the wrong pixel.
+    pub clamped_total: u64,
+    /// The most recent of those, with both points; `None` until one happens.
+    pub last_clamp: Option<Clamp>,
     /// Round-trip histogram; one sample per command that waited for a reply.
     pub latency: LatencyStats,
 }
@@ -84,6 +103,9 @@ struct Counters {
     reconnects: AtomicU64,
     lease_faults: AtomicU64,
     timeouts: AtomicU64,
+    clamped: AtomicU64,
+    last_requested: AtomicU64,
+    last_applied: AtomicU64,
     buckets: Box<[AtomicU64]>,
 }
 
@@ -97,6 +119,9 @@ impl Counters {
             reconnects: AtomicU64::new(0),
             lease_faults: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
+            clamped: AtomicU64::new(0),
+            last_requested: AtomicU64::new(0),
+            last_applied: AtomicU64::new(0),
             buckets: (0..BUCKETS).map(|_| AtomicU64::new(0)).collect(),
         }
     }
@@ -111,6 +136,9 @@ impl Counters {
         self.reconnects.store(0, Ordering::Relaxed);
         self.lease_faults.store(0, Ordering::Relaxed);
         self.timeouts.store(0, Ordering::Relaxed);
+        self.clamped.store(0, Ordering::Relaxed);
+        self.last_requested.store(0, Ordering::Relaxed);
+        self.last_applied.store(0, Ordering::Relaxed);
         for bucket in self.buckets.iter() {
             bucket.store(0, Ordering::Relaxed);
         }
@@ -169,6 +197,21 @@ impl Metrics {
         self.0.timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// An absolute move asked for a point outside its anchor rectangle and was
+    /// pulled back to `applied`.
+    ///
+    /// Two relaxed stores and one add: it runs once per absolute move, not per
+    /// report, so it stays off the HID path. A reader may see the counter move
+    /// one clamp ahead of the coordinates, which is the same promise every other
+    /// field of a snapshot makes.
+    pub fn record_clamp(&self, requested: (i32, i32), applied: (i32, i32)) {
+        self.0
+            .last_requested
+            .store(pack(requested), Ordering::Relaxed);
+        self.0.last_applied.store(pack(applied), Ordering::Relaxed);
+        self.0.clamped.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Adds one round trip to the histogram: one relaxed add, nothing else.
     pub fn observe_latency(&self, micros: u64) {
         self.0.buckets[bucket_index(micros)].fetch_add(1, Ordering::Relaxed);
@@ -206,6 +249,21 @@ impl Metrics {
             },
             None => LatencyStats::default(),
         };
+        // Read the counter before the coordinates: a reader that sees a clamp at
+        // all then sees the pair that belongs to it or a later one, never a
+        // stale pair behind a count of zero.
+        let clamped_total = counters.clamped.load(Ordering::Relaxed);
+        let last_clamp = (clamped_total > 0).then(|| {
+            let (requested_x, requested_y) =
+                unpack(counters.last_requested.load(Ordering::Relaxed));
+            let (applied_x, applied_y) = unpack(counters.last_applied.load(Ordering::Relaxed));
+            Clamp {
+                requested_x,
+                requested_y,
+                applied_x,
+                applied_y,
+            }
+        });
         MetricsSnapshot {
             frames_sent: counters.frames_sent.load(Ordering::Relaxed),
             frames_received: counters.frames_received.load(Ordering::Relaxed),
@@ -214,6 +272,8 @@ impl Metrics {
             reconnects: counters.reconnects.load(Ordering::Relaxed),
             lease_faults: counters.lease_faults.load(Ordering::Relaxed),
             timeouts: counters.timeouts.load(Ordering::Relaxed),
+            clamped_total,
+            last_clamp,
             latency,
         }
     }
@@ -223,6 +283,15 @@ impl Default for Metrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A point as one atomic word, so the last clamp needs no lock.
+fn pack(point: (i32, i32)) -> u64 {
+    (u64::from(point.0 as u32) << 32) | u64::from(point.1 as u32)
+}
+
+fn unpack(bits: u64) -> (i32, i32) {
+    ((bits >> 32) as u32 as i32, bits as u32 as i32)
 }
 
 /// Nearest-rank percentile over the occupied buckets, reported as the bucket the

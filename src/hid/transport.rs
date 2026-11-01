@@ -11,6 +11,8 @@ pub(crate) fn sdk_error(error: gdb::Error) -> anyhow::Error {
         ErrorCode::Lease => "session 租約失效，請重新連線",
         ErrorCode::Busy => "裝置忙碌（同名 session 或名額已滿）",
         ErrorCode::Unsupported => "此平台或韌體不支援這個操作",
+        ErrorCode::InvalidScreen => "移動目標的螢幕已不存在，請確認螢幕設定",
+        ErrorCode::StaleWindow => "視窗已失效（可能已關閉或最小化）",
         ErrorCode::Overflow => "輸出溢位",
         ErrorCode::Cancelled => "操作已取消",
         ErrorCode::Invalid => "參數無效",

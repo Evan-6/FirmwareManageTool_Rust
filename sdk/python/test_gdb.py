@@ -240,7 +240,7 @@ class RemoteTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_attached_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -296,7 +296,7 @@ class ProbeTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_presence_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -307,13 +307,13 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 7u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 8u", header)
         for name in self.SYMBOLS:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 
     def test_the_library_exports_every_shared_symbol(self):
         symbols = ("gdb_open_shared", "gdb_open_mock_shared", "gdb_stolen_frames")
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
         for name in symbols:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
         here = os.path.dirname(os.path.abspath(__file__))
@@ -375,7 +375,7 @@ class WatchTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_watch_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -428,6 +428,112 @@ class WatchTests(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(len(events), seen, "a stopped watch must not call back")
         watched.close()
+
+
+class ScreenTargetTests(unittest.TestCase):
+    """The monitor listing, the containing anchor and the clamp counters: what a
+    multi-monitor mistake looks like from the host side. No board needed."""
+
+    SYMBOLS = ("gdb_metrics_clamps", "gdb_monitors_json")
+
+    def test_the_library_exports_the_clamp_and_monitor_symbols(self):
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_clamp_and_monitor_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        self.assertIn("typedef struct gdb_clamps", header)
+        self.assertIn("gdb_screen_containing(", header)
+        self.assertIn("GDB_INVALID_SCREEN = 11", header)
+        self.assertIn("GDB_STALE_WINDOW = 12", header)
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_containing_packs_the_point_into_the_argument(self):
+        # x in the high 32 bits, y in the low 32, both as uint32 - the packing
+        # gdb_screen_containing does in C.
+        screen = gdb.Screen.containing(1400, -300)
+        self.assertEqual(screen.kind, 3)
+        self.assertEqual(screen.arg, (1400 << 32) | (-300 & 0xFFFFFFFF))
+
+        raw = screen._raw()
+        self.assertEqual((raw.kind, raw.arg), (3, (1400 << 32) | 0xFFFFFED4))
+        self.assertEqual((raw.arg >> 32) & 0xFFFFFFFF, 1400)
+        self.assertEqual(raw.arg & 0xFFFFFFFF, 0xFFFFFED4)
+
+        # A point inside the positive quadrant packs the same way, and the anchor
+        # is not a monitor index: kind 3 carries the point, not an ordinal.
+        self.assertEqual(gdb.Screen.containing(100, 200).arg, (100 << 32) | 200)
+
+    def test_clamps_start_at_zero_and_a_refused_move_does_not_count(self):
+        with gdb.Device.open_mock() as device:
+            clamps = device.clamps()
+            self.assertIsInstance(clamps, gdb.Clamps)
+            self.assertEqual(clamps.clamped_total, 0)
+            self.assertEqual(
+                clamps.as_dict(),
+                {"clamped_total": 0, "requested_x": 0, "requested_y": 0,
+                 "applied_x": 0, "applied_y": 0},
+            )
+
+            # A destination on no screen is refused rather than clamped: the
+            # counters only move for a move that happened.
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.mouse.move_to(5000, 5000, screen=gdb.Screen.containing(5000, 5000))
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
+            self.assertEqual(device.clamps().clamped_total, 0)
+
+            # A move the mock accepts leaves the counters alone too, and the
+            # struct still round-trips through the ABI.
+            device.mouse.move_to(100, 200, screen=gdb.Screen.containing(100, 200))
+            self.assertEqual(device.clamps().clamped_total, 0)
+
+    def test_a_closed_device_refuses_the_clamp_counters(self):
+        device = gdb.Device.open_mock()
+        device.close()
+        with self.assertRaises(gdb.GdbError) as caught:
+            device.clamps()
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+    def test_monitors_lists_the_desktop(self):
+        listed = gdb.monitors()
+        self.assertIsInstance(listed, list)
+        self.assertTrue(listed, "the system reports at least one monitor")
+        for entry in listed:
+            self.assertEqual(
+                set(entry), {"left", "top", "right", "bottom", "primary", "dpi"}
+            )
+            self.assertLess(entry["left"], entry["right"])
+            self.assertLess(entry["top"], entry["bottom"])
+            self.assertIsInstance(entry["primary"], bool)
+            self.assertGreaterEqual(entry["dpi"], 0)
+        self.assertGreaterEqual(
+            sum(1 for entry in listed if entry["primary"]), 1,
+            "exactly the entry Screen.primary resolves to is marked primary",
+        )
+
+    def test_the_anchor_error_codes_are_named(self):
+        self.assertEqual(gdb.ErrorCode.INVALID_SCREEN, 11)
+        self.assertEqual(gdb.ErrorCode.STALE_WINDOW, 12)
+        self.assertEqual(gdb.ErrorCode.NAMES[11], "INVALID_SCREEN")
+        self.assertEqual(gdb.ErrorCode.NAMES[12], "STALE_WINDOW")
+
+        with gdb.Device.open_mock() as device:
+            # A mock has one screen, so index 1 names a monitor it does not report.
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.mouse.move_to(10, 10, screen=gdb.Screen.monitor(1))
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID_SCREEN)
+            self.assertEqual(caught.exception.name, "INVALID_SCREEN")
+
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.mouse.move_to(10, 10, screen=gdb.Screen.window(0x1234))
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.STALE_WINDOW)
+            self.assertEqual(caught.exception.name, "STALE_WINDOW")
 
 
 if __name__ == "__main__":

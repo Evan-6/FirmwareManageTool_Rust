@@ -17,6 +17,12 @@ pub enum ErrorCode {
     Unsupported = 8,
     Cancelled = 9,
     Io = 10,
+    /// The anchor names a monitor the system does not report, or a monitor
+    /// layout that changed under a move.
+    InvalidScreen = 11,
+    /// A window anchor that cannot be resolved any more: the handle is gone, or
+    /// the window has no rectangle on any monitor (minimised, hidden).
+    StaleWindow = 12,
 }
 
 impl ErrorCode {
@@ -35,6 +41,9 @@ impl ErrorCode {
             7 => Self::Overflow,
             8 => Self::Unsupported,
             9 => Self::Cancelled,
+            10 => Self::Io,
+            11 => Self::InvalidScreen,
+            12 => Self::StaleWindow,
             _ => Self::Io,
         }
     }
@@ -51,6 +60,8 @@ impl ErrorCode {
             Self::Unsupported => "not supported on this platform or firmware",
             Self::Cancelled => "cancelled",
             Self::Io => "HID transfer failed",
+            Self::InvalidScreen => "the anchor names a monitor the system does not report",
+            Self::StaleWindow => "the window anchor no longer has a rectangle on any monitor",
         }
     }
 }
@@ -76,6 +87,12 @@ impl Error {
     }
     pub fn unsupported(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::Unsupported, message)
+    }
+    pub fn invalid_screen(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::InvalidScreen, message)
+    }
+    pub fn stale_window(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::StaleWindow, message)
     }
     pub fn cancelled() -> Self {
         Self::new(ErrorCode::Cancelled, ErrorCode::Cancelled.message())
@@ -160,5 +177,11 @@ mod tests {
         assert_eq!(ErrorCode::Timeout.as_u8(), 2);
         assert_eq!(ErrorCode::Cancelled.as_u8(), 9);
         assert_eq!(ErrorCode::Io.as_u8(), 10);
+        assert_eq!(ErrorCode::InvalidScreen.as_u8(), 11);
+        assert_eq!(ErrorCode::StaleWindow.as_u8(), 12);
+        for code in 0u8..=12 {
+            assert_eq!(ErrorCode::from_u8(code).as_u8(), code, "{code}");
+        }
+        assert_eq!(ErrorCode::from_u8(200), ErrorCode::Io);
     }
 }

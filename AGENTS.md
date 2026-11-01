@@ -33,6 +33,7 @@ cargo clippy --workspace --exclude firmware-manage-tool-app --all-targets -- -D 
 cargo test  --workspace --exclude firmware-manage-tool-app --all-targets
 python scripts/sync-input-protocol.py --check
 python scripts/check-clients.py
+python scripts/check-bindings.py
 bash scripts/check-sdk.sh
 node scripts/check-ipc.mjs
 npm --prefix ui ci && npm --prefix ui run build      # required before src-tauri builds
@@ -55,6 +56,12 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
 - Keep the IPC contract stable: `node scripts/check-ipc.mjs` compares
   `generate_handler![...]` / `enum UiEvent` with `ui/src/lib/ipc.ts` and
   `types.ts` in both directions.
+- A capability reaches another language as header → FFI → all three bindings.
+  `python scripts/check-bindings.py` treats `sdk/ffi/include/gdb.h` plus the
+  exported symbols as the list and fails when C++, Python or Go has no name for a
+  symbol, for a field of a struct passed by pointer, or for an anchor
+  constructor; a binding that compiles but lacks the symbol fails only at run
+  time in that one language.
 - Documents describe the current state only. No changelogs, no migration notes,
   no "previously we…" — git holds the history.
 - Chinese for user-facing text and comments, English for SDK docs and API names.
@@ -67,6 +74,14 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
   steals it. `Ownership::Shared` expects that (one `Busy`, no reconnect) and
   `probe` never touches the queue.
 - `ui/dist` is embedded at compile time; rebuild the shell after touching `ui/`.
+- An absolute move is clamped into its anchor and then converges anyway: with the
+  default `Primary`, a coordinate on a second monitor lands on the primary edge
+  with no error. Anchors are `Screen::{Primary, Monitor(i), Containing(x, y),
+  Window(hwnd)}`; enumeration order is not the numbering Windows settings shows,
+  so an index comes from `platform::monitors()` / `gdb_monitors_json`. A move that
+  was clamped shows up in `clamped_total` and `last_clamp`, never in `timeouts`;
+  a window anchor that no longer resolves is `StaleWindow`, a bad monitor index
+  `InvalidScreen`.
 - FFI pointers are the caller's contract; strings returned by the library must be
   freed with `gdb_string_free`.
 - Windows paths: native tools (cargo/python/node) do not understand `/d/...`.

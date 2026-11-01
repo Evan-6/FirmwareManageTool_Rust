@@ -29,7 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
-	ABIMinor   = 7
+	ABIMinor   = 8
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -40,22 +40,24 @@ const (
 type Code int32
 
 const (
-	OK           Code = 0
-	Invalid      Code = 1
-	Timeout      Code = 2
-	Disconnected Code = 3
-	Busy         Code = 4
-	Lease        Code = 5
-	Framing      Code = 6
-	Overflow     Code = 7
-	Unsupported  Code = 8
-	Cancelled    Code = 9
-	IO           Code = 10
+	OK            Code = 0
+	Invalid       Code = 1
+	Timeout       Code = 2
+	Disconnected  Code = 3
+	Busy          Code = 4
+	Lease         Code = 5
+	Framing       Code = 6
+	Overflow      Code = 7
+	Unsupported   Code = 8
+	Cancelled     Code = 9
+	IO            Code = 10
+	InvalidScreen Code = 11 // the anchor names a monitor the system does not report
+	StaleWindow   Code = 12 // the window handle is gone, minimised or on no monitor
 )
 
 func (c Code) String() string {
-	names := []string{"OK", "INVALID", "TIMEOUT", "DISCONNECTED", "BUSY", "LEASE", "FRAMING", "OVERFLOW", "UNSUPPORTED", "CANCELLED", "IO"}
-	if int(c) < len(names) {
+	names := []string{"OK", "INVALID", "TIMEOUT", "DISCONNECTED", "BUSY", "LEASE", "FRAMING", "OVERFLOW", "UNSUPPORTED", "CANCELLED", "IO", "INVALID_SCREEN", "STALE_WINDOW"}
+	if int(c) >= 0 && int(c) < len(names) {
 		return names[c]
 	}
 	return fmt.Sprintf("CODE(%d)", int32(c))
@@ -189,10 +191,34 @@ type Metrics struct {
 	LatencyMaxUs   uint64
 }
 
+// Clamps is the count of absolute moves the anchor rectangle had to pull back,
+// with the last one's coordinates, laid out field for field like gdb_clamps.
+//
+// The four coordinates are meaningful when ClampedTotal is not zero, and they
+// may be one move behind it: each field is read on its own.
+type Clamps struct {
+	ClampedTotal uint64
+	RequestedX   int32
+	RequestedY   int32
+	AppliedX     int32
+	AppliedY     int32
+}
+
+// Monitor is one display, as Monitors lists them: the order ScreenMonitor
+// indexes them in, which is not the numbering Windows settings shows.
+type Monitor struct {
+	Left    int32  `json:"left"`
+	Top     int32  `json:"top"`
+	Right   int32  `json:"right"`
+	Bottom  int32  `json:"bottom"`
+	Primary bool   `json:"primary"`
+	Dpi     uint32 `json:"dpi"`
+}
+
 // Screen is which rectangle an absolute move is clamped into. Coordinates stay
 // virtual-desktop physical pixels: the target is not a new origin.
 type Screen struct {
-	Kind int32 // 0 primary, 1 monitor index, 2 window handle
+	Kind int32 // 0 primary, 1 monitor index, 2 window handle, 3 monitor holding a point
 	Arg  int64
 }
 
@@ -205,6 +231,15 @@ func ScreenMonitor(index int32) Screen { return Screen{Kind: 1, Arg: int64(index
 
 // ScreenWindow is a window's bounding rectangle; hwnd is the caller's pointer.
 func ScreenWindow(hwnd int64) Screen { return Screen{Kind: 2, Arg: hwnd} }
+
+// ScreenContaining anchors on whichever monitor holds the point, so a caller
+// that starts a move from a coordinate does not have to know which display that
+// is. The point is packed the way gdb_screen_containing packs it: x in the high
+// 32 bits, y in the low 32, both as uint32. A point on no monitor resolves to the
+// union of every screen, and the move then fails with Unsupported naming it.
+func ScreenContaining(x, y int32) Screen {
+	return Screen{Kind: 3, Arg: int64(uint64(uint32(x))<<32 | uint64(uint32(y)))}
+}
 
 // rawScreen mirrors gdb_screen, padding included.
 type rawScreen struct {
@@ -219,6 +254,8 @@ var (
 	dll     *syscall.LazyDLL
 
 	procLastError      *syscall.LazyProc
+	procVersion        *syscall.LazyProc
+	procABIVersion     *syscall.LazyProc
 	procStringFree     *syscall.LazyProc
 	procSetLogLevel    *syscall.LazyProc
 	procSetLogSink     *syscall.LazyProc
@@ -253,6 +290,8 @@ var (
 	procStartMoveToOn  *syscall.LazyProc
 	procMetricsGet     *syscall.LazyProc
 	procMetricsReset   *syscall.LazyProc
+	procMetricsClamps  *syscall.LazyProc
+	procMonitorsJSON   *syscall.LazyProc
 	procButton         *syscall.LazyProc
 	procClick          *syscall.LazyProc
 	procDoubleClick    *syscall.LazyProc
@@ -329,6 +368,8 @@ func library() *syscall.LazyDLL {
 		}
 		dll = syscall.NewLazyDLL(path)
 		procLastError = dll.NewProc("gdb_last_error")
+		procVersion = dll.NewProc("gdb_version")
+		procABIVersion = dll.NewProc("gdb_abi_version")
 		procStringFree = dll.NewProc("gdb_string_free")
 		procSetLogLevel = dll.NewProc("gdb_set_log_level")
 		procSetLogSink = dll.NewProc("gdb_set_log_sink")
@@ -363,6 +404,8 @@ func library() *syscall.LazyDLL {
 		procStartMoveToOn = dll.NewProc("gdb_mouse_start_move_to_on")
 		procMetricsGet = dll.NewProc("gdb_metrics_get")
 		procMetricsReset = dll.NewProc("gdb_metrics_reset")
+		procMetricsClamps = dll.NewProc("gdb_metrics_clamps")
+		procMonitorsJSON = dll.NewProc("gdb_monitors_json")
 		procButton = dll.NewProc("gdb_mouse_button")
 		procClick = dll.NewProc("gdb_mouse_click")
 		procDoubleClick = dll.NewProc("gdb_mouse_double_click")
@@ -531,6 +574,23 @@ func ListJSON() (string, error) {
 	return take(pointer)
 }
 
+// Version is the SDK version string the library was built from, e.g. "0.1.0".
+func Version() string {
+	library()
+	pointer, _, _ := procVersion.Call()
+	return cString(pointer)
+}
+
+// LibraryABIVersion is the major version of the C ABI the loaded library
+// exports; one that disagrees with ABIVersion is a library this binding cannot
+// drive. It is a function rather than a constant because only the library
+// knows, and the constant is what the binding was written against.
+func LibraryABIVersion() uint32 {
+	library()
+	value, _, _ := procABIVersion.Call()
+	return uint32(value)
+}
+
 // Open connects to the first device matching selector (serial or HID path).
 func Open(selector string, timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
 	library()
@@ -650,6 +710,46 @@ func (d *Device) ResetMetrics() error {
 	library()
 	code, _, _ := procMetricsReset.Call(d.handle)
 	return check(code)
+}
+
+// Clamps reports the absolute moves whose destination was outside the anchor
+// rectangle and were pulled back into it, plus the last one's coordinates.
+//
+// The move still converges and the click still lands inside the window: only
+// these numbers say the requested pixel was never reached, which is the shape
+// of a multi-monitor mistake. The coordinates are meaningful when ClampedTotal
+// is not zero.
+func (d *Device) Clamps() (Clamps, error) {
+	library()
+	var value Clamps
+	code, _, _ := procMetricsClamps.Call(d.handle, uintptr(unsafe.Pointer(&value)))
+	if code != 0 {
+		return Clamps{}, check(code)
+	}
+	return value, nil
+}
+
+// MonitorsJSON lists every monitor as the ABI's JSON array, in exactly the order
+// ScreenMonitor indexes them. No handle is needed and no packet is sent.
+func MonitorsJSON() (string, error) {
+	library()
+	pointer, _, _ := procMonitorsJSON.Call()
+	return take(pointer)
+}
+
+// Monitors is MonitorsJSON decoded: one entry per display, so a caller reads the
+// rectangles instead of guessing an index from the display number Windows
+// settings shows.
+func Monitors() ([]Monitor, error) {
+	text, err := MonitorsJSON()
+	if err != nil {
+		return nil, err
+	}
+	var monitors []Monitor
+	if err := json.Unmarshal([]byte(text), &monitors); err != nil {
+		return nil, &Error{Code: Framing, Message: err.Error()}
+	}
+	return monitors, nil
 }
 
 func boolArg(value bool) uintptr {

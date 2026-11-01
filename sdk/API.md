@@ -31,6 +31,8 @@ for the handle you want and a working call.
 | raw relative move (no barrier) | `move_raw(dx, dy)` | `move_raw(dx, dy)` | `.move_raw(dx, dy)` | `MoveRaw(dx, dy)` |
 | absolute move | `move_to(x, y, opts)` | `move_to(x, y, ms)` | `.move_to(x, y, ms)` | `MoveTo(x, y, ms, p)` |
 | absolute move on a screen | `MotionOptions::with_screen` | `move_to(x, y, Screen::monitor(i))` | `.move_to(…, screen=Screen.monitor(1))` | `MoveToOn(x, y, ScreenMonitor(1), …)` |
+| absolute move from the monitor holding a point | `Screen::Containing(x, y)` | `Screen::containing(x, y)` | `Screen.containing(x, y)` | `ScreenContaining(x, y)` |
+| monitor layout | `platform::monitors()` | `monitors_json()` | `monitors()` | `Monitors()` |
 | path | `move_path(&[(x, y)], opts)` | `move_path({{…}}, ms)` | `.move_path([(x, y)], ms)` | `MovePath([][2]int32, ms, p)` |
 | async move | `start_move_to/by/path` | `start_move_to/by/path` | `.start_move_to/by/path` | `StartMoveTo/By` |
 | button | `button(Button, down)` | `button(Button, down)` | `.button(btn, down)` | `Button(btn, down)` |
@@ -51,6 +53,7 @@ for the handle you want and a working call.
 | wait idle | `wait_idle(dur)` | `wait_idle(ms)` | `.wait_idle(ms)` | `WaitIdle(ms)` |
 | take errors | `take_errors()` | `take_errors_json()` | `.take_errors()` | `TakeErrors()` |
 | counters | `device.metrics()` | `metrics()` | `.metrics()` | `Metrics()` |
+| clamped moves | `MetricsSnapshot::last_clamp` | `clamps()` | `.clamps()` | `Clamps()` |
 | counter reset | `reset_metrics()` | `reset_metrics()` | `.reset_metrics()` | `ResetMetrics()` |
 | presence, no session | `probe::read_selector(sel)` | `probe(sel)` | `probe(sel)` | `Probe(sel)` |
 | presence for the whole bus | `probe::all()` | `probe_all()` | `probe_all()` | `ProbeAll()` |
@@ -223,9 +226,13 @@ pub enum Ease { Jerk, EaseInOut, Linear, EaseIn, EaseOut, CubicBezier { x1, y1, 
 
 ```c
 typedef struct gdb_screen {
-    int32_t kind;   /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND) */
+    int32_t kind;   /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND),
+                       3 monitor containing a point (arg = packed x,y) */
     int64_t arg;    /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
 } gdb_screen;
+
+/* kind 3: the high 32 bits of arg are x and the low 32 bits are y. */
+static inline gdb_screen gdb_screen_containing(int32_t x, int32_t y);
 
 int32_t gdb_mouse_move_to_on(gdb_device *, int32_t x, int32_t y, gdb_screen screen,
                              uint32_t duration_ms, const gdb_profile *);
@@ -234,6 +241,10 @@ int32_t gdb_mouse_move_path_on(gdb_device *, const gdb_point *, size_t count,
 gdb_movement *gdb_mouse_start_move_to_on(gdb_device *, int32_t x, int32_t y,
                                          gdb_screen screen, uint32_t duration_ms,
                                          const gdb_profile *);
+
+/* Every monitor in the order kind 1 indexes them, no handle needed:
+   [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, …] */
+char *gdb_monitors_json(void);
 ```
 
 `gdb_mouse_move_to` and `gdb_mouse_drag` clamp to the primary monitor; the `_on`
@@ -246,15 +257,35 @@ origin.
 | primary | `Screen::Primary` | `Screen::primary()` | `Screen.primary` | `ScreenPrimary()` |
 | monitor *i* | `Screen::Monitor(i)` | `Screen::monitor(i)` | `Screen.monitor(i)` | `ScreenMonitor(i)` |
 | window | `Screen::Window(hwnd)` | `Screen::window(hwnd)` | `Screen.window(hwnd)` | `ScreenWindow(hwnd)` |
+| monitor holding a point | `Screen::Containing(x, y)` | `Screen::containing(x, y)` | `Screen.containing(x, y)` | `ScreenContaining(x, y)` |
+| the layout | `platform::monitors()` | `monitors_json()` | `monitors()` | `Monitors()` / `MonitorsJSON()` |
 
 `Primary` follows the primary-monitor flag, which need not be index 0.
 `Monitor(i)` is the `i`-th rectangle in `EnumDisplayMonitors` order — not the
-display number Windows settings shows. A point no monitor covers (a gap between
-monitors, past the last edge) is `Unsupported` with a message naming target and
-desktop; a monitor index past the end, a window that no longer exists and a window
-with an empty rectangle fail the same way before the pointer moves. The mock
-reports one 1920×1080 screen, where `Primary` and `Monitor(0)` work. Relative moves
-ignore the target.
+display number Windows settings shows — so a caller that picks an index reads
+`monitors()` first instead of guessing. `Containing(x, y)` is the anchor for a
+destination the caller only knows as a coordinate: it resolves to whichever
+monitor holds that point, so a move aimed at a second screen no longer lands on
+the primary monitor's edge.
+
+Three failures are told apart by code, not by message: `Unsupported` when the
+platform has no display API, or the destination is on no monitor at all (the
+message names the target and the union of the screens); `InvalidScreen` when a
+monitor index is past the end or the layout changes under a running move;
+`StaleWindow` when the window handle no longer resolves — gone, minimised, empty
+or on no monitor — so the caller knows to re-read the handle or fall back to a
+monitor instead of retrying a call this machine will never support. The mock
+reports one 1920×1080 screen, where `Primary`, `Monitor(0)` and `Containing`
+work. Relative moves ignore the target.
+
+The trajectory duration is a floor, not a budget: the deadline moves forward every
+time the pointer closes the gap, and a move whose reports stop making progress
+fails after 400 ms with `Timeout` and a message carrying the remaining distance and
+the time spent. A long jump paired with a short duration therefore finishes; a
+stuck pointer reports where it stopped. A destination outside the target
+rectangle but on a screen is still clamped into it, and that is counted — see
+[Clamped moves](#clamped-moves) — because a converging move with the wrong anchor
+otherwise looks like success.
 
 ### Async moves
 
@@ -361,6 +392,16 @@ typedef struct gdb_metrics {
 
 int32_t gdb_metrics_get(const gdb_device *device, gdb_metrics *out);
 int32_t gdb_metrics_reset(gdb_device *device);
+
+typedef struct gdb_clamps {
+    uint64_t clamped_total;
+    int32_t requested_x;
+    int32_t requested_y;
+    int32_t applied_x;
+    int32_t applied_y;
+} gdb_clamps;
+
+int32_t gdb_metrics_clamps(const gdb_device *device, gdb_clamps *out);
 ```
 
 `gdb_metrics_get` is `Invalid` on a NULL handle or NULL `out`, and leaves `out`
@@ -377,6 +418,25 @@ read by `device.metrics()`; `reset_metrics()` zeroes everything.
   eight per doubling up to 4,194,304 µs: exact below 4 ms, within 6% above.
 - Reading takes no session lock, two fields may be one report apart, and a report
   racing `reset` may be lost. Nothing ever blocks the sender.
+
+### Clamped moves
+
+An absolute move whose destination lies outside its anchor rectangle is clamped
+into it and still converges, which is what a wrong or missing anchor looks like:
+the mouse ends up on the primary monitor's edge and nothing reports an error.
+`gdb_metrics_clamps` is the readout that tells that apart from a move that never
+arrived — `timeouts` covers the second case.
+
+| Field | Meaning |
+| --- | --- |
+| `clamped_total` | absolute moves that had to be clamped since the last reset |
+| `requested_x`, `requested_y` | the point the caller asked for, in the most recent one |
+| `applied_x`, `applied_y` | where the move actually aimed inside the anchor rectangle |
+
+The coordinates are meaningful while `clamped_total` is not zero; `reset_metrics`
+zeroes them with everything else. Rust reads the same numbers through
+`MetricsSnapshot::clamped_total` and `MetricsSnapshot::last_clamp`; C++ is
+`device.clamps()`, Python `device.clamps()`, Go `device.Clamps()`.
 
 ## Presence
 
@@ -599,7 +659,7 @@ Prefer the typed calls: they keep the held state and the mock honest.
 | --- | --- | --- |
 | 0 | Ok | — |
 | 1 | Invalid | bad argument, unknown usage, wrong session id |
-| 2 | Timeout | no reply / movement did not settle |
+| 2 | Timeout | no reply / the movement stopped closing the gap |
 | 3 | Disconnected | device gone, no match for the selector |
 | 4 | Busy | eight owners, the session id already open, or — on a shared device — a reply another process took |
 | 5 | Lease | the 2 s lease expired |
@@ -608,6 +668,8 @@ Prefer the typed calls: they keep the held state and the mock honest.
 | 8 | Unsupported | platform or firmware lacks the feature |
 | 9 | Cancelled | the operation was cancelled |
 | 10 | Io | HID read/write failed, or a panic at the ABI boundary |
+| 11 | InvalidScreen | the anchor names a monitor the system does not report, or the monitor layout changed mid-move |
+| 12 | StaleWindow | the window handle no longer resolves: gone, minimised, or on no monitor |
 
 The value a failing call returns is the code, and `gdb_last_error(buffer,
 capacity)` yields the same code plus a message. Bindings convert it to

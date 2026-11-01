@@ -27,29 +27,36 @@ use gdb_sdk::task::{Priority, Scheduler, TaskId};
 use gdb_sdk::{Button, Device, DeviceInfo, DeviceOptions, TypeTextConfig};
 use input_protocol::KeyId;
 use input_protocol::v3::{self, Command, InputState, SessionInfo, Status, StatusExt};
-use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 mod watch;
 
-thread_local! {
-    static LAST_ERROR: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
-}
+/// The failure the last call on any thread reported.
+///
+/// The code is an atomic store on the success path; the message sits behind a
+/// mutex and is written before the code, so a reader that sees a non-zero code
+/// sees a message that belongs to some failure. It is deliberately *not* a
+/// thread-local: a caller in another language reads it in a second call, and Go
+/// is free to run that call on a different OS thread than the one that failed.
+static LAST_CODE: AtomicI32 = AtomicI32::new(0);
+static LAST_MESSAGE: Mutex<String> = Mutex::new(String::new());
 
 fn set_last(error: &Error) {
-    LAST_ERROR.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        slot.0 = i32::from(error.code().as_u8());
-        slot.1 = error.message.clone();
-    });
+    if let Ok(mut message) = LAST_MESSAGE.lock() {
+        message.clear();
+        message.push_str(&error.message);
+    }
+    LAST_CODE.store(i32::from(error.code().as_u8()), Ordering::Relaxed);
 }
 
+/// The success path: one relaxed store, no lock, nothing allocated.
 fn clear_last() {
-    LAST_ERROR.with(|slot| slot.borrow_mut().0 = 0);
+    LAST_CODE.store(0, Ordering::Relaxed);
 }
 
 fn guard<T>(body: impl FnOnce() -> gdb_sdk::Result<T>) -> gdb_sdk::Result<T> {
@@ -421,21 +428,23 @@ pub extern "C" fn gdb_version() -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_last_error(buffer: *mut c_char, capacity: usize) -> i32 {
-    LAST_ERROR.with(|slot| {
-        let slot = slot.borrow();
-        if !buffer.is_null() && capacity > 0 {
-            let mut bytes = slot.1.as_bytes().to_vec();
-            bytes.push(0);
-            let count = bytes.len().min(capacity);
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, count);
-                if count == capacity {
-                    *buffer.add(capacity - 1) = 0;
-                }
+    let code = LAST_CODE.load(Ordering::Relaxed);
+    if !buffer.is_null() && capacity > 0 {
+        let message = LAST_MESSAGE
+            .lock()
+            .map(|message| message.clone())
+            .unwrap_or_default();
+        let mut bytes = message.as_bytes().to_vec();
+        bytes.push(0);
+        let count = bytes.len().min(capacity);
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, count);
+            if count == capacity {
+                *buffer.add(capacity - 1) = 0;
             }
         }
-        slot.0
-    })
+    }
+    code
 }
 
 #[unsafe(no_mangle)]
@@ -1685,6 +1694,40 @@ pub extern "C" fn gdb_metrics_reset(raw: *mut GdbDevice) -> i32 {
     }))
 }
 
+/// Clamped absolute moves, laid out as gdb.h's gdb_clamps.
+#[repr(C)]
+pub struct GdbClamps {
+    pub clamped_total: u64,
+    pub requested_x: i32,
+    pub requested_y: i32,
+    pub applied_x: i32,
+    pub applied_y: i32,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_metrics_clamps(raw: *const GdbDevice, out: *mut GdbClamps) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let target = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        let metrics = handle.device.metrics();
+        let clamp = metrics.last_clamp.unwrap_or_default();
+        *target = GdbClamps {
+            clamped_total: metrics.clamped_total,
+            requested_x: clamp.requested_x,
+            requested_y: clamp.requested_y,
+            applied_x: clamp.applied_x,
+            applied_y: clamp.applied_y,
+        };
+        Ok(())
+    }))
+}
+
+/// Every monitor, in the order the screen kinds index them.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_monitors_json() -> *mut c_char {
+    json_string(guard(gdb_sdk::platform::monitors_json))
+}
+
 /// Screen target, laid out as gdb.h's gdb_screen.
 #[repr(C)]
 pub struct GdbScreen {
@@ -1692,14 +1735,20 @@ pub struct GdbScreen {
     pub arg: i64,
 }
 
-/// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND).
+/// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND), 3 the monitor
+/// containing a point (arg = x in the high 32 bits, y in the low 32).
 fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
     match kind {
         0 => Ok(Screen::Primary),
         1 => Ok(Screen::Monitor(arg as usize)),
         2 => Ok(Screen::Window(arg as isize)),
+        3 => Ok(Screen::Containing(
+            (arg as u64 >> 32) as u32 as i32,
+            arg as u32 as i32,
+        )),
         other => Err(Error::invalid(format!(
-            "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window"
+            "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window, \
+             3 the monitor containing a packed point"
         ))),
     }
 }
@@ -2262,5 +2311,50 @@ mod tests {
             i32::from(ErrorCode::Invalid.as_u8())
         );
         gdb_remote_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn the_monitor_listing_and_the_containing_anchor_keep_their_shape() {
+        // kind 3 packs both coordinates: x in the high half, y in the low half.
+        let packed = (1400u64 << 32) | u64::from(-300i32 as u32);
+        assert_eq!(
+            screen_from(3, packed as i64).expect("containing"),
+            Screen::Containing(1400, -300)
+        );
+        assert_eq!(screen_from(9, 0).unwrap_err().code(), ErrorCode::Invalid);
+
+        #[cfg(windows)]
+        {
+            let listing = json_of(gdb_monitors_json());
+            let monitors = listing.as_array().expect("an array");
+            assert!(!monitors.is_empty(), "the system reports no monitors");
+            for monitor in monitors {
+                for field in ["left", "top", "right", "bottom", "primary", "dpi"] {
+                    assert!(monitor.get(field).is_some(), "a monitor without {field}");
+                }
+            }
+            assert!(
+                monitors.iter().filter(|m| m["primary"] == true).count() == 1,
+                "exactly one monitor is the primary one"
+            );
+        }
+
+        // The clamp readout starts empty, and a caller mistake is typed.
+        let raw = open_mock();
+        let mut clamps = GdbClamps {
+            clamped_total: 1,
+            requested_x: 7,
+            requested_y: 7,
+            applied_x: 7,
+            applied_y: 7,
+        };
+        assert_eq!(gdb_metrics_clamps(raw, &mut clamps), 0, "{}", message());
+        assert_eq!(clamps.clamped_total, 0);
+        assert_eq!((clamps.applied_x, clamps.applied_y), (0, 0));
+        assert_eq!(
+            gdb_metrics_clamps(ptr::null(), &mut clamps),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_device_free(raw);
     }
 }

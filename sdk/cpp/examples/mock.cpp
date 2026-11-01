@@ -134,8 +134,9 @@ int main() {
         quiet.close();
     }
 
-    // Screen targets: monitor 0 is the mock's one screen, and a kind the ABI does
-    // not define is the caller's mistake rather than a move.
+    // Screen targets: monitor 0 is the mock's one screen, and the containing
+    // anchor resolves a point to whichever display holds it instead of making the
+    // caller name one.
     device.mouse().move_to(200, 200, gdb::Screen::monitor(0), 20);
     device.mouse().move_path({{100, 100}, {120, 120}}, gdb::Screen::monitor(0), 10);
     {
@@ -143,18 +144,49 @@ int main() {
         movement.wait(5000);
         assert(movement.finished());
     }
+    {
+        const gdb::Screen anchor = gdb::Screen::containing(100, 200);
+        assert(anchor.kind == 3 && "the containing anchor is screen kind 3");
+        device.mouse().move_to(100, 200, anchor, 20);
+    }
     try {
-        device.mouse().move_to(10, 10, gdb::Screen{3, 0}, 0);
-        assert(false && "screen kind 3 is not defined");
+        device.mouse().move_to(10, 10, gdb::Screen{4, 0}, 0);
+        assert(false && "screen kind 4 is not defined");
     } catch (const gdb::Error& error) {
         assert(error.code() == gdb::ErrorCode::Invalid);
     }
-    // The mock pretends to have one 1920x1080 screen, so index 1 names nothing.
+    // The mock pretends to have one 1920x1080 screen, so index 1 names a monitor
+    // the system does not report.
     try {
         device.mouse().move_to(10, 10, gdb::Screen::monitor(1), 0);
         assert(false && "the mock has a single screen");
     } catch (const gdb::Error& error) {
-        assert(error.code() == gdb::ErrorCode::Unsupported);
+        assert(error.code() == gdb::ErrorCode::InvalidScreen);
+    }
+    // A window the mock does not have is a stale one, not a crash.
+    try {
+        device.mouse().move_to(10, 10, gdb::Screen::window(0x1234), 0);
+        assert(false && "the mock has no windows");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::StaleWindow);
+    }
+
+    // The clamp counters and the monitor listing: the listing needs no handle and
+    // sends no packet, and the counters say a move was pulled back - which the
+    // mock never does, because its single screen covers every destination it
+    // accepts.
+    {
+        const gdb::Clamps clamps = device.clamps();
+        std::cout << "clamps total=" << clamps.clamped_total
+                  << " requested=" << clamps.requested_x << "," << clamps.requested_y
+                  << " applied=" << clamps.applied_x << "," << clamps.applied_y << "\n";
+        assert(clamps.clamped_total == 0 && "nothing has been clamped yet");
+
+        const std::string listed = gdb::monitors_json();
+        std::cout << "monitors " << listed << "\n";
+        assert(listed.size() >= 2 && listed.front() == '[' && listed.back() == ']');
+        assert(listed.find("\"primary\"") != std::string::npos);
+        assert(listed.find("\"dpi\"") != std::string::npos);
     }
 
     // The watch: the bus right now, and silence once it is stopped. Whether a

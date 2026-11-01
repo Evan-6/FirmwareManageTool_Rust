@@ -42,11 +42,12 @@ __all__ = [
     "watch",
     "probe",
     "probe_all",
+    "monitors",
     "LIBRARY",
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 7
+ABI_VERSION_MINOR = 8
 
 
 class ErrorCode:
@@ -61,6 +62,8 @@ class ErrorCode:
     UNSUPPORTED = 8
     CANCELLED = 9
     IO = 10
+    INVALID_SCREEN = 11
+    STALE_WINDOW = 12
 
     NAMES = {
         0: "OK",
@@ -74,6 +77,8 @@ class ErrorCode:
         8: "UNSUPPORTED",
         9: "CANCELLED",
         10: "IO",
+        11: "INVALID_SCREEN",
+        12: "STALE_WINDOW",
     }
 
 
@@ -252,6 +257,24 @@ class Metrics(ctypes.Structure):
         return {name: getattr(self, name) for name, _ in self._fields_}
 
 
+class Clamps(ctypes.Structure):
+    """Clamped absolute moves, as gdb_metrics_clamps fills them.
+
+    A move whose destination was outside the anchor rectangle is pulled back
+    into it: it still converges and the click still lands inside the window, and
+    only these numbers say the requested pixel was never reached. The four
+    coordinates are meaningful when ``clamped_total`` is not zero.
+    """
+    _fields_ = [
+        ("clamped_total", c_uint64),
+        ("requested_x", c_int32), ("requested_y", c_int32),
+        ("applied_x", c_int32), ("applied_y", c_int32),
+    ]
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name, _ in self._fields_}
+
+
 class Screen:
     """Which rectangle an absolute move is clamped into. Coordinates stay
     virtual-desktop physical pixels; the target is not a new origin."""
@@ -268,6 +291,18 @@ class Screen:
     def window(cls, hwnd: int) -> "Screen":
         return cls(2, hwnd)
 
+    @classmethod
+    def containing(cls, x: int, y: int) -> "Screen":
+        """The monitor holding the point, so a caller that starts a move from a
+        coordinate does not have to know which display that is.
+
+        The point travels in the same 64-bit argument every target uses: x in the
+        high 32 bits, y in the low 32, both as uint32. A point on no monitor
+        resolves to the union of every screen, and the move then fails with
+        ``UNSUPPORTED`` naming it.
+        """
+        return cls(3, ((x & 0xFFFFFFFF) << 32) | (y & 0xFFFFFFFF))
+
     def _raw(self) -> _Screen:
         return _Screen(self.kind, self.arg)
 
@@ -278,6 +313,10 @@ _D.gdb_metrics_get.argtypes = [c_void_p, POINTER(Metrics)]
 _D.gdb_metrics_get.restype = c_int32
 _D.gdb_metrics_reset.argtypes = [c_void_p]
 _D.gdb_metrics_reset.restype = c_int32
+_D.gdb_metrics_clamps.argtypes = [c_void_p, POINTER(Clamps)]
+_D.gdb_metrics_clamps.restype = c_int32
+_D.gdb_monitors_json.argtypes = []
+_D.gdb_monitors_json.restype = c_void_p
 _D.gdb_mouse_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_to_on.restype = c_int32
 _D.gdb_mouse_move_path_on.argtypes = [c_void_p, POINTER(_Point), c_size_t, _Screen, c_uint32, POINTER(_Profile)]
@@ -818,6 +857,14 @@ class Device:
     def reset_metrics(self) -> None:
         _check(_D.gdb_metrics_reset(self._handle()))
 
+    def clamps(self) -> Clamps:
+        """The absolute moves the anchor rectangle pulled back, and the last
+        one's coordinates: the numbers that say a requested pixel was never
+        reached. Meaningful when ``clamped_total`` is not zero."""
+        out = Clamps()
+        _check(_D.gdb_metrics_clamps(self._handle(), ctypes.byref(out)))
+        return out
+
     @property
     def status(self) -> dict:
         return _take(_D.gdb_status(self._handle()))
@@ -1046,6 +1093,18 @@ def probe(selector: str | None = None) -> dict:
 def probe_all() -> list[dict]:
     """Every attached board, one Feature 14 read each. An empty bus is ``[]``."""
     return _take(_D.gdb_probe_all())
+
+
+def monitors() -> list[dict]:
+    """Every monitor, in exactly the order ``Screen.monitor`` indexes them.
+
+    Each entry is ``{"left", "top", "right", "bottom", "primary", "dpi"}`` in
+    virtual-desktop physical pixels. ``primary`` marks the entry ``Screen.primary``
+    resolves to and ``dpi`` is the effective DPI (96 = 100%, 0 when the system
+    will not say). No device handle is needed and no packet is sent, so this is
+    safe beside a session; read it instead of guessing which index a display is.
+    """
+    return _take(_D.gdb_monitors_json())
 
 
 class Observer:

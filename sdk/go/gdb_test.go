@@ -496,12 +496,13 @@ func TestMoveToOnTargetsAScreenAndRejectsAnUnknownKind(t *testing.T) {
 	movement.Close()
 
 	var failure *Error
-	if err := mouse.MoveToOn(10, 10, Screen{Kind: 3}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
-		t.Fatalf("kind 3 = %v, want Invalid", err)
+	if err := mouse.MoveToOn(10, 10, Screen{Kind: 4}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("kind 4 = %v, want Invalid", err)
 	}
-	// A mock has one 1920x1080 screen, so index 1 names nothing.
-	if err := mouse.MoveToOn(10, 10, ScreenMonitor(1), 0, nil); !errors.As(err, &failure) || failure.Code != Unsupported {
-		t.Fatalf("monitor 1 = %v, want Unsupported", err)
+	// A mock has one 1920x1080 screen, so index 1 names a monitor it does not
+	// report: the anchor is invalid, which is its own code.
+	if err := mouse.MoveToOn(10, 10, ScreenMonitor(1), 0, nil); !errors.As(err, &failure) || failure.Code != InvalidScreen {
+		t.Fatalf("monitor 1 = %v, want InvalidScreen", err)
 	}
 }
 
@@ -603,4 +604,160 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(*Watch) (string, error) = (*Watch).ListingJSON
 	var _ func(*Watch) = (*Watch).Stop
 	var _ func(*Watch) = (*Watch).Close
+	var _ func(int32, int32) Screen = ScreenContaining
+	var _ func(*Device) (Clamps, error) = (*Device).Clamps
+	var _ func() (string, error) = MonitorsJSON
+	var _ func() ([]Monitor, error) = Monitors
+	var _ func() string = Version
+	var _ func() uint32 = LibraryABIVersion
+}
+
+// The containing anchor: kind 3 with the point packed into the argument, which
+// is the packing gdb_screen_containing does in C.
+func TestScreenContainingPacksThePoint(t *testing.T) {
+	screen := ScreenContaining(1400, -300)
+	if screen.Kind != 3 {
+		t.Fatalf("kind = %d, want 3", screen.Kind)
+	}
+	negY := int32(-300)
+	want := int64(uint64(uint32(1400))<<32 | uint64(uint32(negY)))
+	if screen.Arg != want {
+		t.Fatalf("arg = %#x, want %#x", uint64(screen.Arg), uint64(want))
+	}
+	// Two's complement for the negative half: x high, y low, both uint32.
+	if high := int32(uint32(uint64(screen.Arg) >> 32)); high != 1400 {
+		t.Fatalf("high half = %d, want 1400", high)
+	}
+	if low := int32(uint32(screen.Arg)); low != -300 {
+		t.Fatalf("low half = %d, want -300", low)
+	}
+	if positive := ScreenContaining(100, 200); positive.Arg != (100<<32)|200 {
+		t.Fatalf("a positive point packed as %#x", uint64(positive.Arg))
+	}
+
+	// The anchor resolves against the mock's single screen: a reachable point
+	// moves, a point on no screen is refused, and a kind the ABI does not define
+	// is the caller's mistake.
+	device := openMock(t)
+	mouse := device.Mouse()
+	if err := mouse.MoveToOn(100, 200, ScreenContaining(100, 200), 20, nil); err != nil {
+		t.Fatalf("MoveToOn(containing): %v", err)
+	}
+	var failure *Error
+	if err := mouse.MoveToOn(5000, 5000, ScreenContaining(5000, 5000), 0, nil); !errors.As(err, &failure) || failure.Code != Unsupported {
+		t.Fatalf("a point on no screen = %v, want Unsupported", err)
+	}
+	if err := mouse.MoveToOn(10, 10, Screen{Kind: 4, Arg: 0}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("an unknown screen kind = %v, want Invalid", err)
+	}
+}
+
+// The monitor listing: the desktop as the ABI reports it, no handle needed.
+func TestMonitorsJSONListsTheDesktop(t *testing.T) {
+	text, err := MonitorsJSON()
+	if err != nil {
+		t.Fatalf("MonitorsJSON: %v", err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("the listing is not a JSON array: %v: %s", err, text)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("the system reports at least one monitor: %s", text)
+	}
+	for _, entry := range entries {
+		for _, key := range []string{"left", "top", "right", "bottom", "primary", "dpi"} {
+			if _, ok := entry[key]; !ok {
+				t.Fatalf("a monitor must name %q: %v", key, entry)
+			}
+		}
+		if entry["right"].(float64) <= entry["left"].(float64) {
+			t.Fatalf("a monitor must have a width: %v", entry)
+		}
+	}
+
+	monitors, err := Monitors()
+	if err != nil {
+		t.Fatalf("Monitors: %v", err)
+	}
+	if len(monitors) != len(entries) {
+		t.Fatalf("Monitors returned %d entries, the JSON has %d", len(monitors), len(entries))
+	}
+	primary := 0
+	for _, monitor := range monitors {
+		if monitor.Right <= monitor.Left || monitor.Bottom <= monitor.Top {
+			t.Fatalf("unexpected rectangle: %+v", monitor)
+		}
+		if monitor.Primary {
+			primary++
+		}
+	}
+	if primary < 1 {
+		t.Fatalf("no monitor is marked primary: %s", text)
+	}
+}
+
+// The clamp counters: an absolute move that was pulled back into the anchor
+// rectangle. A mock never clamps - its one screen covers every destination it
+// accepts - so the counters start and stay at zero, and a refused move does not
+// count either.
+func TestClampsStartAtZero(t *testing.T) {
+	device := openMock(t)
+
+	clamps, err := device.Clamps()
+	if err != nil {
+		t.Fatalf("Clamps: %v", err)
+	}
+	if clamps.ClampedTotal != 0 {
+		t.Fatalf("a fresh mock has clamped %d moves", clamps.ClampedTotal)
+	}
+	if clamps != (Clamps{}) {
+		t.Fatalf("the coordinates are meaningless at zero: %+v", clamps)
+	}
+
+	mouse := device.Mouse()
+	var failure *Error
+	if err := mouse.MoveToOn(5000, 5000, ScreenContaining(5000, 5000), 0, nil); !errors.As(err, &failure) || failure.Code != Unsupported {
+		t.Fatalf("a point on no screen = %v, want Unsupported", err)
+	}
+	after, err := device.Clamps()
+	if err != nil {
+		t.Fatalf("Clamps: %v", err)
+	}
+	if after.ClampedTotal != 0 {
+		t.Fatalf("a refused move was counted as a clamp: %+v", after)
+	}
+
+	if err := mouse.MoveToOn(100, 200, ScreenContaining(100, 200), 20, nil); err != nil {
+		t.Fatalf("MoveToOn(containing): %v", err)
+	}
+	if after, err = device.Clamps(); err != nil || after.ClampedTotal != 0 {
+		t.Fatalf("a move inside the screen = %+v, %v", after, err)
+	}
+
+	// The two anchor codes are distinct from the ones that came before.
+	if InvalidScreen != 11 || StaleWindow != 12 {
+		t.Fatalf("codes = %d, %d, want 11 and 12", InvalidScreen, StaleWindow)
+	}
+	if InvalidScreen.String() != "INVALID_SCREEN" || StaleWindow.String() != "STALE_WINDOW" {
+		t.Fatalf("names = %q, %q", InvalidScreen.String(), StaleWindow.String())
+	}
+	if err := mouse.MoveToOn(10, 10, ScreenWindow(0x1234), 0, nil); !errors.As(err, &failure) || failure.Code != StaleWindow {
+		t.Fatalf("a window the mock does not have = %v, want StaleWindow", err)
+	}
+}
+
+// The two symbols the binding loads without ever naming a device.
+func TestVersionAndABIVersionAreNamed(t *testing.T) {
+	if version := Version(); version == "" {
+		t.Fatal("the library reported no version string")
+	} else {
+		t.Logf("sdk version %s, abi %d.%d", version, LibraryABIVersion(), ABIMinor)
+	}
+	if got := LibraryABIVersion(); got != 1 {
+		t.Fatalf("abi version = %d, want 1", got)
+	}
+	if uint32(ABIVersion) != LibraryABIVersion() {
+		t.Fatalf("ABIVersion = %d but the library exports %d", ABIVersion, LibraryABIVersion())
+	}
 }

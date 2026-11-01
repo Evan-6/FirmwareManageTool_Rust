@@ -273,6 +273,12 @@ impl Device {
         self.inner.metrics.stolen_frames()
     }
 
+    /// Records that an absolute move asked for a point outside its anchor
+    /// rectangle and was clamped to `applied`.
+    pub(crate) fn record_clamp(&self, requested: (i32, i32), applied: (i32, i32)) {
+        self.inner.metrics.record_clamp(requested, applied);
+    }
+
     /// Called with the raw 64-byte report of every frame that arrives while a
     /// command waits and belongs to another session. The default is to drop it,
     /// which is what a host alone on the board wants; a cooperating host can use

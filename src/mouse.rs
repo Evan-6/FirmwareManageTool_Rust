@@ -203,11 +203,13 @@ fn move_to(
     move_along_trajectory(session, &nodes, screen, cancel, platform::screen_and_cursor)
 }
 
-/// How long past the last node the loop keeps retrying. The SDK's absolute move
-/// (`gdb::motion`) gives up after the same 500 ms, so the same target must not
-/// fail earlier here than it does through `gdb::Device::move_to`. The SDK inlines
-/// the budget instead of exporting it; this constant has to move with it.
-const ARRIVAL_SLACK: Duration = Duration::from_millis(500);
+/// How long a movement may go without closing the gap before it gives up.
+///
+/// The SDK's absolute move (`gdb::motion`) uses the same rule, so the same target
+/// must not fail earlier here than it does through `gdb::Device::move_to`: the
+/// trajectory duration is a floor, and every step that shrinks the gap pushes the
+/// deadline forward. A long jump paired with a short duration therefore finishes.
+const STALL: Duration = Duration::from_millis(400);
 
 // Trajectory nodes are host targets. Only relative deltas cross the USB channel.
 // Feedback compensates for Windows sensitivity/acceleration and delayed delivery.
@@ -224,7 +226,10 @@ fn move_along_trajectory(
 ) -> Result<()> {
     ensure!(!nodes.is_empty(), "移動路徑不得為空");
     let started = Instant::now();
-    let deadline = started + Duration::from_millis(nodes.last().unwrap().at_ms) + ARRIVAL_SLACK;
+    let aim = (nodes.last().unwrap().x, nodes.last().unwrap().y);
+    let mut deadline = started + Duration::from_millis(nodes.last().unwrap().at_ms) + STALL;
+    let mut best = i32::MAX;
+    let mut remaining = best;
     let mut tracker = RelativeTracker::default();
     let mut index = 0;
     while Instant::now() < deadline {
@@ -237,6 +242,14 @@ fn move_along_trajectory(
             actual_screen.width == screen.width && actual_screen.height == screen.height,
             "移動期間顯示器尺寸改變，請重新定位"
         );
+        remaining = (aim.0 - position.0).abs().max((aim.1 - position.1).abs());
+        if remaining < best {
+            best = remaining;
+            let extended = Instant::now() + STALL;
+            if extended > deadline {
+                deadline = extended;
+            }
+        }
         match tracker.step(position, (node.x, node.y), Instant::now()) {
             Step::Move(dx, dy) => {
                 session.mouse_move(dx, dy, cancel)?;
@@ -251,7 +264,10 @@ fn move_along_trajectory(
             }
         }
     }
-    anyhow::bail!("相對滑鼠未在期限內抵達目標")
+    anyhow::bail!(
+        "相對滑鼠未在期限內抵達目標（還差 {remaining} px，已用 {} ms）",
+        started.elapsed().as_millis()
+    )
 }
 
 pub fn execute(

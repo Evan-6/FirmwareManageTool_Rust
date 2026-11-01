@@ -30,7 +30,9 @@ typedef enum gdb_error {
     GDB_OVERFLOW = 7,
     GDB_UNSUPPORTED = 8,
     GDB_CANCELLED = 9,
-    GDB_IO = 10
+    GDB_IO = 10,
+    GDB_INVALID_SCREEN = 11,   /* the anchor names a monitor the system does not report */
+    GDB_STALE_WINDOW = 12      /* the window handle is gone, or the window is on no monitor */
 } gdb_error;
 
 typedef enum gdb_connection_state {
@@ -175,6 +177,22 @@ typedef struct gdb_metrics {
 int32_t gdb_metrics_get(const gdb_device *device, gdb_metrics *out);
 int32_t gdb_metrics_reset(gdb_device *device);
 
+/* Clamped absolute moves, the shape of a multi-monitor mistake: the move
+   converges, the click lands inside the window, and only these numbers say the
+   requested pixel was never reached. The four coordinates are meaningful when
+   clamped_total is not zero; the fields are read one at a time, so they may be
+   one move apart from the total. */
+typedef struct gdb_clamps {
+    uint64_t clamped_total;
+    int32_t requested_x;
+    int32_t requested_y;
+    int32_t applied_x;
+    int32_t applied_y;
+} gdb_clamps;
+
+/* Fills *out. GDB_INVALID on a NULL handle or NULL out, and out is untouched. */
+int32_t gdb_metrics_clamps(const gdb_device *device, gdb_clamps *out);
+
 /* JSON objects/arrays for the device info, STATUS, STATUS_EXT and SESSION_LIST. */
 char *gdb_device_info(const gdb_device *device);
 char *gdb_status(const gdb_device *device);
@@ -210,17 +228,45 @@ int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y,
  * says which rectangle the move is clamped into.
  */
 typedef struct gdb_screen {
-    int32_t kind;  /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND) */
+    int32_t kind;  /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND),
+                      3 monitor containing a point (arg = packed x,y, see below) */
     int64_t arg;   /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
 } gdb_screen;
+
+/* kind 3 anchors on whichever monitor holds the point, so a caller that starts a
+   move from a coordinate does not have to know which display that is. The packed
+   argument keeps gdb_screen the same shape it has always had: the high 32 bits are
+   x and the low 32 bits are y, both as uint32. A point on no monitor resolves to
+   the union of every screen, and the move then fails with GDB_UNSUPPORTED naming
+   that point. */
+static inline gdb_screen gdb_screen_containing(int32_t x, int32_t y) {
+    gdb_screen screen;
+    screen.kind = 3;
+    screen.arg = (int64_t)(((uint64_t)(uint32_t)x << 32) | (uint64_t)(uint32_t)y);
+    return screen;
+}
 
 /* A move whose destination belongs to no screen fails with GDB_UNSUPPORTED and
    a message naming the target and the bounds that were visible. A cursor on a
    different monitor from the target is not an error: the plan box is the target
-   rectangle union the cursor, so the move starts wherever the pointer is. */
+   rectangle union the cursor, so the move starts wherever the pointer is. An
+   anchor that cannot be resolved at all fails with GDB_INVALID_SCREEN (a monitor
+   index the system does not report, a layout that changed mid-move) or
+   GDB_STALE_WINDOW (the handle is gone, the window is minimised or on no
+   monitor). */
 int32_t gdb_mouse_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_move_path_on(gdb_device *device, const gdb_point *points, size_t count, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
+
+/* Every monitor, in exactly the order kind 1 indexes them:
+ *   [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, ...]
+ * `primary` marks the entry kind 0 resolves to, and `dpi` is the effective DPI
+ * (96 = 100%, 0 when the system will not say). Enumeration order is the order
+ * the system reports the displays, which is not the numbering Windows settings
+ * shows, so read this instead of guessing an index. No handle is needed and no
+ * packet is sent; the result is freed with gdb_string_free, and NULL comes back
+ * with gdb_last_error set when the system has nothing to report. */
+char *gdb_monitors_json(void);
 
 gdb_movement *gdb_mouse_start_move_to(gdb_device *device, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_by(gdb_device *device, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile *profile);
@@ -392,8 +438,10 @@ char *gdb_watch_listing(const gdb_watch *watch);
    presence probe and the observer handle, 3 the shared-ownership opens and
    gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms,
    5 the metrics snapshot, 6 the screen-targeted absolute moves, 7 the arrival
-   watch. Major stays 1: no existing symbol changed shape. */
-#define GDB_ABI_VERSION_MINOR 7u
+   watch, 8 the monitor listing, the containing anchor, the clamp counters and
+   the separate anchor error codes. Major stays 1: no existing symbol changed
+   shape. */
+#define GDB_ABI_VERSION_MINOR 8u
 
 typedef struct gdb_remote gdb_remote;
 

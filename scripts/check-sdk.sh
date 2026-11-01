@@ -12,6 +12,9 @@ echo "== c abi =="
 cargo build -q -p gdb-ffi
 cargo test -q -p gdb-ffi
 
+echo "== abi surface =="
+python scripts/check-bindings.py
+
 lib="$root/target/debug/gdb.dll"
 [ -f "$lib" ] || lib="$root/target/debug/libgdb.so"
 # Native tools (LoadLibrary, ctypes) do not understand MSYS /c/... paths.
