@@ -149,6 +149,32 @@ int32_t gdb_device_state(const gdb_device *device); /* -1 on a NULL handle */
    one atomic; 0 on a NULL handle, with gdb_last_error set. */
 uint64_t gdb_stolen_frames(const gdb_device *device);
 
+
+/* -------------------------------------------------------------------- metrics
+ *
+ * One relaxed read of the session's counters. A host that displays them does not
+ * need a copy of the SDK, and a host that charts latency does not need to parse
+ * the log.
+ */
+typedef struct gdb_metrics {
+    uint64_t frames_sent;      /* reports written, handshake and CLOSE included */
+    uint64_t frames_received;  /* replies accepted for this session */
+    uint64_t retries;          /* reads that had to be looked past */
+    uint64_t stolen_frames;    /* the part of retries that answered someone else */
+    uint64_t reconnects;
+    uint64_t lease_faults;
+    uint64_t timeouts;
+    uint64_t latency_count;
+    uint64_t latency_min_us;
+    uint64_t latency_p50_us;
+    uint64_t latency_p95_us;
+    uint64_t latency_max_us;
+} gdb_metrics;
+
+/* Fills *out. GDB_INVALID on a NULL handle or NULL out, and out is untouched. */
+int32_t gdb_metrics_get(const gdb_device *device, gdb_metrics *out);
+int32_t gdb_metrics_reset(gdb_device *device);
+
 /* JSON objects/arrays for the device info, STATUS, STATUS_EXT and SESSION_LIST. */
 char *gdb_device_info(const gdb_device *device);
 char *gdb_status(const gdb_device *device);
@@ -176,6 +202,26 @@ int32_t gdb_mouse_wheel(gdb_device *device, int32_t vertical, int32_t horizontal
 int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
 
 /* Async moves: NULL on failure. */
+/* ------------------------------------------------------------ screen targets
+ *
+ * gdb_mouse_move_to clamps to the primary monitor, because it predates targets
+ * and a C ABI cannot gain a parameter. These take the target explicitly; the
+ * coordinates are still virtual-desktop physical pixels, and the target only
+ * says which rectangle the move is clamped into.
+ */
+typedef struct gdb_screen {
+    int32_t kind;  /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND) */
+    int64_t arg;   /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
+} gdb_screen;
+
+/* A move whose destination belongs to no screen fails with GDB_UNSUPPORTED and
+   a message naming the target and the bounds that were visible. A cursor on a
+   different monitor from the target is not an error: the plan box is the target
+   rectangle union the cursor, so the move starts wherever the pointer is. */
+int32_t gdb_mouse_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
+int32_t gdb_mouse_move_path_on(gdb_device *device, const gdb_point *points, size_t count, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
+gdb_movement *gdb_mouse_start_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
+
 gdb_movement *gdb_mouse_start_move_to(gdb_device *device, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_by(gdb_device *device, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_path(gdb_device *device, const gdb_point *points, size_t count, uint32_t duration_ms, const gdb_profile *profile);
@@ -303,8 +349,9 @@ int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const
 
 /* Minor additions, each one additive: 1 added the attached surface, 2 the
    presence probe and the observer handle, 3 the shared-ownership opens and
-   gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms. Major stays 1: no existing symbol changed shape. */
-#define GDB_ABI_VERSION_MINOR 4u
+   gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms,
+   5 the metrics snapshot, 6 the screen-targeted absolute moves. Major stays 1: no existing symbol changed shape. */
+#define GDB_ABI_VERSION_MINOR 6u
 
 typedef struct gdb_remote gdb_remote;
 

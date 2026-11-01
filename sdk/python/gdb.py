@@ -229,6 +229,58 @@ _D.gdb_mouse_move_by.restype = c_int32
 _D.gdb_move_raw.argtypes = [c_void_p, c_int32, c_int32]
 _D.gdb_move_raw.restype = c_int32
 _D.gdb_mouse_move_to.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+
+
+class _Screen(ctypes.Structure):
+    _fields_ = [("kind", c_int32), ("arg", ctypes.c_int64)]
+
+
+class Metrics(ctypes.Structure):
+    """The session's counters, as gdb_metrics_get fills them."""
+    _fields_ = [
+        ("frames_sent", c_uint64), ("frames_received", c_uint64),
+        ("retries", c_uint64), ("stolen_frames", c_uint64),
+        ("reconnects", c_uint64), ("lease_faults", c_uint64), ("timeouts", c_uint64),
+        ("latency_count", c_uint64), ("latency_min_us", c_uint64),
+        ("latency_p50_us", c_uint64), ("latency_p95_us", c_uint64), ("latency_max_us", c_uint64),
+    ]
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name, _ in self._fields_}
+
+
+class Screen:
+    """Which rectangle an absolute move is clamped into. Coordinates stay
+    virtual-desktop physical pixels; the target is not a new origin."""
+    primary = None  # set below
+
+    def __init__(self, kind: int, arg: int = 0):
+        self.kind, self.arg = kind, arg
+
+    @classmethod
+    def monitor(cls, index: int) -> "Screen":
+        return cls(1, index)
+
+    @classmethod
+    def window(cls, hwnd: int) -> "Screen":
+        return cls(2, hwnd)
+
+    def _raw(self) -> _Screen:
+        return _Screen(self.kind, self.arg)
+
+
+Screen.primary = Screen(0)
+
+_D.gdb_metrics_get.argtypes = [c_void_p, POINTER(Metrics)]
+_D.gdb_metrics_get.restype = c_int32
+_D.gdb_metrics_reset.argtypes = [c_void_p]
+_D.gdb_metrics_reset.restype = c_int32
+_D.gdb_mouse_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_move_to_on.restype = c_int32
+_D.gdb_mouse_move_path_on.argtypes = [c_void_p, POINTER(_Point), c_size_t, _Screen, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_move_path_on.restype = c_int32
+_D.gdb_mouse_start_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
+_D.gdb_mouse_start_move_to_on.restype = c_void_p
 _D.gdb_mouse_move_to.restype = c_int32
 _D.gdb_mouse_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_path.restype = c_int32
@@ -487,12 +539,23 @@ class Mouse:
         """
         _check(_D.gdb_move_raw(self._handle(), dx, dy))
 
-    def move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> None:
-        _check(_D.gdb_mouse_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile)))
+    def move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None,
+                screen: Screen | None = None) -> None:
+        """An absolute move. Without `screen` it clamps to the primary monitor;
+        `screen=Screen.monitor(1)` targets another one and a cursor sitting there
+        is not an error."""
+        if screen is None:
+            _check(_D.gdb_mouse_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile)))
+            return
+        _check(_D.gdb_mouse_move_to_on(self._handle(), x, y, screen._raw(), duration_ms, _profile_pointer(profile)))
 
-    def move_path(self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None) -> None:
+    def move_path(self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None,
+                  screen: Screen | None = None) -> None:
         array, count = _points(points)
-        _check(_D.gdb_mouse_move_path(self._handle(), array, count, duration_ms, _profile_pointer(profile)))
+        if screen is None:
+            _check(_D.gdb_mouse_move_path(self._handle(), array, count, duration_ms, _profile_pointer(profile)))
+            return
+        _check(_D.gdb_mouse_move_path_on(self._handle(), array, count, screen._raw(), duration_ms, _profile_pointer(profile)))
 
     def start_move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> Movement:
         pointer = _D.gdb_mouse_start_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile))
@@ -731,6 +794,15 @@ class Device:
         if value < 0:
             raise GdbError(ErrorCode.INVALID, "device handle is NULL")
         return value
+
+    def metrics(self) -> Metrics:
+        """The session's counters and latency percentiles."""
+        out = Metrics()
+        _check(_D.gdb_metrics_get(self._handle(), ctypes.byref(out)))
+        return out
+
+    def reset_metrics(self) -> None:
+        _check(_D.gdb_metrics_reset(self._handle()))
 
     @property
     def status(self) -> dict:

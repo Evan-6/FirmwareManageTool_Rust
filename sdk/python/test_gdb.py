@@ -307,7 +307,7 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 4u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 6u", header)
         for name in self.SYMBOLS:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 
