@@ -72,6 +72,24 @@ func TestMockReportsTheFirmwareContract(t *testing.T) {
 	}
 }
 
+func TestSharedOpenReportsTheStolenFrames(t *testing.T) {
+	device, err := OpenMockShared(1000, false, false)
+	if err != nil {
+		t.Fatalf("OpenMockShared: %v", err)
+	}
+	defer func() { _ = device.Close() }()
+
+	if device.StolenFrames() != 0 {
+		t.Fatalf("a quiet board reported %d stolen frames", device.StolenFrames())
+	}
+	if _, err := device.StatusJSON(); err != nil {
+		t.Fatalf("a shared handle still answers STATUS: %v", err)
+	}
+	if device.StolenFrames() != 0 {
+		t.Fatal("a reply of our own must not count as stolen")
+	}
+}
+
 func TestKeyboardRejectsUnknownUsages(t *testing.T) {
 	device := openMock(t)
 	if err := device.Keyboard().TypeText("hello", 1, 1, 0); err != nil {

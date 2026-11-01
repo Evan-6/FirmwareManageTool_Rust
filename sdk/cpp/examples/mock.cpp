@@ -98,6 +98,18 @@ int main() {
         assert(std::string(error.what()).find("broker") != std::string::npos);
     }
 
+    // A shared handle is the same board for a caller that is not alone on it:
+    // it answers like any other, and the counter says whether a reply that was
+    // not ours has been seen.
+    {
+        auto shared = gdb::Device::open_mock_shared();
+        assert(shared.state() == gdb::ConnectionState::Connected);
+        assert(shared.stolen_frames() == 0);
+        (void)shared.status_json();
+        assert(shared.stolen_frames() == 0);
+        shared.close();
+    }
+
     assert(lines.load() > 0 && "the log sink saw nothing");
     gdb::set_log_sink(nullptr);
     gdb::set_log_level(0);

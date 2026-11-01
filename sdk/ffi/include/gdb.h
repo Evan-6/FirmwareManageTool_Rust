@@ -121,11 +121,33 @@ char *gdb_device_list(void);
 
 gdb_device *gdb_open(const char *selector, uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
 gdb_device *gdb_open_mock(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+
+/* The same board in a non-exclusive mode: several programs may drive it, and the
+   SDK stops trying to recover from a reply another program took. One difference
+   from gdb_open, and only one:
+     - a reply that never arrives is GDB_BUSY naming the command ("STATUS got no
+       reply; another process may have taken it (...)") instead of GDB_TIMEOUT;
+     - the session is never reopened on the SDK's own initiative, because CLOSE
+       plus OPEN on a board it does not own is exactly the traffic a collision
+       must not cost. gdb_reconnect() is still there for a caller that knows the
+       board is its own again.
+   Everything else - sequence numbers, the lease, the heartbeat, the counters -
+   is unchanged, and a lost heartbeat is simply retried on the next tick.
+   What it cannot promise: which program gets a given reply. Avoiding the
+   collision is the callers' discipline, not the library's. */
+gdb_device *gdb_open_shared(const char *selector, uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_mock_shared(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+
 void gdb_device_free(gdb_device *device);
 int32_t gdb_close(gdb_device *device);
 int32_t gdb_reconnect(gdb_device *device);
 int32_t gdb_set_auto_reconnect(gdb_device *device, bool enabled);
 int32_t gdb_device_state(const gdb_device *device); /* -1 on a NULL handle */
+
+/* Frames the reply loop looked past because they answered another session or
+   another sequence: the counter that tells a collision from a slow board. Reads
+   one atomic; 0 on a NULL handle, with gdb_last_error set. */
+uint64_t gdb_stolen_frames(const gdb_device *device);
 
 /* JSON objects/arrays for the device info, STATUS, STATUS_EXT and SESSION_LIST. */
 char *gdb_device_info(const gdb_device *device);
@@ -206,9 +228,10 @@ char *gdb_scheduler_take_errors(gdb_scheduler *scheduler);
  *
  * That is the whole difference from gdb_open. A direct handle may also send
  * commands, and a command consumes the shared IN queue: a second reader that
- * drains a reply the owner was waiting for kills that owner's session. So while
- * another program owns the session, a program must not open a device handle at
- * all - it probes, or it observes.
+ * drains a reply the owner was waiting for costs that owner one error for that
+ * command - GDB_BUSY if it opened with gdb_open_shared, GDB_TIMEOUT if it did
+ * not - and the session stays. So a program that only wants the numbers probes
+ * or observes; one that also sends opens shared.
  */
 
 /* JSON: the same object gdb_device_info returns. selector is a USB serial, a HID
@@ -275,9 +298,9 @@ int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const
  */
 
 /* Minor additions, each one additive: 1 added the attached surface, 2 the
-   presence probe and the observer handle. Major stays 1: no existing symbol
-   changed shape. */
-#define GDB_ABI_VERSION_MINOR 2u
+   presence probe and the observer handle, 3 the shared-ownership opens and
+   gdb_stolen_frames. Major stays 1: no existing symbol changed shape. */
+#define GDB_ABI_VERSION_MINOR 3u
 
 typedef struct gdb_remote gdb_remote;
 

@@ -5,12 +5,60 @@
 //! frame was accepted, a wait looped again, or a reply ran out of time. All of
 //! that is one relaxed atomic add — the session never locks to report.
 
+use crate::device::StrayHook;
 use crate::error::{Error, ErrorCode, Result};
 use crate::log::Level;
 use crate::metrics::Metrics;
 use crate::transport::Transport;
 use input_protocol::v3::{self, Capabilities, Command, Packet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+
+/// What the host decided about sharing this board, and the hook it wants called
+/// for frames that are not ours.
+///
+/// The device and every session it opens hold the same `Arc`, so a host may
+/// change its mind while a command is in flight and install a hook at any time.
+/// The reply path pays one relaxed load for the flag, and a read of an
+/// uncontended lock only when a foreign frame actually arrives.
+pub(crate) struct Sharing {
+    shared: AtomicBool,
+    strays: RwLock<Option<StrayHook>>,
+}
+
+impl Sharing {
+    pub(crate) fn new(shared: bool) -> Self {
+        Self {
+            shared: AtomicBool::new(shared),
+            strays: RwLock::new(None),
+        }
+    }
+
+    pub(crate) fn is_shared(&self) -> bool {
+        self.shared.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_shared(&self, shared: bool) {
+        self.shared.store(shared, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_stray_hook(&self, hook: Option<StrayHook>) {
+        if let Ok(mut slot) = self.strays.write() {
+            *slot = hook;
+        }
+    }
+
+    /// Hands one foreign report to the host. Called on the thread that is
+    /// reading the queue, which is why the hook must not call back into the
+    /// device it is installed on.
+    pub(crate) fn stray(&self, report: &[u8; 64]) {
+        let hook = self.strays.read().ok().and_then(|slot| slot.clone());
+        if let Some(hook) = hook {
+            hook(report);
+        }
+    }
+}
 
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
@@ -20,6 +68,9 @@ pub(crate) struct Session {
     timeout: Duration,
     /// Shared with the device, so the counters survive a reconnect.
     metrics: Metrics,
+    /// Shared with the device: whether this process is one of several owners,
+    /// and where a frame that belongs to somebody else goes.
+    sharing: Arc<Sharing>,
     /// When this session last sent something the device counts as a lease
     /// renewal. STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew
     /// (protocol-v3.md, 完成與租約), so a host polling any of them must still
@@ -34,6 +85,7 @@ impl Session {
         timeout_ms: u32,
         id: u32,
         metrics: Metrics,
+        sharing: Arc<Sharing>,
     ) -> Result<Self> {
         let report = transport
             .feature()?
@@ -46,6 +98,7 @@ impl Session {
             capabilities,
             timeout: Duration::from_millis(u64::from(timeout_ms.max(100))),
             metrics,
+            sharing,
             last_renew: Instant::now(),
         };
         session.command(&Command::Open)?;
@@ -66,16 +119,31 @@ impl Session {
     ///
     /// Accounting is deliberately thin: an input command costs one relaxed add,
     /// a command that waits for a reply costs one more for the round trip.
+    ///
+    /// A reply that never arrives is the one place sharing changes the answer.
+    /// Every owner reads the same IN queue and the device does not address a
+    /// reply to a handle, so a lost reply on a shared board most likely went to
+    /// another program. Reporting `Timeout` there would invite the host to
+    /// re-establish a session that is still perfectly good — one error becomes
+    /// CLOSE plus OPEN plus everything the other owners lose — so a shared
+    /// session reports `Busy` instead and names the command.
     pub(crate) fn command(&mut self, command: &Command) -> Result<Option<Packet>> {
-        let outcome = self.exchange(command);
-        if let Err(error) = &outcome {
-            match error.code() {
-                ErrorCode::Lease => self.metrics.record_lease_fault(),
-                ErrorCode::Timeout => self.metrics.record_timeout(),
-                _ => {}
+        match self.exchange(command) {
+            Ok(reply) => Ok(reply),
+            Err(error) => {
+                match error.code() {
+                    ErrorCode::Lease => self.metrics.record_lease_fault(),
+                    ErrorCode::Timeout => {
+                        self.metrics.record_timeout();
+                        if self.sharing.is_shared() {
+                            return Err(stolen_reply(command, &error));
+                        }
+                    }
+                    _ => {}
+                }
+                Err(error)
             }
         }
-        outcome
     }
 
     fn exchange(&mut self, command: &Command) -> Result<Option<Packet>> {
@@ -126,6 +194,8 @@ impl Session {
             let packet = Packet::decode(&report, v3::IN_ID).map_err(framing_error)?;
             if packet.session != self.id {
                 self.metrics.record_retry();
+                self.metrics.record_stolen_frame();
+                self.sharing.stray(&report);
                 crate::sdk_log!(
                     Level::Trace,
                     "skip opcode={} session={} sequence={} (not ours)",
@@ -151,7 +221,11 @@ impl Session {
                 return Err(Error::from_result(code));
             }
             if packet.opcode != (opcode | 0x80) || packet.sequence != sequence {
+                // Our session, another command's reply: a late answer to
+                // something that already gave up. Not ours to answer with, and
+                // not the host's to see, so it only moves the counters.
                 self.metrics.record_retry();
+                self.metrics.record_stolen_frame();
                 continue;
             }
             if packet.payload.is_empty() {
@@ -198,6 +272,40 @@ impl Drop for Session {
 /// A well-formed call failed: the caller passed something the SDK cannot encode.
 pub(crate) fn string_error(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Invalid, error.to_string())
+}
+
+/// A reply that never came on a shared board. `Busy`, not `Timeout`: the board
+/// is answering somebody, and naming the command is what makes the line in a
+/// host's log actionable.
+fn stolen_reply(command: &Command, timeout: &Error) -> Error {
+    Error::new(
+        ErrorCode::Busy,
+        format!(
+            "{} got no reply; another process may have taken it ({})",
+            command_name(command),
+            timeout.message
+        ),
+    )
+}
+
+/// The wire name of a command, for a message a user reads.
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Open => "OPEN",
+        Command::Close => "CLOSE",
+        Command::Heartbeat => "HEARTBEAT",
+        Command::Status => "STATUS",
+        Command::Barrier => "BARRIER",
+        Command::ReleaseAll => "RELEASE_ALL",
+        Command::StatusExt => "STATUS_EXT",
+        Command::SessionList => "SESSION_LIST",
+        Command::Bootloader => "BOOTLOADER",
+        Command::Key(..) => "KEY",
+        Command::Snapshot(_) => "SNAPSHOT",
+        Command::MouseMove(..) => "MOUSE_MOVE",
+        Command::MouseButtons(_) => "MOUSE_BUTTONS",
+        Command::Wheel(..) => "WHEEL",
+    }
 }
 
 /// A report did not parse. That is a wire fault, not a calling mistake, so it

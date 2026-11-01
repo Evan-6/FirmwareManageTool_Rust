@@ -193,6 +193,9 @@ struct Api {
     decltype(&gdb_device_list) device_list = nullptr;
     decltype(&gdb_open) open = nullptr;
     decltype(&gdb_open_mock) open_mock = nullptr;
+    decltype(&gdb_open_shared) open_shared = nullptr;
+    decltype(&gdb_open_mock_shared) open_mock_shared = nullptr;
+    decltype(&gdb_stolen_frames) stolen_frames = nullptr;
     decltype(&gdb_device_free) device_free = nullptr;
     decltype(&gdb_close) close = nullptr;
     decltype(&gdb_reconnect) reconnect = nullptr;
@@ -305,6 +308,9 @@ inline Api& api() {
         GDB_SYMBOL(device_list, "gdb_device_list")
         GDB_SYMBOL(open, "gdb_open")
         GDB_SYMBOL(open_mock, "gdb_open_mock")
+        GDB_SYMBOL(open_shared, "gdb_open_shared")
+        GDB_SYMBOL(open_mock_shared, "gdb_open_mock_shared")
+        GDB_SYMBOL(stolen_frames, "gdb_stolen_frames")
         GDB_SYMBOL(device_free, "gdb_device_free")
         GDB_SYMBOL(close, "gdb_close")
         GDB_SYMBOL(reconnect, "gdb_reconnect")
@@ -832,6 +838,19 @@ public:
                             bool heartbeat = true) {
         return Device(api().open_mock(timeout_ms, auto_reconnect, heartbeat));
     }
+    /// The same board in a non-exclusive mode: a reply another program took is
+    /// one Busy naming the command, the session is never reopened behind the
+    /// caller's back, and stolen_frames() counts what was not ours.
+    static Device open_shared(const std::string& selector = std::string(),
+                              uint32_t timeout_ms = 1000, bool auto_reconnect = true,
+                              bool heartbeat = true) {
+        return Device(api().open_shared(selector.empty() ? nullptr : selector.c_str(),
+                                        timeout_ms, auto_reconnect, heartbeat));
+    }
+    static Device open_mock_shared(uint32_t timeout_ms = 1000,
+                                   bool auto_reconnect = true, bool heartbeat = true) {
+        return Device(api().open_mock_shared(timeout_ms, auto_reconnect, heartbeat));
+    }
     static std::string list_json() { return detail::take(api().device_list()); }
 
     Device(Device&&) noexcept = default;
@@ -846,6 +865,10 @@ public:
     std::string status_json() const { return detail::take(api().status(raw())); }
     std::string status_ext_json() const { return detail::take(api().status_ext(raw())); }
     std::string sessions_json() const { return detail::take(api().sessions(raw())); }
+
+    /// Replies the reader looked past because they answered another session or
+    /// sequence: the counter that tells a collision from a slow board.
+    uint64_t stolen_frames() const { return api().stolen_frames(raw()); }
 
     ConnectionState state() const {
         const int32_t value = api().device_state(raw());

@@ -60,6 +60,11 @@ pub struct MetricsSnapshot {
     /// sequence. The SDK never re-sends a command, so this counts read retries,
     /// not frame retransmissions.
     pub retries: u64,
+    /// The subset of `retries` that was a frame for another session or another
+    /// sequence: a reply this process did not send the command for. In a shared
+    /// board that is the shape a collision takes — the frame was on the one IN
+    /// queue and somebody else got it, or this reader got somebody else's.
+    pub stolen_frames: u64,
     /// Transports reopened after a failed command or an expired lease.
     pub reconnects: u64,
     /// Commands the device answered with a lease fault.
@@ -75,6 +80,7 @@ struct Counters {
     frames_sent: AtomicU64,
     frames_received: AtomicU64,
     retries: AtomicU64,
+    stolen_frames: AtomicU64,
     reconnects: AtomicU64,
     lease_faults: AtomicU64,
     timeouts: AtomicU64,
@@ -87,6 +93,7 @@ impl Counters {
             frames_sent: AtomicU64::new(0),
             frames_received: AtomicU64::new(0),
             retries: AtomicU64::new(0),
+            stolen_frames: AtomicU64::new(0),
             reconnects: AtomicU64::new(0),
             lease_faults: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
@@ -100,6 +107,7 @@ impl Counters {
         self.frames_sent.store(0, Ordering::Relaxed);
         self.frames_received.store(0, Ordering::Relaxed);
         self.retries.store(0, Ordering::Relaxed);
+        self.stolen_frames.store(0, Ordering::Relaxed);
         self.reconnects.store(0, Ordering::Relaxed);
         self.lease_faults.store(0, Ordering::Relaxed);
         self.timeouts.store(0, Ordering::Relaxed);
@@ -134,6 +142,12 @@ impl Metrics {
         self.0.retries.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// One frame the reply loop looked past was not the answer to this command:
+    /// another session, or another sequence. Counted inside `retries` too.
+    pub fn record_stolen_frame(&self) {
+        self.0.stolen_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The transport was reopened after a fault.
     pub fn record_reconnect(&self) {
         self.0.reconnects.fetch_add(1, Ordering::Relaxed);
@@ -142,6 +156,12 @@ impl Metrics {
     /// The device answered with a lease fault.
     pub fn record_lease_fault(&self) {
         self.0.lease_faults.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Frames that answered another session or another sequence, without
+    /// walking the histogram a full snapshot would.
+    pub fn stolen_frames(&self) -> u64 {
+        self.0.stolen_frames.load(Ordering::Relaxed)
     }
 
     /// A reply did not arrive inside the timeout.
@@ -190,6 +210,7 @@ impl Metrics {
             frames_sent: counters.frames_sent.load(Ordering::Relaxed),
             frames_received: counters.frames_received.load(Ordering::Relaxed),
             retries: counters.retries.load(Ordering::Relaxed),
+            stolen_frames: counters.stolen_frames.load(Ordering::Relaxed),
             reconnects: counters.reconnects.load(Ordering::Relaxed),
             lease_faults: counters.lease_faults.load(Ordering::Relaxed),
             timeouts: counters.timeouts.load(Ordering::Relaxed),

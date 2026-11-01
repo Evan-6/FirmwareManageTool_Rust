@@ -44,7 +44,7 @@ __all__ = [
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 2
+ABI_VERSION_MINOR = 3
 
 
 class ErrorCode:
@@ -195,6 +195,12 @@ _D.gdb_open.restype = c_void_p
 _D.gdb_open.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
 _D.gdb_open_mock.restype = c_void_p
 _D.gdb_open_mock.argtypes = [c_uint32, c_bool, c_bool]
+_D.gdb_open_shared.restype = c_void_p
+_D.gdb_open_shared.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
+_D.gdb_open_mock_shared.restype = c_void_p
+_D.gdb_open_mock_shared.argtypes = [c_uint32, c_bool, c_bool]
+_D.gdb_stolen_frames.argtypes = [c_void_p]
+_D.gdb_stolen_frames.restype = c_uint64
 _D.gdb_device_free.argtypes = [c_void_p]
 _D.gdb_close.argtypes = [c_void_p]
 _D.gdb_close.restype = c_int32
@@ -653,13 +659,20 @@ class Device:
         timeout_ms: int = 1000,
         auto_reconnect: bool = True,
         heartbeat: bool = True,
+        shared: bool = False,
     ) -> "Device":
-        pointer = _D.gdb_open(
-            selector.encode("utf-8") if selector else None,
-            timeout_ms,
-            auto_reconnect,
-            heartbeat,
-        )
+        """Connect to a board.
+
+        ``shared=True`` opens it for use alongside other programs: a reply that
+        never arrives is one ``ErrorCode.BUSY`` naming the command instead of a
+        timeout, the session is never reopened behind your back, and
+        ``stolen_frames`` counts the replies that were not ours.
+        """
+        name = selector.encode("utf-8") if selector else None
+        if shared:
+            pointer = _D.gdb_open_shared(name, timeout_ms, auto_reconnect, heartbeat)
+        else:
+            pointer = _D.gdb_open(name, timeout_ms, auto_reconnect, heartbeat)
         if not pointer:
             code, message = _last_error()
             raise GdbError(code or ErrorCode.IO, message or "open failed")
@@ -671,8 +684,12 @@ class Device:
         timeout_ms: int = 1000,
         auto_reconnect: bool = True,
         heartbeat: bool = True,
+        shared: bool = False,
     ) -> "Device":
-        pointer = _D.gdb_open_mock(timeout_ms, auto_reconnect, heartbeat)
+        if shared:
+            pointer = _D.gdb_open_mock_shared(timeout_ms, auto_reconnect, heartbeat)
+        else:
+            pointer = _D.gdb_open_mock(timeout_ms, auto_reconnect, heartbeat)
         if not pointer:
             code, message = _last_error()
             raise GdbError(code or ErrorCode.IO, message or "mock open failed")
@@ -704,6 +721,12 @@ class Device:
     @property
     def sessions(self) -> list[dict]:
         return _take(_D.gdb_sessions(self._handle()))
+
+    @property
+    def stolen_frames(self) -> int:
+        """Replies the reader looked past because they answered another session
+        or sequence: the counter that tells a collision from a slow board."""
+        return _D.gdb_stolen_frames(self._handle())
 
     def release_all(self) -> None:
         _check(_D.gdb_release_all(self._handle()))

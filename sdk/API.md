@@ -25,6 +25,9 @@ module or the Go package. A broker *client* does have one: `gdb_attach` and the
 | --- | --- | --- | --- | --- |
 | open by selector | `Manager::open(sel, opts)` | `Device::open(sel)` | `Device.open(sel)` | `Open(sel, …)` |
 | open the mock | `Manager::open_mock_with_handle` | `Device::open_mock` | `Device.open_mock` | `OpenMock` |
+| open for a board others drive too | `Device::open_shared(sel, opts)` | `Device::open_shared(sel)` | `Device.open(sel, shared=True)` | `OpenShared(sel, …)` |
+| open the shared mock | `Device::open_mock_shared(opts)` | `Device::open_mock_shared()` | `Device.open_mock(shared=True)` | `OpenMockShared(…)` |
+| replies that belonged to somebody else | `device.stolen_frames()` | `stolen_frames()` | `.stolen_frames` | `StolenFrames()` |
 | info | `device.info()` | `info_json()` | `.info` | `InfoJSON()` |
 | status | `device.status()` | `status_json()` | `.status` | `StatusJSON()` |
 | status ext | `device.status_ext()` | `status_ext_json()` | `.status_ext` | `StatusExtJSON()` |
@@ -78,6 +81,56 @@ DeviceInfo { serial, product, board, firmware, lease_ms, poll_ms,
 ```
 
 `DeviceEntry` (device list): `{ path, serial, product, manufacturer, vid, pid }`.
+
+### Sharing a board
+
+```rust
+pub enum Ownership { Exclusive, Shared }   // default: Exclusive
+
+impl Device {
+    pub fn open_shared(selector: Option<&str>, options: DeviceOptions) -> Result<Device>;
+    pub fn open_mock_shared(options: DeviceOptions) -> Result<(Device, MockHandle)>;
+    pub fn over_transport(transport: Box<dyn Transport>, target: Target,
+                          options: DeviceOptions, ownership: Ownership) -> Result<Device>;
+    pub fn ownership(&self) -> Ownership;
+    pub fn set_ownership(&self, ownership: Ownership);          // for commands not yet sent
+    pub fn stolen_frames(&self) -> u64;
+    pub fn set_stray_hook(&self, hook: Arc<dyn Fn(&[u8]) + Send + Sync>);
+    pub fn clear_stray_hook(&self);
+}
+```
+
+Ownership is not a field of `DeviceOptions`: it decides whether the SDK may
+reopen the session at all, so it is fixed when the device is opened, and
+`open_shared` is the constructor that says so.
+
+The device answers on one IN queue and the protocol does not address a reply to a
+handle, so two controllers occasionally take each other's frames. Nothing here
+arbitrates that — no lock, no queue, no broker; staying out of each other's way
+is the hosts' discipline. What sharing changes is what a collision costs:
+
+| | `Exclusive` | `Shared` |
+| --- | --- | --- |
+| a reply that never arrives | `Timeout` | `Busy`, message names the command: `STATUS got no reply; another process may have taken it (no reply to opcode 6 within 120 ms)` |
+| the SDK reopens the session on its own | yes, for a fault it believes it can fix | never — `reconnect()` is the host's call |
+| heartbeat whose reply was taken | reconnects, as above | retried on the next tick, no CLOSE |
+| a frame for another session | dropped | counted in `stolen_frames`, offered to the stray hook |
+| sequence numbers, lease, counters | unchanged | unchanged |
+
+`stolen_frames` counts every frame the reply loop looked past because it answered
+another session or another sequence — a subset of `retries`, which also counts
+reads that returned nothing. `gdb_stolen_frames(dev)`, `device.stolen_frames` and
+`Device.StolenFrames()` are the same number in the other layers.
+
+The stray hook runs on the thread that is reading the queue, with that device's
+session busy, so it must not call back into the same `Device`. It is the seam a
+cooperating host uses to hand a frame on; the default, no hook, drops the frame as
+before. Only a foreign session reaches it — a late reply to this session's own
+earlier command moves the counter and nothing else.
+
+`over_transport` is the same constructor for a transport the caller owns — a
+proxy, a capture, a test fake — and takes the `Ownership` explicitly, which is how
+`sdk/rust/tests/shared.rs` puts two devices on one board.
 
 ### Raw command passthrough
 
@@ -366,11 +419,14 @@ bits, device id, build — arrives in `GET_FEATURE(14)`, the report `Session::op
 reads before OPEN. A feature report is a control transfer: it never touches the
 interrupt IN queue, so a second process can read it at any time. Nothing else in
 the protocol is like that. A command consumes the shared IN queue, and the reader
-that drains a reply the owner was waiting for kills that owner's session; OPEN
-takes one of the eight owner slots. This is why `probe` opens no session and
-writes no packet — `sdk/rust/tests/probe.rs` asserts the transport's write count
-is zero — and why an `Observer` has no command that can succeed instead of a
-command that happens to be harmless today.
+that drains a reply the owner was waiting for costs that owner one error — `Busy`
+if it opened shared, `Timeout` if it did not; OPEN takes one of the eight owner
+slots. This is why `probe` opens no session and writes no packet —
+`sdk/rust/tests/probe.rs` asserts the transport's write count is zero — and why an
+`Observer` has no command that can succeed instead of a command that happens to be
+harmless today. `probe` stays the answer for a program that only wants to read the
+board's numbers; [`Ownership::Shared`](#sharing-a-board) is for one that also
+wants to send.
 
 `probe::all` skips a board that vanishes mid-listing and returns `Ok(vec![])` on
 an empty bus; a bus that cannot be enumerated is an `Err`. A selector that matches
@@ -380,9 +436,8 @@ once when the identity is new, `Gone` once when polls start failing, and nothing
 while the answer is unchanged. `start_with` is the seam the tests use and the way
 a host that owns its own HID backend reads Feature 14 through it.
 
-What a host must still not do, even with this module: open a `Device` while
-another program holds the session (OPEN competes for an owner slot and every
-reply read takes from the same queue), read the IN endpoint itself, or send
+What a host must still not do, even with this module: open an exclusive `Device`
+while another program holds the session, read the IN endpoint itself, or send
 `BOOTLOADER`.
 
 ## Watch
@@ -419,6 +474,7 @@ pub struct MetricsSnapshot {
     pub frames_sent: u64,       // output reports, handshake and closing CLOSE included
     pub frames_received: u64,   // accepted input reports for this session
     pub retries: u64,           // reply-loop read retries (empty read, foreign frame)
+    pub stolen_frames: u64,     // the subset of retries for another session or sequence
     pub reconnects: u64,        // transports reopened after a fault or expired lease
     pub lease_faults: u64,      // commands answered with a lease fault
     pub timeouts: u64,          // commands whose reply never arrived
@@ -436,6 +492,13 @@ nothing while the deadline was still running, or a frame for another session or
 sequence. The SDK never re-sends a command, so it is not a retransmission count.
 Counters are per device, not per session, so `reconnects` and `lease_faults` keep
 adding up across one.
+
+`stolen_frames` is the second half of that: `retries` minus the reads that came
+back empty. On a board several programs read, it is how a collision is told from a
+board that is merely slow — `stolen_frames` moves only when a frame that belonged
+to somebody else arrived, and a shared session reports `Busy` for exactly the
+command whose reply never came back. `device.stolen_frames()` reads the one atomic
+without walking the histogram.
 
 Recording is one relaxed atomic add per counter and per latency sample: no lock,
 no allocation, no formatting, which is why it can sit on the report path. A sample
@@ -506,7 +569,7 @@ cancelled playback sends RELEASE_ALL when at least one entry had played and retu
 | 1 | Invalid | bad argument, unknown usage, wrong session id |
 | 2 | Timeout | no reply / movement did not settle |
 | 3 | Disconnected | device gone, no match for the selector |
-| 4 | Busy | eight owners, or the session id is already open |
+| 4 | Busy | eight owners, the session id is already open, or — on a shared device — a reply another process took |
 | 5 | Lease | the 2 s lease expired |
 | 6 | Framing | malformed frame or response |
 | 7 | Overflow | device queue overflow / stale output |
@@ -521,9 +584,10 @@ type: `gdb::Error`, `gdb.GdbError`, `*gdb.Error`.
 ## C ABI
 
 `include/gdb.h` is the contract: `gdb_abi_version() == 1` with
-`GDB_ABI_VERSION_MINOR == 2`, and `gdb_version()` is the SDK version string.
-Minor 1 added the attached handle, minor 2 the presence probe and the observer;
-no existing symbol changed shape. Handles are opaque (`gdb_device`, `gdb_remote`,
+`GDB_ABI_VERSION_MINOR == 3`, and `gdb_version()` is the SDK version string.
+Minor 1 added the attached handle, minor 2 the presence probe and the observer,
+minor 3 `gdb_open_shared`, `gdb_open_mock_shared` and `gdb_stolen_frames`; no
+existing symbol changed shape. Handles are opaque (`gdb_device`, `gdb_remote`,
 `gdb_observer`, `gdb_movement`, `gdb_scheduler`); strings returned by the library
 must be freed with `gdb_string_free`, and a `gdb_packet` from `gdb_command` with
 `gdb_packet_free`. Callbacks:
@@ -543,12 +607,16 @@ logging, `gdb_command` and `gdb_move_raw`; an attached handle (`gdb_remote`,
 minor version 1) has `gdb_attach`, `gdb_remote_spawn` and the broker's op set
 listed under [Broker](#broker); a probe (`gdb_probe`, `gdb_probe_all`) and an
 observer handle (`gdb_observer`, minor version 2) have the identity with no
-session at all — `gdb_observer_status`, `gdb_observer_barrier`,
+session at all; a shared device is the same `gdb_device` handle from
+`gdb_open_shared` (minor version 3), with `gdb_stolen_frames` for its counter.
+An observer's commands are all refusals — `gdb_observer_status`, `gdb_observer_barrier`,
 `gdb_observer_release_all` and `gdb_observer_command` exist only to return
 `GDB_UNSUPPORTED` with the reason. What the header has no symbol for: the flashing
-sequence, the broker's server side, the arrival watch, the counters, recording,
-a screen target — so a binding over `gdb.dll` has none of them either. Those are
-Rust-only.
+sequence, the broker's server side, the arrival watch, the rest of the counters,
+the stray hook, recording, a screen target — so a binding over `gdb.dll` has none
+of them either. Those are Rust-only. `gdb_stolen_frames` is the one counter that
+crossed, because a host sharing a board has to be able to tell a collision from a
+slow board.
 
 ## Logging
 

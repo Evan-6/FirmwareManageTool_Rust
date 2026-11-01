@@ -4,7 +4,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::event::{ConnectionState, EventHandler, notify};
 use crate::log::Level;
 use crate::metrics::{Metrics, MetricsSnapshot};
-use crate::session::{Session, new_session_id};
+use crate::session::{Session, Sharing, new_session_id};
 use crate::transport::Transport;
 use input_protocol::v3::{self, Command, SessionInfo, Status, StatusExt};
 use serde::Serialize;
@@ -36,6 +36,41 @@ impl Default for DeviceOptions {
             timeout_ms: 1000,
             heartbeat: true,
         }
+    }
+}
+
+/// A frame that arrived on the shared IN queue but belongs to another session,
+/// handed over as the raw 64-byte input report.
+pub type StrayHook = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// Whether this process is the only one driving the board.
+///
+/// The device has one IN queue and no way to address a reply to a handle, so two
+/// controllers occasionally take each other's frames. That is a fact about the
+/// hardware; what changes here is what the SDK does about it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ownership {
+    /// One owner. A reply that never arrives is `Timeout`, and a fault the SDK
+    /// believes it can fix reopens the session on its own.
+    #[default]
+    Exclusive,
+    /// Several programs, all of which may send commands. A reply that never
+    /// arrives is one `Busy` naming the command — another process may have taken
+    /// it — and the session is left exactly as it is: the SDK never reopens on
+    /// its own, because a reopen is one more CLOSE and OPEN on a board it does
+    /// not own. `reconnect()` is still there for a host that knows the board is
+    /// its own again.
+    ///
+    /// Nothing else changes: sequence numbers, the lease, the heartbeat and the
+    /// counters stay as they are, and a command still costs one exchange. What
+    /// sharing cannot give you is a guarantee about which process gets a given
+    /// reply; avoiding that collision is the hosts' discipline, not the SDK's.
+    Shared,
+}
+
+impl Ownership {
+    pub fn is_shared(self) -> bool {
+        matches!(self, Self::Shared)
     }
 }
 
@@ -71,6 +106,9 @@ pub(crate) struct Inner {
     /// Shared with every session this device opens, so the counters outlive a
     /// reconnect; every read and write goes through a relaxed atomic.
     metrics: Metrics,
+    /// Shared with every session this device opens: the ownership the host
+    /// picked and the hook for frames that belong to somebody else.
+    sharing: Arc<Sharing>,
 }
 
 #[derive(Clone)]
@@ -86,12 +124,88 @@ impl Device {
         product: String,
         options: DeviceOptions,
     ) -> Result<Self> {
+        Self::connect(
+            transport,
+            target,
+            serial,
+            product,
+            options,
+            Ownership::Exclusive,
+        )
+    }
+
+    /// A device over a transport the caller supplies: a proxy, a capture, a test
+    /// fake. The transport answers Feature 14 and speaks the v3 wire exactly like
+    /// the HID backend, and `target` says what a reconnect would re-open.
+    ///
+    /// `ownership` belongs here rather than in `set_ownership` because it decides
+    /// whether the SDK may reopen the session at all; changing it later only
+    /// affects commands that have not been sent yet.
+    pub fn over_transport(
+        transport: Box<dyn Transport>,
+        target: Target,
+        options: DeviceOptions,
+        ownership: Ownership,
+    ) -> Result<Self> {
+        let (serial, product) = match &target {
+            Target::Mock => ("MOCK".to_string(), "GDBOX mock".to_string()),
+            Target::Path(path) => (path.clone(), "GDBOX".to_string()),
+            Target::Serial(serial) => (serial.clone(), "GDBOX".to_string()),
+        };
+        Self::connect(transport, target, serial, product, options, ownership)
+    }
+
+    /// Opens a board that other programs may be driving too.
+    ///
+    /// The one difference from [`Manager::open`](crate::Manager::open) is what a
+    /// lost reply costs: one `Busy` error naming the command, instead of a
+    /// `Timeout` that invites the host to start a session the board did not ask
+    /// for. See [`Ownership::Shared`].
+    pub fn open_shared(selector: Option<&str>, options: DeviceOptions) -> Result<Self> {
+        let device = crate::manager::Manager::open(selector, options)?;
+        device.set_ownership(Ownership::Shared);
+        Ok(device)
+    }
+
+    /// The in-memory device in shared mode, with its handle, for a host that
+    /// wants to exercise the stolen-reply path without a board to share.
+    pub fn open_mock_shared(options: DeviceOptions) -> Result<(Self, crate::mock::MockHandle)> {
+        let (device, handle) = crate::manager::Manager::open_mock_with_handle(options)?;
+        device.set_ownership(Ownership::Shared);
+        Ok((device, handle))
+    }
+
+    /// Switches what a lost reply costs, for commands not yet sent. A shared
+    /// device is one that never reopens on its own, so this is worth setting
+    /// once, before the first command, which is what the constructors above do.
+    pub fn set_ownership(&self, ownership: Ownership) {
+        self.inner.sharing.set_shared(ownership.is_shared());
+    }
+
+    pub fn ownership(&self) -> Ownership {
+        if self.inner.sharing.is_shared() {
+            Ownership::Shared
+        } else {
+            Ownership::Exclusive
+        }
+    }
+
+    fn connect(
+        transport: Box<dyn Transport>,
+        target: Target,
+        serial: String,
+        product: String,
+        options: DeviceOptions,
+        ownership: Ownership,
+    ) -> Result<Self> {
         let metrics = Metrics::new();
+        let sharing = Arc::new(Sharing::new(ownership.is_shared()));
         let session = Session::open(
             transport,
             options.timeout_ms,
             new_session_id(),
             metrics.clone(),
+            sharing.clone(),
         )?;
         let capabilities = session.capabilities().clone();
         let info = DeviceInfo {
@@ -119,6 +233,7 @@ impl Device {
             virtual_cursor: Mutex::new((960, 540)),
             heartbeat: Mutex::new(None),
             metrics,
+            sharing,
         });
         if inner.options.heartbeat {
             start_heartbeat(&inner);
@@ -149,6 +264,31 @@ impl Device {
     /// Zeroes the counters, for instance when a host starts a new measurement.
     pub fn reset_metrics(&self) {
         self.inner.metrics.reset();
+    }
+
+    /// Frames the reply loop had to look past because they answered another
+    /// session or another sequence. On a shared board this is the counter that
+    /// tells a collision apart from a slow board.
+    pub fn stolen_frames(&self) -> u64 {
+        self.inner.metrics.stolen_frames()
+    }
+
+    /// Called with the raw 64-byte report of every frame that arrives while a
+    /// command waits and belongs to another session. The default is to drop it,
+    /// which is what a host alone on the board wants; a cooperating host can use
+    /// it to hand the frame back instead of letting it evaporate.
+    ///
+    /// The hook runs on the thread that is reading the queue, with that device's
+    /// session busy, so it must not call back into the same `Device`. It is
+    /// called for foreign sessions only: a late reply to this session's own
+    /// earlier command moves the counters and nothing else.
+    pub fn set_stray_hook(&self, hook: StrayHook) {
+        self.inner.sharing.set_stray_hook(Some(hook));
+    }
+
+    /// Drops stray frames again.
+    pub fn clear_stray_hook(&self) {
+        self.inner.sharing.set_stray_hook(None);
     }
 
     pub fn serial(&self) -> &str {
@@ -318,7 +458,13 @@ impl Device {
                         error.code().as_u8(),
                         error.message
                     );
-                    if !recoverable(error.code())
+                    // A shared board is not this process's to reopen: another
+                    // owner may be mid-command, and CLOSE plus OPEN is exactly
+                    // the traffic a collision must not cost. The error goes back
+                    // once and the session stays; `reconnect()` is the host's
+                    // call to make when it knows it is alone again.
+                    if self.inner.sharing.is_shared()
+                        || !recoverable(error.code())
                         || !self.inner.auto_reconnect.load(Ordering::Relaxed)
                     {
                         notify(&self.handler(), |handler| handler.error(&error));
@@ -355,6 +501,7 @@ impl Device {
             self.inner.options.timeout_ms,
             new_session_id(),
             self.inner.metrics.clone(),
+            self.inner.sharing.clone(),
         )?;
         state.session = Some(session);
         self.inner.metrics.record_reconnect();
@@ -422,8 +569,11 @@ fn start_heartbeat(inner: &Arc<Inner>) {
                     };
                     notify(&device.handler(), |handler| handler.error(&error));
                     // Reconnect from this thread; `with_session` would deadlock on
-                    // the lock we just dropped.
-                    if device.inner.auto_reconnect.load(Ordering::Relaxed)
+                    // the lock we just dropped. A shared device never reconnects
+                    // here: a heartbeat whose reply another owner took is `Busy`,
+                    // which is not recoverable, and the next beat is 500 ms away.
+                    if !device.inner.sharing.is_shared()
+                        && device.inner.auto_reconnect.load(Ordering::Relaxed)
                         && recoverable(error.code())
                     {
                         let _ = device.reconnect();

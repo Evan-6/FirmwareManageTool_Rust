@@ -29,7 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
-	ABIMinor   = 1
+	ABIMinor   = 3
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -179,6 +179,9 @@ var (
 	procDeviceList     *syscall.LazyProc
 	procOpen           *syscall.LazyProc
 	procOpenMock       *syscall.LazyProc
+	procOpenShared     *syscall.LazyProc
+	procOpenMockShared *syscall.LazyProc
+	procStolenFrames   *syscall.LazyProc
 	procDeviceFree     *syscall.LazyProc
 	procClose          *syscall.LazyProc
 	procReconnect      *syscall.LazyProc
@@ -274,6 +277,9 @@ func library() *syscall.LazyDLL {
 		procDeviceList = dll.NewProc("gdb_device_list")
 		procOpen = dll.NewProc("gdb_open")
 		procOpenMock = dll.NewProc("gdb_open_mock")
+		procOpenShared = dll.NewProc("gdb_open_shared")
+		procOpenMockShared = dll.NewProc("gdb_open_mock_shared")
+		procStolenFrames = dll.NewProc("gdb_stolen_frames")
 		procDeviceFree = dll.NewProc("gdb_device_free")
 		procClose = dll.NewProc("gdb_close")
 		procReconnect = dll.NewProc("gdb_reconnect")
@@ -502,6 +508,60 @@ func OpenMockOptions(timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, 
 	device.mouse = Mouse{device: device}
 	device.keyboard = Keyboard{device: device}
 	return device, nil
+}
+
+// OpenShared is Open for a board other programs may be driving too: a reply
+// that never arrives is Code Busy naming the command instead of Code Timeout,
+// the session is never reopened behind the caller's back, and StolenFrames
+// counts the replies that were not ours. Which program gets a given reply is
+// still the callers' discipline.
+func OpenShared(selector string, timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
+	library()
+	var pointer uintptr
+	if selector == "" {
+		pointer, _, _ = procOpenShared.Call(0, uintptr(timeoutMs), boolArg(autoReconnect), boolArg(heartbeat))
+	} else {
+		name, cerr := syscall.BytePtrFromString(selector)
+		if cerr != nil {
+			return nil, &Error{Code: Invalid, Message: cerr.Error()}
+		}
+		pointer, _, _ = procOpenShared.Call(uintptr(unsafe.Pointer(name)), uintptr(timeoutMs), boolArg(autoReconnect), boolArg(heartbeat))
+	}
+	if pointer == 0 {
+		if failure := lastError(); failure != nil {
+			return nil, failure
+		}
+		return nil, &Error{Code: IO, Message: "open failed"}
+	}
+	device := &Device{handle: pointer, events: map[uintptr]func(int32, int32, string){}}
+	device.mouse = Mouse{device: device}
+	device.keyboard = Keyboard{device: device}
+	return device, nil
+}
+
+// OpenMockShared opens the in-memory device in shared mode, for a self-test
+// that wants the stolen-reply path without hardware.
+func OpenMockShared(timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
+	library()
+	pointer, _, _ := procOpenMockShared.Call(uintptr(timeoutMs), boolArg(autoReconnect), boolArg(heartbeat))
+	if pointer == 0 {
+		if failure := lastError(); failure != nil {
+			return nil, failure
+		}
+		return nil, &Error{Code: IO, Message: "mock open failed"}
+	}
+	device := &Device{handle: pointer, events: map[uintptr]func(int32, int32, string){}}
+	device.mouse = Mouse{device: device}
+	device.keyboard = Keyboard{device: device}
+	return device, nil
+}
+
+// StolenFrames is the number of replies the reader looked past because they
+// answered another session or another sequence.
+func (d *Device) StolenFrames() uint64 {
+	library()
+	count, _, _ := procStolenFrames.Call(d.handle)
+	return uint64(count)
 }
 
 func boolArg(value bool) uintptr {

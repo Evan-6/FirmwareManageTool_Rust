@@ -27,7 +27,7 @@ pub mod watch;
 mod session;
 
 pub use broker::{Client as BrokerClient, Server as BrokerServer};
-pub use device::{Device, DeviceInfo, DeviceOptions};
+pub use device::{Device, DeviceInfo, DeviceOptions, Ownership, StrayHook};
 pub use error::{Error, ErrorCode, Result};
 pub use event::{ConnectionState, EventHandler};
 pub use keyboard::{ChordConfig, KeyStroke, TypeTextConfig};

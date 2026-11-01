@@ -19,6 +19,14 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(gdb.LIBRARY.gdb_abi_version(), gdb.ABI_VERSION)
         self.assertEqual(gdb.LIBRARY.gdb_version(), b"0.1.0")
 
+    def test_shared_open_reports_the_stolen_frames(self):
+        with gdb.Device.open_mock(shared=True) as device:
+            self.assertEqual(device.stolen_frames, 0)
+            self.assertEqual(device.status["pending"], 0)
+            self.assertEqual(device.state, gdb.ConnectionState.CONNECTED)
+            # A reply of our own is not a stolen frame.
+            self.assertEqual(device.stolen_frames, 0)
+
     def test_mock_reports_the_firmware_contract(self):
         with gdb.Device.open_mock() as device:
             info = device.info
@@ -216,7 +224,7 @@ class RemoteTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_attached_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 2)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -272,7 +280,7 @@ class ProbeTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_presence_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 2)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -283,8 +291,21 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 2u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 3u", header)
         for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_the_library_exports_every_shared_symbol(self):
+        symbols = ("gdb_open_shared", "gdb_open_mock_shared", "gdb_stolen_frames")
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
+        for name in symbols:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        for name in symbols:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 
     def test_a_selector_that_matches_nothing_is_disconnected(self):

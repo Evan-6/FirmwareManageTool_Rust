@@ -529,6 +529,73 @@ pub extern "C" fn gdb_open_mock(
     }))
 }
 
+/// The same board, opened for use alongside other programs: a reply that never
+/// arrives is `GDB_BUSY` naming the command instead of `GDB_TIMEOUT`, and the
+/// session is never reopened behind the caller's back.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_open_shared(
+    selector: *const c_char,
+    timeout_ms: u32,
+    auto_reconnect: bool,
+    heartbeat: bool,
+) -> *mut GdbDevice {
+    let selector = if selector.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { CStr::from_ptr(selector) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    pointer(guard(|| {
+        let device = Device::open_shared(
+            selector.as_deref(),
+            DeviceOptions {
+                auto_reconnect,
+                timeout_ms: timeout_ms.max(100),
+                heartbeat,
+            },
+        )?;
+        Ok(Box::new(GdbDevice {
+            device,
+            _mock: None,
+        }))
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_open_mock_shared(
+    timeout_ms: u32,
+    auto_reconnect: bool,
+    heartbeat: bool,
+) -> *mut GdbDevice {
+    pointer(guard(|| {
+        let (device, handle) = Device::open_mock_shared(DeviceOptions {
+            auto_reconnect,
+            timeout_ms: timeout_ms.max(100),
+            heartbeat,
+        })?;
+        Ok(Box::new(GdbDevice {
+            device,
+            _mock: Some(handle),
+        }))
+    }))
+}
+
+/// Frames the reply loop looked past because they answered another session or
+/// another sequence. 0 on a NULL handle, with gdb_last_error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_stolen_frames(raw: *const GdbDevice) -> u64 {
+    match guard(|| Ok(unsafe { device(raw) }?.device.stolen_frames())) {
+        Ok(count) => count,
+        Err(error) => {
+            set_last(&error);
+            0
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_device_free(raw: *mut GdbDevice) {
     if raw.is_null() {
@@ -1570,6 +1637,27 @@ mod tests {
         // An opcode the protocol does not define is the caller's mistake.
         let result = gdb_command(raw, 0x7f, ptr::null(), 0, &mut reply);
         assert_eq!(result, i32::from(ErrorCode::Invalid.as_u8()));
+        gdb_device_free(raw);
+    }
+
+    #[test]
+    fn shared_opens_the_same_board_and_reports_the_stolen_frames() {
+        let raw = gdb_open_mock_shared(1000, false, false);
+        assert!(!raw.is_null(), "the shared mock device did not open");
+        assert_eq!(gdb_device_state(raw), 2, "connected");
+        assert_eq!(gdb_stolen_frames(raw), 0);
+        let status = json_of(gdb_status(raw));
+        assert_eq!(
+            status["pending"], 0,
+            "STATUS still answers on a shared handle"
+        );
+
+        // A NULL handle is the caller's contract: no count, an error to read.
+        assert_eq!(gdb_stolen_frames(ptr::null()), 0);
+        assert_eq!(
+            gdb_last_error(ptr::null_mut(), 0),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
         gdb_device_free(raw);
     }
 

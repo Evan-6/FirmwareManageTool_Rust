@@ -35,8 +35,8 @@ nothing more.
 
 `include/gdb.h` is the compatibility layer: it is how a language with no
 implementation of its own reaches the SDK. `gdb_abi_version() == 1` pins the
-contract, and `GDB_ABI_VERSION_MINOR` (2) is the revision that added the attached
-handle and then the presence probe. It carries three handle types.
+contract, and `GDB_ABI_VERSION_MINOR` (3) is the revision that added the attached
+handle, then the presence probe, then the shared-ownership opens.
 
 A **direct** handle (`gdb_device`) owns the vendor collection: the session, the
 typed input calls, the queries, errors, logging, and the two escape hatches
@@ -55,7 +55,7 @@ what a program uses when another program owns the board.
 
 | In `gdb.h` | Not in `gdb.h` |
 | --- | --- |
-| direct: `gdb_open`, `gdb_open_mock`, `gdb_close`, `gdb_reconnect`, `gdb_set_auto_reconnect`, `gdb_device_state`, `gdb_device_list`, `gdb_device_info`, `gdb_status`, `gdb_status_ext`, `gdb_sessions`, `gdb_release_all`, `gdb_barrier`, `gdb_bootloader`, `gdb_set_event_handler` | flashing: build, UF2 packing, BOOTSEL copy, verification |
+| direct: `gdb_open`, `gdb_open_mock`, `gdb_open_shared`, `gdb_open_mock_shared`, `gdb_stolen_frames`, `gdb_close`, `gdb_reconnect`, `gdb_set_auto_reconnect`, `gdb_device_state`, `gdb_device_list`, `gdb_device_info`, `gdb_status`, `gdb_status_ext`, `gdb_sessions`, `gdb_release_all`, `gdb_barrier`, `gdb_bootloader`, `gdb_set_event_handler` | flashing: build, UF2 packing, BOOTSEL copy, verification |
 | direct: `gdb_mouse_move_by/to/path`, `gdb_move_raw`, `gdb_mouse_start_move_*`, `gdb_movement_*`, `gdb_mouse_button`, `gdb_mouse_click`, `gdb_mouse_double_click`, `gdb_mouse_wheel`, `gdb_mouse_drag`, `gdb_key_*`, `gdb_keys_*`, `gdb_type_text`, `gdb_scheduler_*`, `gdb_profile_default` | the broker's server side: `broker::Server`, `Source`, `run_if_requested` |
 | attached: `gdb_attach`, `gdb_remote_spawn`, `gdb_remote_free`, `gdb_remote_info/status/status_ext/sessions`, `gdb_remote_key/mouse_move/move_by/move_raw/mouse_buttons/wheel/barrier/release_all/command/close` | the arrival watch (`gdb::watch`) |
 | presence: `gdb_probe`, `gdb_probe_all`, `gdb_observer_start/stop/free/info/state`, `gdb_observer_status/barrier/release_all/command` | the counters (`gdb::metrics`), recording and replay (`gdb::replay`), screen targets (`MotionOptions::screen`) |
@@ -212,15 +212,19 @@ into every binding. An observer refuses `status`, `barrier`, `release_all` and
 `command` with `Unsupported`, because a command would put a frame on the shared
 queue; that is also why `probe` writes nothing at all — a test asserts the
 transport's write count stays zero. What a program must still not do while
-another one holds the session: open a `Device` (OPEN competes for one of the
-eight owner slots, and its reply reads take from the same queue), read the IN
-endpoint itself, or send `BOOTLOADER`. A second program that needs to *drive* the
-board is the [broker](#broker)'s job.
+another one holds the session: read the IN endpoint itself, or send `BOOTLOADER`.
+A program that also wants to *send* commands opens the board shared
+(`Device::open_shared`, `gdb_open_shared`, `shared=True`, `OpenShared`): the two
+owners then take each other's replies occasionally, and the one that lost a reply
+gets one `Busy` naming the command instead of a timeout it would answer with a new
+session. A second program that needs the full surface without sharing is the
+[broker](#broker)'s job.
 
 ## Broker
 
 Only one process may read the vendor collection, so a second program that opens
-the device steals the IN replies and the loser's session dies. `gdb::broker` owns
+the device steals the IN replies; the loser gets one error for the command whose
+reply went missing and keeps its session (`Busy` if it opened shared). `gdb::broker` owns
 the device in one process and lends it out over the named pipe
 `\\.\pipe\gdbox-<name>` (`default` when the caller names nothing):
 
