@@ -322,6 +322,47 @@ int32_t gdb_observer_release_all(const gdb_observer *observer);
 /* Always GDB_UNSUPPORTED: the opcode is not parsed and out is zeroed. */
 int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const uint8_t *payload, size_t len, gdb_packet *out);
 
+/* ---------------------------------------------------------------------- watch
+ *
+ * Device arrivals and removals without polling the bus from your own thread.
+ * The watch owns one thread that enumerates the HID table and the drive table;
+ * it never reads or writes a report on the vendor collection, so it cannot steal
+ * a reply from the session that owns the board.
+ *
+ * Each change calls back once, with one JSON object:
+ *   kind 0 ARRIVED, 1 REMOVED -> {path, serial, product, manufacturer, vid, pid}
+ *   kind 2 BOOTLOADER          -> {"path":"E:\\"}
+ * The first poll reports everything already present as an arrival, so a program
+ * that starts late still sees the whole bus instead of waiting for the next
+ * plug-in.
+ *
+ * Callback rules, because it runs on the thread that polls the bus:
+ *   - it must not call gdb_watch_stop or gdb_watch_free on the same handle: the
+ *     stop joins the very thread it is running on;
+ *   - it must not block: it is the only thread polling, so a slow callback
+ *     delays the next diff - hand the event to your own queue and return;
+ *   - an exception it raises is swallowed by the binding and the thread keeps
+ *     running; the JSON pointer is valid only for the duration of the call.
+ */
+typedef struct gdb_watch gdb_watch;
+typedef void (*gdb_watch_fn)(void *user, int32_t kind, const char *json);
+
+/* Starts the thread. An interval under 10 ms is rounded up. NULL when the thread
+   cannot start, with gdb_last_error set; a NULL callback is GDB_INVALID. */
+gdb_watch *gdb_watch_start(uint32_t interval_ms, gdb_watch_fn func, void *user);
+/* Stops the thread and waits for it. The handle stays valid, so a program may
+   still read the listing; safe to call twice. */
+void gdb_watch_stop(gdb_watch *watch);
+/* Stops the thread if it is still running and releases the handle. */
+void gdb_watch_free(gdb_watch *watch);
+
+/* One enumeration on the calling thread, as
+   {"devices":[{path, serial, product, manufacturer, vid, pid}], "volumes":["E:\\"]}.
+   It sends no packet either, so it is safe beside a session; read it when the
+   bus is wanted now rather than at the next change. NULL on a NULL handle or a
+   bus that cannot be read, with gdb_last_error set. */
+char *gdb_watch_listing(const gdb_watch *watch);
+
 /* ------------------------------------------------------------------ attached
  *
  * A second, separate surface for the case the direct one cannot serve: only one
@@ -350,8 +391,9 @@ int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const
 /* Minor additions, each one additive: 1 added the attached surface, 2 the
    presence probe and the observer handle, 3 the shared-ownership opens and
    gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms,
-   5 the metrics snapshot, 6 the screen-targeted absolute moves. Major stays 1: no existing symbol changed shape. */
-#define GDB_ABI_VERSION_MINOR 6u
+   5 the metrics snapshot, 6 the screen-targeted absolute moves, 7 the arrival
+   watch. Major stays 1: no existing symbol changed shape. */
+#define GDB_ABI_VERSION_MINOR 7u
 
 typedef struct gdb_remote gdb_remote;
 

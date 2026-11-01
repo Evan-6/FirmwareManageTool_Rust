@@ -584,11 +584,13 @@ type: `gdb::Error`, `gdb.GdbError`, `*gdb.Error`.
 ## C ABI
 
 `include/gdb.h` is the contract: `gdb_abi_version() == 1` with
-`GDB_ABI_VERSION_MINOR == 3`, and `gdb_version()` is the SDK version string.
+`GDB_ABI_VERSION_MINOR == 7`, and `gdb_version()` is the SDK version string.
 Minor 1 added the attached handle, minor 2 the presence probe and the observer,
-minor 3 `gdb_open_shared`, `gdb_open_mock_shared` and `gdb_stolen_frames`; no
-existing symbol changed shape. Handles are opaque (`gdb_device`, `gdb_remote`,
-`gdb_observer`, `gdb_movement`, `gdb_scheduler`); strings returned by the library
+minor 3 `gdb_open_shared`, `gdb_open_mock_shared` and `gdb_stolen_frames`, 4
+`gdb_scheduler_submit_at` and `gdb_scheduler_elapsed_ms`, 5 the metrics snapshot,
+6 the screen-targeted absolute moves and 7 the arrival watch; no existing symbol
+changed shape. Handles are opaque (`gdb_device`, `gdb_remote`, `gdb_observer`,
+`gdb_watch`, `gdb_movement`, `gdb_scheduler`); strings returned by the library
 must be freed with `gdb_string_free`, and a `gdb_packet` from `gdb_command` with
 `gdb_packet_free`. Callbacks:
 

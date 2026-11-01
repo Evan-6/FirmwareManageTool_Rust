@@ -240,7 +240,7 @@ class RemoteTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_attached_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -296,7 +296,7 @@ class ProbeTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_presence_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -307,13 +307,13 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 6u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 7u", header)
         for name in self.SYMBOLS:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 
     def test_the_library_exports_every_shared_symbol(self):
         symbols = ("gdb_open_shared", "gdb_open_mock_shared", "gdb_stolen_frames")
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 3)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
         for name in symbols:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
         here = os.path.dirname(os.path.abspath(__file__))
@@ -361,6 +361,73 @@ class ProbeTests(unittest.TestCase):
                     call()
                 self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
                 self.assertIn("Feature 14", caught.exception.message)
+
+
+class WatchTests(unittest.TestCase):
+    """The arrival watch. It needs no board: with nothing attached the callback
+    simply never fires, which is also what "no change" must look like."""
+
+    SYMBOLS = (
+        "gdb_watch_start",
+        "gdb_watch_stop",
+        "gdb_watch_free",
+        "gdb_watch_listing",
+    )
+
+    def test_the_library_exports_every_watch_symbol(self):
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 7)
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_watch_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        self.assertIn("typedef struct gdb_watch gdb_watch;", header)
+        self.assertIn("typedef void (*gdb_watch_fn)", header)
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_a_null_callback_is_invalid(self):
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.Watch(None, interval_ms=100)
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+    def test_the_listing_is_the_bus_right_now(self):
+        with gdb.watch(lambda kind, event: None, interval_ms=100) as watched:
+            listing = watched.listing
+        self.assertIsInstance(listing["devices"], list)
+        self.assertIsInstance(listing["volumes"], list)
+        for entry in listing["devices"]:
+            self.assertIn("serial", entry)
+        # A closed handle is a typed refusal, not a crash.
+        with self.assertRaises(gdb.GdbError) as caught:
+            _ = watched.listing
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+    def test_an_arrival_is_reported_once_and_stop_is_final(self):
+        events: list[tuple[int, dict]] = []
+        # A board may or may not be attached: with one on the bus the first poll
+        # reports it as an arrival, and with none there is nothing to report.
+        watched = gdb.watch(lambda kind, event: events.append((kind, event)), interval_ms=100)
+        try:
+            deadline = time.monotonic() + 5
+            while not events and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if events:
+                kind, event = events[0]
+                self.assertEqual(kind, gdb.Watch.ARRIVED)
+                self.assertIn("serial", event)
+            else:
+                self.assertIsInstance(watched.listing, dict)
+        finally:
+            watched.stop()
+        seen = len(events)
+        time.sleep(0.3)
+        self.assertEqual(len(events), seen, "a stopped watch must not call back")
+        watched.close()
 
 
 if __name__ == "__main__":

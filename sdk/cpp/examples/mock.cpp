@@ -5,9 +5,11 @@
 
 #include <cassert>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "gdb.hpp"
@@ -108,6 +110,69 @@ int main() {
         (void)shared.status_json();
         assert(shared.stolen_frames() == 0);
         shared.close();
+    }
+
+    // Metrics: one sent frame shows up in the counters, and a reset zeroes them.
+    // No heartbeat, so nothing moves between the calls and the numbers mean
+    // exactly what this block did.
+    {
+        auto quiet = gdb::Device::open_mock(1000, false, false);
+        quiet.reset_metrics();
+        (void)quiet.status_json();
+        const gdb::Metrics counted = quiet.metrics();
+        std::cout << "metrics sent=" << counted.frames_sent
+                  << " received=" << counted.frames_received
+                  << " p50=" << counted.latency_p50_us << "us\n";
+        assert(counted.frames_sent > 0 && "a STATUS frame must be counted");
+        assert(counted.frames_received > 0 && "the reply must be counted");
+        assert(counted.latency_count > 0 && "a command that waited must be timed");
+
+        quiet.reset_metrics();
+        const gdb::Metrics empty = quiet.metrics();
+        assert(empty.frames_sent == 0 && empty.frames_received == 0);
+        assert(empty.latency_count == 0 && empty.retries == 0);
+        quiet.close();
+    }
+
+    // Screen targets: monitor 0 is the mock's one screen, and a kind the ABI does
+    // not define is the caller's mistake rather than a move.
+    device.mouse().move_to(200, 200, gdb::Screen::monitor(0), 20);
+    device.mouse().move_path({{100, 100}, {120, 120}}, gdb::Screen::monitor(0), 10);
+    {
+        auto movement = device.mouse().start_move_to(300, 300, gdb::Screen::monitor(0), 20);
+        movement.wait(5000);
+        assert(movement.finished());
+    }
+    try {
+        device.mouse().move_to(10, 10, gdb::Screen{3, 0}, 0);
+        assert(false && "screen kind 3 is not defined");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::Invalid);
+    }
+    // The mock pretends to have one 1920x1080 screen, so index 1 names nothing.
+    try {
+        device.mouse().move_to(10, 10, gdb::Screen::monitor(1), 0);
+        assert(false && "the mock has a single screen");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::Unsupported);
+    }
+
+    // The watch: the bus right now, and silence once it is stopped. Whether a
+    // board is attached decides whether anything arrives, so only the listing is
+    // asserted.
+    {
+        std::atomic<int> events{0};
+        auto watched = gdb::Watch::start(
+            [&events](int32_t, const std::string&) { ++events; }, 100);
+        const std::string bus = watched.listing_json();
+        std::cout << "listing " << bus << "\n";
+        assert(bus.find("\"devices\"") != std::string::npos);
+        assert(bus.find("\"volumes\"") != std::string::npos);
+        watched.stop();
+        const int seen = events.load();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        assert(events.load() == seen && "a stopped watch must not call back");
+        watched.close();
     }
 
     assert(lines.load() > 0 && "the log sink saw nothing");

@@ -433,3 +433,174 @@ func TestObserverRefusesEveryCommand(t *testing.T) {
 		}
 	}
 }
+
+// Metrics and screen targets: counters and a rectangle, no hardware.
+func TestMetricsCountsASentFrameAndResetZeroesIt(t *testing.T) {
+	// No heartbeat and no auto-reconnect, so nothing moves between the calls
+	// below and the counters mean exactly what this test did.
+	device, err := OpenMockOptions(1000, false, false)
+	if err != nil {
+		t.Fatalf("OpenMockOptions: %v", err)
+	}
+	defer func() { _ = device.Close() }()
+
+	if err := device.ResetMetrics(); err != nil {
+		t.Fatalf("ResetMetrics: %v", err)
+	}
+	if _, err := device.StatusJSON(); err != nil {
+		t.Fatalf("STATUS: %v", err)
+	}
+	counted, err := device.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	if counted.FramesSent == 0 {
+		t.Fatal("a STATUS frame left the session but FramesSent is 0")
+	}
+	if counted.FramesReceived == 0 {
+		t.Fatal("STATUS was answered but FramesReceived is 0")
+	}
+	if counted.LatencyCount == 0 {
+		t.Fatal("a command that waited for a reply must be timed")
+	}
+
+	if err := device.ResetMetrics(); err != nil {
+		t.Fatalf("ResetMetrics: %v", err)
+	}
+	empty, err := device.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics after reset: %v", err)
+	}
+	if empty != (Metrics{}) {
+		t.Fatalf("reset left counters behind: %+v", empty)
+	}
+}
+
+func TestMoveToOnTargetsAScreenAndRejectsAnUnknownKind(t *testing.T) {
+	device := openMock(t)
+	mouse := device.Mouse()
+
+	if err := mouse.MoveToOn(200, 200, ScreenMonitor(0), 20, nil); err != nil {
+		t.Fatalf("MoveToOn(monitor 0): %v", err)
+	}
+	if err := mouse.MovePathOn([][2]int32{{10, 10}, {20, 20}}, ScreenMonitor(0), 10, nil); err != nil {
+		t.Fatalf("MovePathOn: %v", err)
+	}
+	movement, err := mouse.StartMoveToOn(100, 100, ScreenMonitor(0), 20, nil)
+	if err != nil {
+		t.Fatalf("StartMoveToOn: %v", err)
+	}
+	if err := movement.Wait(5000); err != nil {
+		t.Fatalf("waiting for a screen-targeted move: %v", err)
+	}
+	movement.Close()
+
+	var failure *Error
+	if err := mouse.MoveToOn(10, 10, Screen{Kind: 3}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("kind 3 = %v, want Invalid", err)
+	}
+	// A mock has one 1920x1080 screen, so index 1 names nothing.
+	if err := mouse.MoveToOn(10, 10, ScreenMonitor(1), 0, nil); !errors.As(err, &failure) || failure.Code != Unsupported {
+		t.Fatalf("monitor 1 = %v, want Unsupported", err)
+	}
+}
+
+// The watch: the bus as it changes, and silence once it is stopped. A board may
+// or may not be attached, so the only event assertion is conditional.
+func TestWatchReportsTheBusAndStops(t *testing.T) {
+	var mu sync.Mutex
+	var kinds []int32
+	var first map[string]any
+	watched, err := NewWatch(100, func(kind int32, event map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		kinds = append(kinds, kind)
+		if first == nil {
+			first = event
+		}
+	})
+	if err != nil {
+		t.Fatalf("NewWatch: %v", err)
+	}
+	defer watched.Close()
+
+	listing, err := watched.ListingJSON()
+	if err != nil {
+		t.Fatalf("ListingJSON: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(listing), &parsed); err != nil {
+		t.Fatalf("the listing is not JSON: %v: %s", err, listing)
+	}
+	if _, ok := parsed["devices"]; !ok {
+		t.Fatalf("the listing must name the devices: %s", listing)
+	}
+	if _, ok := parsed["volumes"]; !ok {
+		t.Fatalf("the listing must name the volumes: %s", listing)
+	}
+
+	// Never a fixed sleep for the first event: the first poll runs on its own
+	// thread and a freshly spawned one can be late.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		count := len(kinds)
+		mu.Unlock()
+		if count > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	seen, kind, event := len(kinds), int32(-1), first
+	if seen > 0 {
+		kind = kinds[0]
+	}
+	mu.Unlock()
+	if seen > 0 {
+		if kind != WatchArrived {
+			t.Fatalf("the first event kind = %d, want %d", kind, WatchArrived)
+		}
+		if _, ok := event["serial"]; !ok {
+			t.Fatalf("an arrival must name the serial: %v", event)
+		}
+	}
+
+	watched.Stop()
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	after := len(kinds)
+	mu.Unlock()
+	if after != seen {
+		t.Fatalf("a stopped watch called back %d more time(s)", after-seen)
+	}
+}
+
+func TestWatchWithoutACallbackIsInvalid(t *testing.T) {
+	watched, err := NewWatch(100, nil)
+	if err == nil {
+		watched.Close()
+		t.Fatal("a watch without a callback must be refused")
+	}
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("err = %v, want an Invalid *gdb.Error", err)
+	}
+}
+
+// The names, pinned: a rename has to change one of these lines.
+func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
+	var _ func(*Device) (Metrics, error) = (*Device).Metrics
+	var _ func(*Device) error = (*Device).ResetMetrics
+	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) error = (*Mouse).MoveToOn
+	var _ func(*Mouse, [][2]int32, Screen, uint32, *Profile) error = (*Mouse).MovePathOn
+	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) (*Movement, error) = (*Mouse).StartMoveToOn
+	var _ func() Screen = ScreenPrimary
+	var _ func(int32) Screen = ScreenMonitor
+	var _ func(int64) Screen = ScreenWindow
+	var _ func(uint32, func(int32, map[string]any)) (*Watch, error) = NewWatch
+	var _ func(*Watch) (string, error) = (*Watch).ListingJSON
+	var _ func(*Watch) = (*Watch).Stop
+	var _ func(*Watch) = (*Watch).Close
+}

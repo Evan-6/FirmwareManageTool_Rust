@@ -35,8 +35,10 @@ nothing more.
 
 `include/gdb.h` is the compatibility layer: it is how a language with no
 implementation of its own reaches the SDK. `gdb_abi_version() == 1` pins the
-contract, and `GDB_ABI_VERSION_MINOR` (3) is the revision that added the attached
-handle, then the presence probe, then the shared-ownership opens.
+contract, and `GDB_ABI_VERSION_MINOR` (7) is the revision that added the attached
+handle, then the presence probe, the shared-ownership opens, the scheduler's
+absolute due, the metrics snapshot, the screen-targeted absolute moves and the
+arrival watch.
 
 A **direct** handle (`gdb_device`) owns the vendor collection: the session, the
 typed input calls, the queries, errors, logging, and the two escape hatches

@@ -38,13 +38,15 @@ __all__ = [
     "Device",
     "Remote",
     "Observer",
+    "Watch",
+    "watch",
     "probe",
     "probe_all",
     "LIBRARY",
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 3
+ABI_VERSION_MINOR = 7
 
 
 class ErrorCode:
@@ -149,6 +151,7 @@ Point = tuple[int, int]
 EventCallback = Callable[[int, int, str], None]
 TaskCallback = Callable[[], int]
 LogCallback = Callable[[int, str], None]
+WatchCallback = Callable[[int, dict], None]
 
 
 def _library_candidates() -> Iterable[str]:
@@ -642,6 +645,17 @@ class Keyboard:
 _TASK_CALLBACK = ctypes.CFUNCTYPE(c_int32, c_void_p)
 _EVENT_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_int32, c_char_p)
 _LOG_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
+# A watch callback runs on the watch thread; ctypes acquires the GIL for it.
+_WATCH_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
+
+_D.gdb_watch_start.argtypes = [c_uint32, c_void_p, c_void_p]
+_D.gdb_watch_start.restype = c_void_p
+_D.gdb_watch_stop.argtypes = [c_void_p]
+_D.gdb_watch_stop.restype = None
+_D.gdb_watch_free.argtypes = [c_void_p]
+_D.gdb_watch_free.restype = None
+_D.gdb_watch_listing.argtypes = [c_void_p]
+_D.gdb_watch_listing.restype = c_void_p
 
 
 class Scheduler:
@@ -1113,6 +1127,99 @@ class Observer:
         if getattr(self, "_pointer", 0):
             _D.gdb_observer_free(self._pointer)
             self._pointer = 0
+
+
+class Watch:
+    """Device arrivals and removals, without polling the bus yourself.
+
+        def seen(kind, event):
+            print(kind, event)          # gdb.Watch.ARRIVED, {"serial": ...}
+
+        with gdb.watch(seen, interval_ms=250) as watch:
+            print(watch.listing)        # {"devices": [...], "volumes": [...]}
+
+    ``kind`` is ``Watch.ARRIVED``, ``Watch.REMOVED`` or ``Watch.BOOTLOADER``;
+    ``event`` is the object the C ABI sent - a device entry
+    (``path``/``serial``/``product``/``manufacturer``/``vid``/``pid``) or
+    ``{"path": "E:\\\\"}`` for an RP2040 bootloader drive. The first poll reports
+    what is already attached, so a program that starts late still sees the bus.
+
+    The callback runs on the watch thread: it must return quickly (it is the only
+    thread polling) and must not call ``stop``, which waits for that same thread.
+    The dict belongs to the call, so copy anything that outlives it. A raise is
+    reported by ctypes and swallowed, and the watch keeps running.
+    """
+
+    ARRIVED = 0
+    REMOVED = 1
+    BOOTLOADER = 2
+
+    def __init__(self, callback: WatchCallback | None, interval_ms: int = 500):
+        # ctypes keeps no reference to a callback, and the watch thread calls
+        # straight through that address: this object must outlive the thread.
+        self._callback = (
+            _WATCH_CALLBACK(
+                lambda _user, kind, text: _deliver_watch_event(callback, kind, text)
+            )
+            if callback is not None
+            else None
+        )
+        pointer = _D.gdb_watch_start(
+            interval_ms,
+            ctypes.cast(self._callback, c_void_p) if self._callback else None,
+            None,
+        )
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "watch did not start")
+        self._pointer = pointer
+
+    @property
+    def listing(self) -> dict:
+        """The bus right now: ``{"devices": [...], "volumes": [...]}``."""
+        return _take(_D.gdb_watch_listing(self._handle()))
+
+    def stop(self) -> None:
+        """Stops and joins the thread; the handle stays valid."""
+        if self._pointer:
+            _D.gdb_watch_stop(self._pointer)
+
+    def close(self) -> None:
+        if self._pointer:
+            try:
+                _D.gdb_watch_stop(self._pointer)
+            finally:
+                _D.gdb_watch_free(self._pointer)
+                self._pointer = 0
+
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise GdbError(ErrorCode.INVALID, "watch is closed")
+        return self._pointer
+
+    def __enter__(self) -> "Watch":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        if getattr(self, "_pointer", 0):
+            _D.gdb_watch_free(self._pointer)
+            self._pointer = 0
+
+
+def _deliver_watch_event(callback: WatchCallback, kind: int, text: bytes | None) -> None:
+    try:
+        event = json.loads((text or b"{}").decode("utf-8"))
+    except ValueError:
+        event = {}
+    callback(kind, event)
+
+
+def watch(callback: WatchCallback, interval_ms: int = 500) -> Watch:
+    """Watches the bus for arrivals and removals: ``gdb.watch(seen, 250)``."""
+    return Watch(callback, interval_ms)
 
 
 def set_log_level(level: int) -> None:

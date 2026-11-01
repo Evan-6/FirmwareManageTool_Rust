@@ -149,6 +149,56 @@ struct Profile {
     }
 };
 
+// One snapshot of the session's counters, as gdb_metrics_get fills it. The
+// latency figures are microseconds: below 4 ms they are the exact samples, above
+// it they are the edges of the bucket the sample fell in.
+struct Metrics {
+    uint64_t frames_sent = 0;      // reports written, handshake and CLOSE included
+    uint64_t frames_received = 0;  // replies accepted for this session
+    uint64_t retries = 0;          // reads that had to be looked past
+    uint64_t stolen_frames = 0;    // the part of retries that answered someone else
+    uint64_t reconnects = 0;
+    uint64_t lease_faults = 0;
+    uint64_t timeouts = 0;
+    uint64_t latency_count = 0;
+    uint64_t latency_min_us = 0;
+    uint64_t latency_p50_us = 0;
+    uint64_t latency_p95_us = 0;
+    uint64_t latency_max_us = 0;
+
+    static Metrics from_raw(const gdb_metrics& raw) {
+        Metrics metrics;
+        metrics.frames_sent = raw.frames_sent;
+        metrics.frames_received = raw.frames_received;
+        metrics.retries = raw.retries;
+        metrics.stolen_frames = raw.stolen_frames;
+        metrics.reconnects = raw.reconnects;
+        metrics.lease_faults = raw.lease_faults;
+        metrics.timeouts = raw.timeouts;
+        metrics.latency_count = raw.latency_count;
+        metrics.latency_min_us = raw.latency_min_us;
+        metrics.latency_p50_us = raw.latency_p50_us;
+        metrics.latency_p95_us = raw.latency_p95_us;
+        metrics.latency_max_us = raw.latency_max_us;
+        return metrics;
+    }
+};
+
+// Which rectangle an absolute move is clamped into. Coordinates stay
+// virtual-desktop physical pixels: the target is not a new origin.
+struct Screen {
+    int32_t kind = 0;  // 0 primary, 1 monitor (arg = index), 2 window (arg = HWND)
+    int64_t arg = 0;
+
+    static Screen primary() { return Screen{0, 0}; }
+    // The index-th monitor in enumeration order, which is not the display number
+    // Windows settings shows.
+    static Screen monitor(int32_t index) { return Screen{1, index}; }
+    static Screen window(int64_t hwnd) { return Screen{2, hwnd}; }
+
+    gdb_screen raw() const { return gdb_screen{kind, arg}; }
+};
+
 namespace detail {
 
 #if defined(_WIN32)
@@ -277,6 +327,16 @@ struct Api {
     decltype(&gdb_observer_barrier) observer_barrier = nullptr;
     decltype(&gdb_observer_release_all) observer_release_all = nullptr;
     decltype(&gdb_observer_command) observer_command = nullptr;
+    /* Counters, screen targets and the arrival watch: loaded softly as well. */
+    decltype(&gdb_metrics_get) metrics_get = nullptr;
+    decltype(&gdb_metrics_reset) metrics_reset = nullptr;
+    decltype(&gdb_mouse_move_to_on) mouse_move_to_on = nullptr;
+    decltype(&gdb_mouse_move_path_on) mouse_move_path_on = nullptr;
+    decltype(&gdb_mouse_start_move_to_on) mouse_start_move_to_on = nullptr;
+    decltype(&gdb_watch_start) watch_start = nullptr;
+    decltype(&gdb_watch_stop) watch_stop = nullptr;
+    decltype(&gdb_watch_free) watch_free = nullptr;
+    decltype(&gdb_watch_listing) watch_listing = nullptr;
 };
 
 inline Api& api();
@@ -395,6 +455,15 @@ inline Api& api() {
         GDB_OPTIONAL(observer_barrier, "gdb_observer_barrier")
         GDB_OPTIONAL(observer_release_all, "gdb_observer_release_all")
         GDB_OPTIONAL(observer_command, "gdb_observer_command")
+        GDB_OPTIONAL(metrics_get, "gdb_metrics_get")
+        GDB_OPTIONAL(metrics_reset, "gdb_metrics_reset")
+        GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
+        GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
+        GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
+        GDB_OPTIONAL(watch_start, "gdb_watch_start")
+        GDB_OPTIONAL(watch_stop, "gdb_watch_stop")
+        GDB_OPTIONAL(watch_free, "gdb_watch_free")
+        GDB_OPTIONAL(watch_listing, "gdb_watch_listing")
 #undef GDB_OPTIONAL
         return loaded;
     }();
@@ -432,6 +501,7 @@ using RemoteHandle = std::unique_ptr<gdb_remote, decltype(&gdb_remote_free)>;
 using MovementHandle = std::unique_ptr<gdb_movement, decltype(&gdb_movement_free)>;
 using SchedulerHandle = std::unique_ptr<gdb_scheduler, decltype(&gdb_scheduler_free)>;
 using ObserverHandle = std::unique_ptr<gdb_observer, decltype(&gdb_observer_free)>;
+using WatchHandle = std::unique_ptr<gdb_watch, decltype(&gdb_watch_free)>;
 
 inline gdb_profile profile_or_default(const Profile* profile) {
     if (profile != nullptr) {
@@ -466,6 +536,37 @@ inline void require_presence_surface() {
     throw Error(ErrorCode::Unsupported,
                 "this gdb.dll predates the presence probe; use a library that "
                 "exports gdb_probe");
+}
+
+// The counters arrived after the presence probe, and the screen targets after
+// those: both are loaded softly, so only the calls that need them report the gap.
+inline void require_metrics_surface() {
+    if (api().metrics_get != nullptr && api().metrics_reset != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the metrics snapshot; use a library that "
+                "exports gdb_metrics_get");
+}
+
+inline void require_screen_surface() {
+    if (api().mouse_move_to_on != nullptr && api().mouse_move_path_on != nullptr &&
+        api().mouse_start_move_to_on != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates screen-targeted moves; use a library that "
+                "exports gdb_mouse_move_to_on");
+}
+
+inline void require_watch_surface() {
+    if (api().watch_start != nullptr && api().watch_stop != nullptr &&
+        api().watch_free != nullptr && api().watch_listing != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the arrival watch; use a library that "
+                "exports gdb_watch_start");
 }
 
 // Frees a packet's payload however the scope is left.
@@ -555,6 +656,16 @@ public:
         auto raw = detail::profile_or_default(profile);
         detail::check(api().mouse_move_to(device_, x, y, duration_ms, &raw));
     }
+    // The same move clamped into `screen` instead of the primary monitor: a game
+    // on a second screen or inside a window is not reachable from the primary's
+    // rectangle. A cursor on another monitor is not an error.
+    void move_to(int32_t x, int32_t y, const Screen& screen, uint32_t duration_ms = 0,
+                 const Profile* profile = nullptr) {
+        detail::require_screen_surface();
+        auto raw = detail::profile_or_default(profile);
+        detail::check(api().mouse_move_to_on(device_, x, y, screen.raw(), duration_ms,
+                                             &raw));
+    }
     void move_path(const std::vector<Point>& points, uint32_t duration_ms = 0,
                    const Profile* profile = nullptr) {
         auto raw = detail::profile_or_default(profile);
@@ -562,10 +673,25 @@ public:
         detail::check(api().mouse_move_path(device_, data.data(), data.size(),
                                             duration_ms, &raw));
     }
+    void move_path(const std::vector<Point>& points, const Screen& screen,
+                   uint32_t duration_ms = 0, const Profile* profile = nullptr) {
+        detail::require_screen_surface();
+        auto raw = detail::profile_or_default(profile);
+        auto data = to_points(points);
+        detail::check(api().mouse_move_path_on(device_, data.data(), data.size(),
+                                               screen.raw(), duration_ms, &raw));
+    }
     Movement start_move_to(int32_t x, int32_t y, uint32_t duration_ms = 0,
                            const Profile* profile = nullptr) {
         auto raw = detail::profile_or_default(profile);
         return Movement(api().mouse_start_move_to(device_, x, y, duration_ms, &raw));
+    }
+    Movement start_move_to(int32_t x, int32_t y, const Screen& screen,
+                           uint32_t duration_ms = 0, const Profile* profile = nullptr) {
+        detail::require_screen_surface();
+        auto raw = detail::profile_or_default(profile);
+        return Movement(
+            api().mouse_start_move_to_on(device_, x, y, screen.raw(), duration_ms, &raw));
     }
     Movement start_move_by(int32_t dx, int32_t dy, uint32_t duration_ms = 0,
                            const Profile* profile = nullptr) {
@@ -826,6 +952,82 @@ private:
     detail::ObserverHandle handle_{nullptr, api().observer_free};
 };
 
+// Arrivals and removals without polling the bus yourself.
+//
+//     auto watched = gdb::Watch::start([](int32_t kind, const std::string& json) {
+//         // kind 0 arrived, 1 removed (a device entry), 2 bootloader ({"path"})
+//     }, 250);
+//     std::cout << watched.listing_json();
+//
+// The callback runs on the watch's own thread: it must return quickly, and it
+// must not stop or close this watch - the stop joins the thread it is running on.
+// A throw is swallowed and the thread keeps running. A board already attached is
+// reported as an arrival by the first poll.
+class Watch {
+public:
+    using Callback = std::function<void(int32_t kind, const std::string& json)>;
+
+    static Watch start(Callback callback, uint32_t interval_ms = 500) {
+        detail::require_watch_surface();
+        auto holder = std::make_unique<Callback>(std::move(callback));
+        gdb_watch* raw = api().watch_start(interval_ms, &Watch::trampoline, holder.get());
+        if (raw == nullptr) {
+            detail::throw_last_error();
+        }
+        return Watch(raw, std::move(holder));
+    }
+
+    Watch(Watch&&) noexcept = default;
+    Watch& operator=(Watch&&) noexcept = default;
+    Watch(const Watch&) = delete;
+    Watch& operator=(const Watch&) = delete;
+
+    bool valid() const { return handle_ != nullptr; }
+
+    // The bus right now: {"devices":[...],"volumes":["E:\\"]}.
+    std::string listing_json() const {
+        return detail::take(api().watch_listing(handle_.get()));
+    }
+
+    // Stops and joins the thread; the handle stays valid for the listing.
+    void stop() {
+        if (handle_) {
+            api().watch_stop(handle_.get());
+        }
+    }
+
+    void close() {
+        if (handle_) {
+            api().watch_stop(handle_.get());
+            handle_.reset();
+        }
+        callback_.reset();
+    }
+
+    ~Watch() = default;
+
+private:
+    Watch(gdb_watch* raw, std::unique_ptr<Callback> callback)
+        : callback_(std::move(callback)), handle_(raw, api().watch_free) {}
+
+    static void trampoline(void* user, int32_t kind, const char* json) {
+        auto* callback = static_cast<Callback*>(user);
+        if (callback == nullptr || !*callback) {
+            return;
+        }
+        try {
+            (*callback)(kind, json != nullptr ? std::string(json) : std::string());
+        } catch (...) {
+            // A throwing callback must not cross the ABI boundary.
+        }
+    }
+
+    // Declared before the handle, so it is destroyed after it: gdb_watch_free
+    // joins the thread that calls the callback.
+    std::unique_ptr<Callback> callback_;
+    detail::WatchHandle handle_{nullptr, api().watch_free};
+};
+
 class Device {
 public:
     Device() = default;
@@ -871,6 +1073,20 @@ public:
     /// Replies the reader looked past because they answered another session or
     /// sequence: the counter that tells a collision from a slow board.
     uint64_t stolen_frames() const { return api().stolen_frames(raw()); }
+
+    /// The session's counters and latency percentiles. Every atomic is read
+    /// once, so two fields may be one report apart.
+    Metrics metrics() const {
+        detail::require_metrics_surface();
+        gdb_metrics counters{};
+        detail::check(api().metrics_get(raw(), &counters));
+        return Metrics::from_raw(counters);
+    }
+    /// Zeroes every counter and every latency bucket.
+    void reset_metrics() {
+        detail::require_metrics_surface();
+        detail::check(api().metrics_reset(raw()));
+    }
 
     ConnectionState state() const {
         const int32_t value = api().device_state(raw());

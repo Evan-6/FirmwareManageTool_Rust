@@ -29,7 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
-	ABIMinor   = 3
+	ABIMinor   = 7
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -168,6 +168,52 @@ func (p Profile) raw() rawProfile {
 
 func (p Profile) ease() int32 { return int32(p.Ease) }
 
+// Metrics is one snapshot of the session's counters, laid out field for field
+// like gdb_metrics so the DLL can fill it in place.
+//
+// The latency figures are microseconds and come from the SDK's histogram: below
+// 4 ms they are the exact samples, above it they are the edges of the bucket the
+// sample fell in.
+type Metrics struct {
+	FramesSent     uint64 // reports written, handshake and CLOSE included
+	FramesReceived uint64 // replies accepted for this session
+	Retries        uint64 // reads that had to be looked past
+	StolenFrames   uint64 // the part of Retries that answered someone else
+	Reconnects     uint64
+	LeaseFaults    uint64
+	Timeouts       uint64
+	LatencyCount   uint64
+	LatencyMinUs   uint64
+	LatencyP50Us   uint64
+	LatencyP95Us   uint64
+	LatencyMaxUs   uint64
+}
+
+// Screen is which rectangle an absolute move is clamped into. Coordinates stay
+// virtual-desktop physical pixels: the target is not a new origin.
+type Screen struct {
+	Kind int32 // 0 primary, 1 monitor index, 2 window handle
+	Arg  int64
+}
+
+// ScreenPrimary is the primary monitor, the target a plain MoveTo uses.
+func ScreenPrimary() Screen { return Screen{Kind: 0} }
+
+// ScreenMonitor is the index-th monitor in enumeration order, which is not the
+// display number Windows settings shows.
+func ScreenMonitor(index int32) Screen { return Screen{Kind: 1, Arg: int64(index)} }
+
+// ScreenWindow is a window's bounding rectangle; hwnd is the caller's pointer.
+func ScreenWindow(hwnd int64) Screen { return Screen{Kind: 2, Arg: hwnd} }
+
+// rawScreen mirrors gdb_screen, padding included.
+type rawScreen struct {
+	Kind int32
+	Arg  int64
+}
+
+func (s Screen) raw() rawScreen { return rawScreen{Kind: s.Kind, Arg: s.Arg} }
+
 var (
 	dllOnce sync.Once
 	dll     *syscall.LazyDLL
@@ -202,6 +248,11 @@ var (
 	procMoveBy         *syscall.LazyProc
 	procMoveTo         *syscall.LazyProc
 	procMovePath       *syscall.LazyProc
+	procMoveToOn       *syscall.LazyProc
+	procMovePathOn     *syscall.LazyProc
+	procStartMoveToOn  *syscall.LazyProc
+	procMetricsGet     *syscall.LazyProc
+	procMetricsReset   *syscall.LazyProc
 	procButton         *syscall.LazyProc
 	procClick          *syscall.LazyProc
 	procDoubleClick    *syscall.LazyProc
@@ -263,6 +314,11 @@ var (
 	procObserverBarrier *syscall.LazyProc
 	procObserverRelease *syscall.LazyProc
 	procObserverCommand *syscall.LazyProc
+
+	procWatchStart   *syscall.LazyProc
+	procWatchStop    *syscall.LazyProc
+	procWatchFree    *syscall.LazyProc
+	procWatchListing *syscall.LazyProc
 )
 
 func library() *syscall.LazyDLL {
@@ -302,6 +358,11 @@ func library() *syscall.LazyDLL {
 		procMoveBy = dll.NewProc("gdb_mouse_move_by")
 		procMoveTo = dll.NewProc("gdb_mouse_move_to")
 		procMovePath = dll.NewProc("gdb_mouse_move_path")
+		procMoveToOn = dll.NewProc("gdb_mouse_move_to_on")
+		procMovePathOn = dll.NewProc("gdb_mouse_move_path_on")
+		procStartMoveToOn = dll.NewProc("gdb_mouse_start_move_to_on")
+		procMetricsGet = dll.NewProc("gdb_metrics_get")
+		procMetricsReset = dll.NewProc("gdb_metrics_reset")
 		procButton = dll.NewProc("gdb_mouse_button")
 		procClick = dll.NewProc("gdb_mouse_click")
 		procDoubleClick = dll.NewProc("gdb_mouse_double_click")
@@ -361,6 +422,10 @@ func library() *syscall.LazyDLL {
 		procObserverBarrier = dll.NewProc("gdb_observer_barrier")
 		procObserverRelease = dll.NewProc("gdb_observer_release_all")
 		procObserverCommand = dll.NewProc("gdb_observer_command")
+		procWatchStart = dll.NewProc("gdb_watch_start")
+		procWatchStop = dll.NewProc("gdb_watch_stop")
+		procWatchFree = dll.NewProc("gdb_watch_free")
+		procWatchListing = dll.NewProc("gdb_watch_listing")
 	})
 	return dll
 }
@@ -566,6 +631,25 @@ func (d *Device) StolenFrames() uint64 {
 	library()
 	count, _, _ := procStolenFrames.Call(d.handle)
 	return uint64(count)
+}
+
+// Metrics reads the session's counters once: frames, retries, lease faults and
+// the latency percentiles, without a copy of the SDK.
+func (d *Device) Metrics() (Metrics, error) {
+	library()
+	var value Metrics
+	code, _, _ := procMetricsGet.Call(d.handle, uintptr(unsafe.Pointer(&value)))
+	if code != 0 {
+		return Metrics{}, check(code)
+	}
+	return value, nil
+}
+
+// ResetMetrics zeroes every counter and every latency bucket.
+func (d *Device) ResetMetrics() error {
+	library()
+	code, _, _ := procMetricsReset.Call(d.handle)
+	return check(code)
 }
 
 func boolArg(value bool) uintptr {
@@ -1027,6 +1111,7 @@ var (
 	nextCallbackID  uintptr = 1
 	eventCallbacks          = map[uintptr]func(int32, int32, string){}
 	taskCallbacks           = map[uintptr]func() int32{}
+	watchCallbacks          = map[uintptr]func(int32, map[string]any){}
 	eventTrampoline         = syscall.NewCallback(func(user, kind, code, message uintptr) uintptr {
 		callbackMu.Lock()
 		callback := eventCallbacks[user]
@@ -1049,7 +1134,118 @@ var (
 		}
 		return uintptr(callback())
 	})
+	// The watch thread calls this with one JSON object per event; the decode
+	// happens here so a caller never sees the DLL's buffer, which is only valid
+	// for the duration of the call.
+	watchTrampoline = syscall.NewCallback(func(user, kind, body uintptr) uintptr {
+		callbackMu.Lock()
+		callback := watchCallbacks[user]
+		callbackMu.Unlock()
+		if callback == nil {
+			return 0
+		}
+		text := "{}"
+		if body != 0 {
+			text = cString(body)
+		}
+		event := map[string]any{}
+		if err := json.Unmarshal([]byte(text), &event); err != nil {
+			event = map[string]any{"json": text}
+		}
+		callback(int32(kind), event)
+		return 0
+	})
 )
+
+// Watch kinds, as the C ABI reports them.
+const (
+	WatchArrived    int32 = 0
+	WatchRemoved    int32 = 1
+	WatchBootloader int32 = 2
+)
+
+// Watch reports device arrivals and removals without polling the bus.
+//
+//	watched, err := gdb.NewWatch(250, func(kind int32, event map[string]any) {
+//		fmt.Println(kind, event["serial"])
+//	})
+//	if err != nil { log.Fatal(err) }
+//	defer watched.Close()
+//
+// The callback runs on the watch's own thread: it must return quickly, must not
+// call Stop or Close (the stop joins that very thread), and must copy anything it
+// keeps from `event`, which belongs to the call. An event is a device entry
+// (path, serial, product, manufacturer, vid, pid) or {"path": "E:\\"} for an
+// RP2040 bootloader drive.
+type Watch struct {
+	handle uintptr
+	id     uintptr
+}
+
+// NewWatch starts the watch thread; intervalMs under 10 ms is rounded up. The
+// first poll reports what is already attached as arrivals.
+func NewWatch(intervalMs uint32, callback func(kind int32, event map[string]any)) (*Watch, error) {
+	library()
+	var id, trampoline uintptr
+	if callback != nil {
+		id, trampoline = registerWatch(callback), watchTrampoline
+	}
+	pointer, _, _ := procWatchStart.Call(uintptr(intervalMs), trampoline, id)
+	if pointer == 0 {
+		unregisterWatch(id)
+		if failure := lastError(); failure != nil {
+			return nil, failure
+		}
+		return nil, &Error{Code: IO, Message: "watch did not start"}
+	}
+	return &Watch{handle: pointer, id: id}, nil
+}
+
+// ListingJSON returns the bus right now, as
+// {"devices":[{...}], "volumes":["E:\\"]}.
+func (w *Watch) ListingJSON() (string, error) {
+	library()
+	pointer, _, _ := procWatchListing.Call(w.handle)
+	return take(pointer)
+}
+
+// Stop stops and joins the thread; the handle stays valid for the listing.
+func (w *Watch) Stop() {
+	if w.handle != 0 {
+		procWatchStop.Call(w.handle)
+	}
+}
+
+// Close stops the thread and releases the handle.
+func (w *Watch) Close() {
+	if w.handle == 0 {
+		return
+	}
+	procWatchStop.Call(w.handle)
+	procWatchFree.Call(w.handle)
+	w.handle = 0
+	unregisterWatch(w.id)
+}
+
+// registerWatch reserves the id the C side hands back as user data and keeps the
+// function under it; the entry must outlive the watch thread.
+func registerWatch(callback func(int32, map[string]any)) uintptr {
+	callbackMu.Lock()
+	defer callbackMu.Unlock()
+	id := nextCallbackID
+	nextCallbackID++
+	watchCallbacks[id] = callback
+	return id
+}
+
+func unregisterWatch(id uintptr) {
+	if id == 0 {
+		return
+	}
+	callbackMu.Lock()
+	delete(watchCallbacks, id)
+	callbackMu.Unlock()
+}
 
 // SetEventHandler installs a callback for connection state and errors.
 func (d *Device) SetEventHandler(callback func(kind, code int32, message string)) error {
@@ -1104,6 +1300,58 @@ func (m *Mouse) MoveTo(x, y int32, durationMs uint32, profile *Profile) error {
 	}
 	code, _, _ := procMoveTo.Call(m.device.handle, uintptr(intArg(x)), uintptr(intArg(y)), uintptr(durationMs), uintptr(unsafe.Pointer(raw)))
 	return check(code)
+}
+
+// MoveToOn is MoveTo clamped into `screen` instead of the primary monitor: a
+// game on a second screen or in a window is not reachable from the primary's
+// rectangle. A destination that is on no screen at all fails with Unsupported.
+//
+// A 16-byte struct is passed by reference on the amd64 calling convention, which
+// is what gdb_screen compiles to; Go's syscall carries uintptr arguments only, so
+// this hands the DLL the address of a copy.
+func (m *Mouse) MoveToOn(x, y int32, screen Screen, durationMs uint32, profile *Profile) error {
+	raw, prof := screen.raw(), profileArg(profile)
+	code, _, _ := procMoveToOn.Call(
+		m.device.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&raw)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(prof)),
+	)
+	return check(code)
+}
+
+// MovePathOn is MovePath against an explicit screen target.
+func (m *Mouse) MovePathOn(points [][2]int32, screen Screen, durationMs uint32, profile *Profile) error {
+	array, err := pathPoints(points)
+	if err != nil {
+		return err
+	}
+	raw, prof := screen.raw(), profileArg(profile)
+	code, _, _ := procMovePathOn.Call(
+		m.device.handle,
+		uintptr(unsafe.Pointer(&array[0])),
+		uintptr(len(array)),
+		uintptr(unsafe.Pointer(&raw)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(prof)),
+	)
+	return check(code)
+}
+
+// StartMoveToOn starts a screen-targeted absolute move on a worker thread.
+func (m *Mouse) StartMoveToOn(x, y int32, screen Screen, durationMs uint32, profile *Profile) (*Movement, error) {
+	raw, prof := screen.raw(), profileArg(profile)
+	pointer, _, _ := procStartMoveToOn.Call(
+		m.device.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&raw)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(prof)),
+	)
+	return newMovement(pointer)
 }
 
 // MovePath visits each point in order.
@@ -1182,6 +1430,27 @@ func (m *Mouse) Drag(button Button, x, y int32, durationMs uint32, profile *Prof
 }
 
 func intArg(value int32) uintptr { return uintptr(int64(value)) }
+
+// profileArg is the pointer the ABI reads; nil means "the SDK defaults".
+func profileArg(profile *Profile) *rawProfile {
+	if profile == nil {
+		return nil
+	}
+	value := profile.raw()
+	return &value
+}
+
+// pathPoints copies a caller's path into the C layout, refusing an empty one.
+func pathPoints(points [][2]int32) ([]point, error) {
+	if len(points) == 0 {
+		return nil, &Error{Code: Invalid, Message: "a path needs at least one point"}
+	}
+	array := make([]point, len(points))
+	for index, value := range points {
+		array[index] = point{value[0], value[1]}
+	}
+	return array, nil
+}
 
 // Movement is a running move.
 type Movement struct {

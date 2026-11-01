@@ -34,6 +34,8 @@ use std::ptr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+mod watch;
+
 thread_local! {
     static LAST_ERROR: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
 }
