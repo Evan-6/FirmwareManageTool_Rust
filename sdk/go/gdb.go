@@ -246,6 +246,18 @@ var (
 	procRemoteBarrier   *syscall.LazyProc
 	procRemoteRelease   *syscall.LazyProc
 	procRemoteCommand   *syscall.LazyProc
+
+	procProbe           *syscall.LazyProc
+	procProbeAll        *syscall.LazyProc
+	procObserverStart   *syscall.LazyProc
+	procObserverStop    *syscall.LazyProc
+	procObserverFree    *syscall.LazyProc
+	procObserverInfo    *syscall.LazyProc
+	procObserverState   *syscall.LazyProc
+	procObserverStatus  *syscall.LazyProc
+	procObserverBarrier *syscall.LazyProc
+	procObserverRelease *syscall.LazyProc
+	procObserverCommand *syscall.LazyProc
 )
 
 func library() *syscall.LazyDLL {
@@ -328,6 +340,17 @@ func library() *syscall.LazyDLL {
 		procRemoteBarrier = dll.NewProc("gdb_remote_barrier")
 		procRemoteRelease = dll.NewProc("gdb_remote_release_all")
 		procRemoteCommand = dll.NewProc("gdb_remote_command")
+		procProbe = dll.NewProc("gdb_probe")
+		procProbeAll = dll.NewProc("gdb_probe_all")
+		procObserverStart = dll.NewProc("gdb_observer_start")
+		procObserverStop = dll.NewProc("gdb_observer_stop")
+		procObserverFree = dll.NewProc("gdb_observer_free")
+		procObserverInfo = dll.NewProc("gdb_observer_info")
+		procObserverState = dll.NewProc("gdb_observer_state")
+		procObserverStatus = dll.NewProc("gdb_observer_status")
+		procObserverBarrier = dll.NewProc("gdb_observer_barrier")
+		procObserverRelease = dll.NewProc("gdb_observer_release_all")
+		procObserverCommand = dll.NewProc("gdb_observer_command")
 	})
 	return dll
 }
@@ -806,6 +829,132 @@ func (r *Remote) Close() error {
 	code, _, _ := procRemoteClose.Call(r.handle)
 	procRemoteFree.Call(r.handle)
 	r.handle = 0
+	return check(code)
+}
+
+// Presence: Feature 14 only, no session, no packet.
+//
+// The identity arrives in GET_FEATURE(14), a control transfer that never touches
+// the interrupt IN queue, so this is safe while another program holds the
+// session. A command is not: it consumes the shared queue, and a second reader
+// that drains a reply the owner was waiting for kills that owner's session. A
+// program that must not disturb another one probes or observes, and does not
+// open a Device at all.
+
+// Probe returns the identity as the JSON object InfoJSON returns. selector is a
+// serial, a HID path, a unique fragment of either, or "" for the first board.
+func Probe(selector string) (string, error) {
+	library()
+	var pointer uintptr
+	if selector == "" {
+		pointer, _, _ = procProbe.Call(0)
+	} else {
+		name, err := syscall.BytePtrFromString(selector)
+		if err != nil {
+			return "", &Error{Code: Invalid, Message: err.Error()}
+		}
+		pointer, _, _ = procProbe.Call(uintptr(unsafe.Pointer(name)))
+	}
+	return take(pointer)
+}
+
+// ProbeAll returns a JSON array with one object per attached vendor collection.
+// An empty bus is "[]", not an error.
+func ProbeAll() (string, error) {
+	library()
+	pointer, _, _ := procProbeAll.Call()
+	return take(pointer)
+}
+
+// Observer is presence on a timer: Feature 14 every interval, and no way to
+// command the board.
+type Observer struct {
+	handle uintptr
+}
+
+// Observe starts polling the board selector names ("" for the first one). It
+// fails when the board is not there, so a handle always has an identity.
+func Observe(selector string, intervalMs uint32) (*Observer, error) {
+	library()
+	var pointer uintptr
+	if selector == "" {
+		pointer, _, _ = procObserverStart.Call(0, uintptr(intervalMs))
+	} else {
+		name, err := syscall.BytePtrFromString(selector)
+		if err != nil {
+			return nil, &Error{Code: Invalid, Message: err.Error()}
+		}
+		pointer, _, _ = procObserverStart.Call(uintptr(unsafe.Pointer(name)), uintptr(intervalMs))
+	}
+	if pointer == 0 {
+		if failure := lastError(); failure != nil {
+			return nil, failure
+		}
+		return nil, &Error{Code: IO, Message: "no board to observe"}
+	}
+	return &Observer{handle: pointer}, nil
+}
+
+// InfoJSON returns the last probe as JSON, the object InfoJSON returns.
+func (o *Observer) InfoJSON() (string, error) {
+	pointer, _, _ := procObserverInfo.Call(o.handle)
+	return take(pointer)
+}
+
+// State is 2 while the last poll answered and 0 while it failed.
+func (o *Observer) State() (ConnectionState, error) {
+	value, _, _ := procObserverState.Call(o.handle)
+	state := int32(value)
+	if state < 0 {
+		return StateDisconnected, &Error{Code: Invalid, Message: "observer handle is NULL"}
+	}
+	return ConnectionState(state), nil
+}
+
+// Stop stops the polling thread; the handle stays valid.
+func (o *Observer) Stop() {
+	if o.handle == 0 {
+		return
+	}
+	procObserverStop.Call(o.handle)
+}
+
+// Close stops the thread and releases the handle.
+func (o *Observer) Close() {
+	if o.handle == 0 {
+		return
+	}
+	procObserverStop.Call(o.handle)
+	procObserverFree.Call(o.handle)
+	o.handle = 0
+}
+
+// Status, Barrier, ReleaseAll and Command are refused with Unsupported: an
+// observer has no session and must not put a frame on the shared IN queue.
+func (o *Observer) Status() error {
+	code, _, _ := procObserverStatus.Call(o.handle)
+	return check(code)
+}
+
+// Barrier is always Unsupported.
+func (o *Observer) Barrier() error {
+	code, _, _ := procObserverBarrier.Call(o.handle)
+	return check(code)
+}
+
+// ReleaseAll is always Unsupported.
+func (o *Observer) ReleaseAll() error {
+	code, _, _ := procObserverRelease.Call(o.handle)
+	return check(code)
+}
+
+// Command is always Unsupported, whatever the opcode.
+func (o *Observer) Command(opcode uint8, payload []byte) error {
+	var data *uint8
+	if len(payload) > 0 {
+		data = &payload[0]
+	}
+	code, _, _ := procObserverCommand.Call(o.handle, uintptr(opcode), uintptr(unsafe.Pointer(data)), uintptr(len(payload)), 0)
 	return check(code)
 }
 

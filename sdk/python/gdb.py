@@ -37,11 +37,14 @@ __all__ = [
     "Scheduler",
     "Device",
     "Remote",
+    "Observer",
+    "probe",
+    "probe_all",
     "LIBRARY",
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 1
+ABI_VERSION_MINOR = 2
 
 
 class ErrorCode:
@@ -307,6 +310,27 @@ _D.gdb_remote_release_all.argtypes = [c_void_p]
 _D.gdb_remote_release_all.restype = c_int32
 _D.gdb_remote_command.argtypes = [c_void_p, c_uint8, POINTER(c_uint8), c_size_t, POINTER(_Packet)]
 _D.gdb_remote_command.restype = c_int32
+
+# The presence surface: Feature 14 only, no session, no packet.
+_D.gdb_probe.argtypes = [c_char_p]
+_D.gdb_probe.restype = c_void_p
+_D.gdb_probe_all.argtypes = []
+_D.gdb_probe_all.restype = c_void_p
+_D.gdb_observer_start.argtypes = [c_char_p, c_uint32]
+_D.gdb_observer_start.restype = c_void_p
+_D.gdb_observer_stop.argtypes = [c_void_p]
+_D.gdb_observer_stop.restype = None
+_D.gdb_observer_free.argtypes = [c_void_p]
+_D.gdb_observer_free.restype = None
+_D.gdb_observer_info.argtypes = [c_void_p]
+_D.gdb_observer_info.restype = c_void_p
+_D.gdb_observer_state.argtypes = [c_void_p]
+_D.gdb_observer_state.restype = c_int32
+for name in ("gdb_observer_status", "gdb_observer_barrier", "gdb_observer_release_all"):
+    getattr(_D, name).argtypes = [c_void_p]
+    getattr(_D, name).restype = c_int32
+_D.gdb_observer_command.argtypes = [c_void_p, c_uint8, POINTER(c_uint8), c_size_t, POINTER(_Packet)]
+_D.gdb_observer_command.restype = c_int32
 
 
 def _last_error() -> tuple[int, str]:
@@ -875,6 +899,102 @@ class Remote:
     def __del__(self) -> None:  # pragma: no cover - best effort
         if getattr(self, "_pointer", 0):
             _D.gdb_remote_free(self._pointer)
+            self._pointer = 0
+
+
+def probe(selector: str | None = None) -> dict:
+    """The board's identity from Feature 14 alone: no session, no packet.
+
+    Uses the same selector rules as ``Device.open``. Because a feature report is a
+    control transfer, this is safe while another program holds the session - which
+    is the whole point of it. The dict has the same keys as ``Device.info``.
+    """
+    return _take(_D.gdb_probe(selector.encode("utf-8") if selector else None))
+
+
+def probe_all() -> list[dict]:
+    """Every attached board, one Feature 14 read each. An empty bus is ``[]``."""
+    return _take(_D.gdb_probe_all())
+
+
+class Observer:
+    """Presence without a session: Feature 14 on a timer, and no way to command.
+
+        with gdb.Observer(interval_ms=500) as observer:
+            print(observer.info)          # same keys as Device.info
+
+    Use this instead of ``Device`` when another program owns the session. Every
+    command raises ``GdbError`` with ``ErrorCode.UNSUPPORTED``: the handle has no
+    session and must not put a frame on the IN queue the owner is reading.
+    """
+
+    def __init__(self, selector: str | None = None, interval_ms: int = 500):
+        pointer = _D.gdb_observer_start(
+            selector.encode("utf-8") if selector else None, interval_ms
+        )
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "no board to observe")
+        self._pointer = pointer
+
+    @property
+    def info(self) -> dict:
+        return _take(_D.gdb_observer_info(self._handle()))
+
+    @property
+    def state(self) -> int:
+        value = _D.gdb_observer_state(self._handle())
+        if value < 0:
+            raise GdbError(ErrorCode.INVALID, "observer handle is NULL")
+        return value
+
+    def stop(self) -> None:
+        if self._pointer:
+            _D.gdb_observer_stop(self._pointer)
+
+    def close(self) -> None:
+        if self._pointer:
+            try:
+                _D.gdb_observer_stop(self._pointer)
+            finally:
+                _D.gdb_observer_free(self._pointer)
+                self._pointer = 0
+
+    def status(self) -> None:
+        _check(_D.gdb_observer_status(self._handle()))
+
+    def barrier(self) -> None:
+        _check(_D.gdb_observer_barrier(self._handle()))
+
+    def release_all(self) -> None:
+        _check(_D.gdb_observer_release_all(self._handle()))
+
+    def command(self, opcode: int, payload: bytes = b"") -> None:
+        buffer = (c_uint8 * len(payload)).from_buffer_copy(payload) if payload else None
+        out = _Packet()
+        try:
+            _check(
+                _D.gdb_observer_command(
+                    self._handle(), opcode, buffer, len(payload), byref(out)
+                )
+            )
+        finally:
+            _D.gdb_packet_free(byref(out))
+
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise GdbError(ErrorCode.INVALID, "observer is closed")
+        return self._pointer
+
+    def __enter__(self) -> "Observer":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        if getattr(self, "_pointer", 0):
+            _D.gdb_observer_free(self._pointer)
             self._pointer = 0
 
 

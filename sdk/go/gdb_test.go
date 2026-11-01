@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -307,5 +308,110 @@ func TestRemoteSpawnWithoutAnExecutableIsUnsupported(t *testing.T) {
 	var failure *Error
 	if !errors.As(err, &failure) || failure.Code != Unsupported {
 		t.Fatalf("err = %v, want an Unsupported *gdb.Error", err)
+	}
+}
+
+// Presence: Feature 14 only, so a second program can see the board without
+// disturbing whoever owns the session. These need no board.
+func TestProbeWithoutABoardIsTyped(t *testing.T) {
+	_, err := Probe("go-test-no-such-board")
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Disconnected {
+		t.Fatalf("err = %v, want a Disconnected *gdb.Error", err)
+	}
+	if failure.Message == "" {
+		t.Fatal("a failure needs a message")
+	}
+}
+
+func TestProbeAllIsAJSONArray(t *testing.T) {
+	text, err := ProbeAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatalf("%v: %s", err, text)
+	}
+	for _, entry := range entries {
+		if entry["board"].(float64) != 2 || entry["firmware"] == "" {
+			t.Fatalf("unexpected probe: %v", entry)
+		}
+	}
+}
+
+func TestObserveWithoutABoardIsTyped(t *testing.T) {
+	observer, err := Observe("go-test-no-such-board", 100)
+	if err == nil {
+		observer.Close()
+		t.Fatal("observe succeeded with no board")
+	}
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != Disconnected {
+		t.Fatalf("err = %v, want a Disconnected *gdb.Error", err)
+	}
+}
+
+// The presence names, pinned: a rename has to change this line.
+func TestPresenceSurfaceIsNamed(t *testing.T) {
+	var _ func(string) (string, error) = Probe
+	var _ func() (string, error) = ProbeAll
+	var _ func(string, uint32) (*Observer, error) = Observe
+	var _ func(*Observer) (string, error) = (*Observer).InfoJSON
+	var _ func(*Observer) (ConnectionState, error) = (*Observer).State
+	var _ func(*Observer) error = (*Observer).Status
+	var _ func(*Observer) error = (*Observer).Barrier
+	var _ func(*Observer) error = (*Observer).ReleaseAll
+	var _ func(*Observer, uint8, []byte) error = (*Observer).Command
+}
+
+func TestObserverRefusesEveryCommand(t *testing.T) {
+	text, err := ProbeAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(text), &entries); err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Skip("no board attached, so there is nothing to observe")
+	}
+
+	observer, err := Observe("", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer observer.Close()
+
+	if state, err := observer.State(); err != nil || state != StateConnected {
+		t.Fatalf("state = %v, %v", state, err)
+	}
+	info, err := observer.InfoJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(info), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["board"].(float64) != 2 {
+		t.Fatalf("unexpected info: %s", info)
+	}
+
+	refusals := map[string]error{
+		"status":      observer.Status(),
+		"barrier":     observer.Barrier(),
+		"release_all": observer.ReleaseAll(),
+		"command":     observer.Command(0x06, nil),
+	}
+	for name, err := range refusals {
+		var failure *Error
+		if !errors.As(err, &failure) || failure.Code != Unsupported {
+			t.Fatalf("%s = %v, want Unsupported", name, err)
+		}
+		if !strings.Contains(failure.Message, "Feature 14") {
+			t.Fatalf("%s message %q must name Feature 14", name, failure.Message)
+		}
 	}
 }

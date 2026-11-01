@@ -20,6 +20,7 @@ use gdb_sdk::log::{self, Level};
 use gdb_sdk::manager::Manager;
 use gdb_sdk::mock::MockHandle;
 use gdb_sdk::motion::{MotionOptions, Movement};
+use gdb_sdk::probe::{self, Observer, Probe};
 use gdb_sdk::task::{Priority, Scheduler, TaskId};
 use gdb_sdk::{Button, Device, DeviceInfo, DeviceOptions, TypeTextConfig};
 use input_protocol::KeyId;
@@ -28,7 +29,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 thread_local! {
@@ -1141,6 +1142,152 @@ pub extern "C" fn gdb_scheduler_take_errors(raw: *mut GdbScheduler) -> *mut c_ch
     }))
 }
 
+// ------------------------------------------------------------------ presence
+//
+// What a program may read while another program owns the board. Feature 14 is a
+// control transfer: it never touches the interrupt IN queue, so this reads the
+// identity with no session and no packet. No OPEN either, so no owner slot is
+// taken and the program that holds one keeps it.
+//
+// `gdb_probe` returns the object `gdb_device_info` returns and `gdb_probe_all`
+// an array of them; both are freed with `gdb_string_free`.
+//
+// The observer handle is that same read on a timer. It has no command that can
+// succeed: each one returns GDB_UNSUPPORTED with a message naming the reason, so
+// a host that swaps a device handle for an observer gets a typed refusal instead
+// of a write it cannot take back.
+
+pub struct GdbObserver {
+    observer: Mutex<Observer>,
+}
+
+fn selector_text(selector: *const c_char) -> Option<String> {
+    if selector.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr(selector) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_probe(selector: *const c_char) -> *mut c_char {
+    let wanted = selector_text(selector);
+    json_string(guard(|| {
+        let probe = probe::read_selector(wanted.as_deref())?;
+        info_json(&probe.info())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_probe_all() -> *mut c_char {
+    json_string(guard(|| {
+        let infos: Vec<DeviceInfo> = probe::all()?.iter().map(Probe::info).collect();
+        serde_json::to_string(&infos).map_err(|error| Error::io(error.to_string()))
+    }))
+}
+
+unsafe fn observer<'a>(raw: *const GdbObserver) -> gdb_sdk::Result<MutexGuard<'a, Observer>> {
+    let handle =
+        unsafe { raw.as_ref() }.ok_or_else(|| Error::invalid("observer handle is NULL"))?;
+    Ok(handle
+        .observer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_start(
+    selector: *const c_char,
+    interval_ms: u32,
+) -> *mut GdbObserver {
+    let wanted = selector_text(selector);
+    pointer(guard(|| {
+        let interval = Duration::from_millis(u64::from(interval_ms.max(1)));
+        let observer = Observer::start_selector(wanted.as_deref(), interval, |_| {})?;
+        Ok(Box::new(GdbObserver {
+            observer: Mutex::new(observer),
+        }))
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_stop(raw: *mut GdbObserver) {
+    if raw.is_null() {
+        return;
+    }
+    let handle = unsafe { &*raw };
+    handle
+        .observer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .stop();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_free(raw: *mut GdbObserver) {
+    if raw.is_null() {
+        return;
+    }
+    // Observer::drop stops the thread; nothing is sent on the way out.
+    drop(unsafe { Box::from_raw(raw) });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_info(raw: *const GdbObserver) -> *mut c_char {
+    json_string(guard(|| {
+        let observer = unsafe { observer(raw) }?;
+        info_json(&observer.info())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_state(raw: *const GdbObserver) -> i32 {
+    match guard(|| Ok(unsafe { observer(raw) }?.state() as i32)) {
+        Ok(state) => state,
+        Err(error) => {
+            set_last(&error);
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_status(raw: *const GdbObserver) -> i32 {
+    code(guard(|| unsafe { observer(raw) }?.status().map(|_| ())))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_barrier(raw: *const GdbObserver) -> i32 {
+    code(guard(|| unsafe { observer(raw) }?.barrier()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_release_all(raw: *const GdbObserver) -> i32 {
+    code(guard(|| unsafe { observer(raw) }?.release_all()))
+}
+
+/// The escape hatch, refused: an observer never sends a frame, so the opcode is
+/// not even parsed and `out` is left zeroed.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_observer_command(
+    raw: *const GdbObserver,
+    _opcode: u8,
+    _payload: *const u8,
+    _len: usize,
+    out: *mut GdbPacket,
+) -> i32 {
+    code(guard(|| {
+        let observer = unsafe { observer(raw) }?;
+        if !out.is_null() {
+            unsafe { *out = GdbPacket::empty() };
+        }
+        Err(observer.refuse())
+    }))
+}
+
 // ------------------------------------------------------------------- remote
 //
 // A second surface, deliberately apart from the symbols above: a broker process
@@ -1484,6 +1631,117 @@ mod tests {
             lines.iter().any(|line| line.contains("opcode=")),
             "no packet line reached the sink: {lines:?}"
         );
+    }
+
+    // ---------------------------------------------------------- presence
+
+    /// A probe is the same object `gdb_device_info` returns, because both are
+    /// `info_json(&DeviceInfo)`. The mock supplies the identity, so the field
+    /// set is proven without hardware.
+    #[test]
+    fn probe_json_is_the_device_info_shape() {
+        let (transport, _handle) = gdb_sdk::mock::MockTransport::new();
+        let probe = probe::read_from(Box::new(transport), "MOCK", "GDBOX mock")
+            .expect("the mock answers Feature 14");
+        let from_probe: serde_json::Value =
+            serde_json::from_str(&info_json(&probe.info()).unwrap()).unwrap();
+
+        let direct = open_mock();
+        let from_device = json_of(gdb_device_info(direct));
+        assert_eq!(fields(&from_probe), fields(&from_device));
+        assert_eq!(
+            from_probe, from_device,
+            "a probe must serialize exactly like the device info"
+        );
+        gdb_device_free(direct);
+    }
+
+    #[test]
+    fn probe_reports_a_missing_selector_as_a_typed_error() {
+        let selector = c_text("ffi-no-such-board");
+        assert!(gdb_probe(selector.as_ptr()).is_null());
+        assert!(
+            matches!(last_code(), 3 | 8),
+            "want Disconnected or Unsupported, got {}",
+            last_code()
+        );
+        assert!(!message().is_empty(), "a failure needs a message");
+    }
+
+    #[test]
+    fn probe_all_returns_a_json_array() {
+        let value = json_of(gdb_probe_all());
+        let entries = value.as_array().expect("an array, even when empty");
+        if let Some(first) = entries.first() {
+            let direct = open_mock();
+            assert_eq!(fields(first), fields(&json_of(gdb_device_info(direct))));
+            gdb_device_free(direct);
+        }
+    }
+
+    #[test]
+    fn observer_symbols_reject_a_null_handle() {
+        assert!(gdb_observer_info(ptr::null()).is_null());
+        assert_eq!(last_code(), i32::from(ErrorCode::Invalid.as_u8()));
+        assert_eq!(gdb_observer_state(ptr::null()), -1);
+        assert_eq!(
+            gdb_observer_status(ptr::null()),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_observer_stop(ptr::null_mut());
+        gdb_observer_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn observer_start_without_a_board_is_a_typed_error() {
+        let selector = c_text("ffi-no-such-board");
+        assert!(gdb_observer_start(selector.as_ptr(), 100).is_null());
+        assert!(
+            matches!(last_code(), 3 | 8),
+            "want Disconnected or Unsupported, got {}",
+            last_code()
+        );
+    }
+
+    /// The live half: present only when a board is plugged in. It reads Feature
+    /// 14 (a control transfer), never a packet — the refusals prove it.
+    #[test]
+    fn an_observer_on_a_present_board_refuses_every_command() {
+        let present = gdb_probe(ptr::null());
+        if present.is_null() {
+            return;
+        }
+        gdb_string_free(present);
+
+        let observer = gdb_observer_start(ptr::null(), 100);
+        assert!(!observer.is_null(), "{}", message());
+
+        let info = json_of(gdb_observer_info(observer));
+        let direct = open_mock();
+        assert_eq!(fields(&info), fields(&json_of(gdb_device_info(direct))));
+        gdb_device_free(direct);
+        assert_eq!(info["board"], 2);
+        assert_eq!(
+            gdb_observer_state(observer),
+            2,
+            "connected while it answers"
+        );
+
+        let unsupported = i32::from(ErrorCode::Unsupported.as_u8());
+        assert_eq!(gdb_observer_status(observer), unsupported);
+        assert!(message().contains("Feature 14"), "{}", message());
+        assert_eq!(gdb_observer_barrier(observer), unsupported);
+        assert_eq!(gdb_observer_release_all(observer), unsupported);
+
+        let mut packet = GdbPacket::empty();
+        assert_eq!(
+            gdb_observer_command(observer, v3::STATUS, ptr::null(), 0, &mut packet),
+            unsupported
+        );
+        assert!(packet.payload.is_null() && packet.len == 0);
+
+        gdb_observer_stop(observer);
+        gdb_observer_free(observer);
     }
 
     // ------------------------------------------------------------- remote

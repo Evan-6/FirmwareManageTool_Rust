@@ -16,7 +16,8 @@ absolute move, and so is the broker's server side. They are under their own
 headings below and have no counterpart in `gdb.h`, the C++ header, the Python
 module or the Go package. A broker *client* does have one: `gdb_attach` and the
 `gdb_remote_*` calls carry it, wrapped as `gdb::Remote`, `gdb.Remote` and
-`gdb.Attach`.
+`gdb.Attach`. So does presence: `gdb_probe`, `gdb_probe_all` and the
+`gdb_observer_*` handle in every layer.
 
 ## Naming map
 
@@ -61,6 +62,9 @@ module or the Go package. A broker *client* does have one: `gdb_attach` and the
 | record / replay | `replay::Recorder`, `Recording` | — | — | — |
 | attach to a broker | `broker::Client::connect(name)` | `Remote::attach(name)` | `Remote.attach(name)` | `Attach(name)` |
 | start a broker if none is listening | `Client::connect_or_spawn(name, exe)` | `Remote::spawn(name)` | `Remote.spawn(name)` | `Spawn(name)` |
+| presence, no session | `probe::read_selector(sel)` | `probe(sel)` | `probe(sel)` | `Probe(sel)` |
+| presence for the whole bus | `probe::all()` | `probe_all()` | `probe_all()` | `ProbeAll()` |
+| presence on a timer | `Observer::start` | `Observer::start` | `Observer(...)` | `Observe(sel, ms)` |
 | monitor or window as the move target | `MotionOptions::screen` | — | — | — |
 
 ## Device
@@ -322,6 +326,65 @@ unchanged. What an attached handle has not: `move_to`, `start_move_*`, `drag`,
 those need the collection or the process that owns it. `gdb::Remote`,
 `gdb.Remote` and `gdb.Attach` are the bindings' spelling of these calls.
 
+## Presence
+
+```rust
+pub struct Probe {                    // Serialize: camelCase, DeviceInfo's keys
+    pub serial: String, pub product: String, pub board: u8, pub firmware: String,
+    pub lease_ms: u16, pub poll_ms: u8, pub capabilities: u32,
+    pub device_id: [u8; 8], pub build: u32,
+}
+
+pub fn probe::read(path: &str) -> Result<Probe>;
+pub fn probe::read_selector(selector: Option<&str>) -> Result<Probe>;
+pub fn probe::read_from(transport: Box<dyn Transport>, serial: &str, product: &str) -> Result<Probe>;
+pub fn probe::all() -> Result<Vec<Probe>>;
+// Manager::probe() and Manager::probe_all() are the same two calls without the path.
+
+pub enum ProbeEvent { Present(Probe), Gone(Error) }
+
+impl Observer {
+    pub fn open(selector: Option<&str>) -> Result<Self>;          // one read, no thread
+    pub fn start(interval: Duration,
+                 callback: impl FnMut(&ProbeEvent) + Send + 'static) -> Result<Self>;
+    pub fn start_selector(selector: Option<&str>, interval: Duration, callback: …) -> Result<Self>;
+    pub fn start_with(source: impl Fn() -> Result<Probe> + Send + 'static,
+                      interval: Duration, callback: …) -> Result<Self>;
+    pub fn stop(&mut self);                                       // and Drop stops
+    pub fn is_running(&self) -> bool;
+    pub fn probe(&self) -> Probe;                                 // the last one, kept on failure
+    pub fn info(&self) -> DeviceInfo;                             // the Device::info() shape
+    pub fn state(&self) -> ConnectionState;
+    pub fn last_error(&self) -> Option<Error>;
+    // status, status_ext, sessions, barrier, release_all, bootloader, command, reconnect:
+    // every one is Err(Unsupported) with probe::OBSERVER_REFUSAL as the message.
+}
+```
+
+The identity a session needs — board id, firmware, lease, poll interval, capability
+bits, device id, build — arrives in `GET_FEATURE(14)`, the report `Session::open`
+reads before OPEN. A feature report is a control transfer: it never touches the
+interrupt IN queue, so a second process can read it at any time. Nothing else in
+the protocol is like that. A command consumes the shared IN queue, and the reader
+that drains a reply the owner was waiting for kills that owner's session; OPEN
+takes one of the eight owner slots. This is why `probe` opens no session and
+writes no packet — `sdk/rust/tests/probe.rs` asserts the transport's write count
+is zero — and why an `Observer` has no command that can succeed instead of a
+command that happens to be harmless today.
+
+`probe::all` skips a board that vanishes mid-listing and returns `Ok(vec![])` on
+an empty bus; a bus that cannot be enumerated is an `Err`. A selector that matches
+nothing is `Disconnected`. The observer resolves its selector again on every poll,
+so a renumbered HID path after a re-plug is not fatal, and it reports `Present`
+once when the identity is new, `Gone` once when polls start failing, and nothing
+while the answer is unchanged. `start_with` is the seam the tests use and the way
+a host that owns its own HID backend reads Feature 14 through it.
+
+What a host must still not do, even with this module: open a `Device` while
+another program holds the session (OPEN competes for an owner slot and every
+reply read takes from the same queue), read the IN endpoint itself, or send
+`BOOTLOADER`.
+
 ## Watch
 
 ```rust
@@ -458,11 +521,12 @@ type: `gdb::Error`, `gdb.GdbError`, `*gdb.Error`.
 ## C ABI
 
 `include/gdb.h` is the contract: `gdb_abi_version() == 1` with
-`GDB_ABI_VERSION_MINOR == 1`, and `gdb_version()` is the SDK version string.
-Handles are opaque (`gdb_device`, `gdb_remote`, `gdb_movement`,
-`gdb_scheduler`); strings returned by the library must be freed with
-`gdb_string_free`, and a `gdb_packet` from `gdb_command` with `gdb_packet_free`.
-Callbacks:
+`GDB_ABI_VERSION_MINOR == 2`, and `gdb_version()` is the SDK version string.
+Minor 1 added the attached handle, minor 2 the presence probe and the observer;
+no existing symbol changed shape. Handles are opaque (`gdb_device`, `gdb_remote`,
+`gdb_observer`, `gdb_movement`, `gdb_scheduler`); strings returned by the library
+must be freed with `gdb_string_free`, and a `gdb_packet` from `gdb_command` with
+`gdb_packet_free`. Callbacks:
 
 ```c
 void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *msg);
@@ -477,7 +541,11 @@ its own, and it is deliberately narrower than the SDK. A direct handle
 (`gdb_device`) has the session, the typed input calls, the queries, errors,
 logging, `gdb_command` and `gdb_move_raw`; an attached handle (`gdb_remote`,
 minor version 1) has `gdb_attach`, `gdb_remote_spawn` and the broker's op set
-listed under [Broker](#broker). What the header has no symbol for: the flashing
+listed under [Broker](#broker); a probe (`gdb_probe`, `gdb_probe_all`) and an
+observer handle (`gdb_observer`, minor version 2) have the identity with no
+session at all — `gdb_observer_status`, `gdb_observer_barrier`,
+`gdb_observer_release_all` and `gdb_observer_command` exist only to return
+`GDB_UNSUPPORTED` with the reason. What the header has no symbol for: the flashing
 sequence, the broker's server side, the arrival watch, the counters, recording,
 a screen target — so a binding over `gdb.dll` has none of them either. Those are
 Rust-only.

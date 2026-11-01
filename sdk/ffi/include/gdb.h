@@ -195,6 +195,60 @@ int32_t gdb_scheduler_wait_idle(gdb_scheduler *scheduler, uint32_t timeout_ms);
 /* JSON array of {taskId, code, message} for jobs that failed. */
 char *gdb_scheduler_take_errors(gdb_scheduler *scheduler);
 
+/* ------------------------------------------------------------------- presence
+ *
+ * What a program may read while another program owns the board. The identity -
+ * board id, firmware version, lease length, poll interval, capability flags,
+ * device id, build - arrives in GET_FEATURE(14), a control transfer that never
+ * touches the interrupt IN queue, so this needs no session and sends no packet.
+ * No OPEN either, so no owner slot is taken and the program that holds one keeps
+ * it.
+ *
+ * That is the whole difference from gdb_open. A direct handle may also send
+ * commands, and a command consumes the shared IN queue: a second reader that
+ * drains a reply the owner was waiting for kills that owner's session. So while
+ * another program owns the session, a program must not open a device handle at
+ * all - it probes, or it observes.
+ */
+
+/* JSON: the same object gdb_device_info returns. selector is a USB serial, a HID
+   path, a unique fragment of either, or NULL for the first attached board.
+   NULL when nothing matches, with gdb_last_error set (GDB_DISCONNECTED, or
+   GDB_UNSUPPORTED where there is no HID backend). */
+char *gdb_probe(const char *selector);
+/* JSON array of those objects, one per attached vendor collection. An empty bus
+   is "[]", not NULL. */
+char *gdb_probe_all(void);
+/* Both are freed with gdb_string_free; there is no separate free call. */
+
+typedef struct gdb_observer gdb_observer;
+
+/* Reads Feature 14 once, then again every interval_ms on its own thread, and
+   keeps the last answer. selector may be NULL. NULL when the board is not there
+   or does not answer, with gdb_last_error set. An interval under 50 ms is
+   rounded up. */
+gdb_observer *gdb_observer_start(const char *selector, uint32_t interval_ms);
+/* Stops the thread. The handle stays valid for info and state. */
+void gdb_observer_stop(gdb_observer *observer);
+/* Stops the thread and releases the handle. */
+void gdb_observer_free(gdb_observer *observer);
+
+/* The last probe, as the object gdb_device_info returns. */
+char *gdb_observer_info(const gdb_observer *observer);
+/* 2 connected while the last poll answered, 0 disconnected while it failed.
+   -1 on a NULL handle. */
+int32_t gdb_observer_state(const gdb_observer *observer);
+
+/* Every command on an observer is GDB_UNSUPPORTED, with a message naming the
+   reason: the handle has no session and must not put a frame on the shared IN
+   queue. They exist so a program can swap a device handle for an observer and
+   get a typed refusal instead of a write it cannot take back. */
+int32_t gdb_observer_status(const gdb_observer *observer);
+int32_t gdb_observer_barrier(const gdb_observer *observer);
+int32_t gdb_observer_release_all(const gdb_observer *observer);
+/* Always GDB_UNSUPPORTED: the opcode is not parsed and out is zeroed. */
+int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const uint8_t *payload, size_t len, gdb_packet *out);
+
 /* ------------------------------------------------------------------ attached
  *
  * A second, separate surface for the case the direct one cannot serve: only one
@@ -220,7 +274,10 @@ char *gdb_scheduler_take_errors(gdb_scheduler *scheduler);
  * broker's side of the pipe.
  */
 
-#define GDB_ABI_VERSION_MINOR 1u
+/* Minor additions, each one additive: 1 added the attached surface, 2 the
+   presence probe and the observer handle. Major stays 1: no existing symbol
+   changed shape. */
+#define GDB_ABI_VERSION_MINOR 2u
 
 typedef struct gdb_remote gdb_remote;
 

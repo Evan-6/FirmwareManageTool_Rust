@@ -216,7 +216,7 @@ class RemoteTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_attached_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 1)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 2)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -250,6 +250,80 @@ class RemoteTests(unittest.TestCase):
         finally:
             if saved is not None:
                 os.environ["GDBOX_BROKER_EXE"] = saved
+
+
+class ProbeTests(unittest.TestCase):
+    """Presence: Feature 14 only, which is what lets a second program see the
+    board while another one owns the session. The symbol, header and typed-error
+    checks need no board; the live one skips when the bus is empty."""
+
+    SYMBOLS = (
+        "gdb_probe",
+        "gdb_probe_all",
+        "gdb_observer_start",
+        "gdb_observer_stop",
+        "gdb_observer_free",
+        "gdb_observer_info",
+        "gdb_observer_state",
+        "gdb_observer_status",
+        "gdb_observer_barrier",
+        "gdb_observer_release_all",
+        "gdb_observer_command",
+    )
+
+    def test_the_library_exports_every_presence_symbol(self):
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 2)
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_presence_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        self.assertIn("typedef struct gdb_observer gdb_observer;", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 2u", header)
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_a_selector_that_matches_nothing_is_disconnected(self):
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.probe("no-such-serial")
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.DISCONNECTED)
+        self.assertTrue(caught.exception.message)
+
+    def test_probe_all_is_a_list_of_the_same_shape_as_info(self):
+        probes = gdb.probe_all()
+        self.assertIsInstance(probes, list)
+        with gdb.Device.open_mock() as device:
+            keys = set(device.info)
+        for probe in probes:
+            self.assertEqual(set(probe), keys, "a probe is the info object")
+            self.assertEqual(probe["board"], 2)
+
+    def test_an_observer_cannot_start_without_a_board(self):
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.Observer("no-such-serial", interval_ms=100)
+        self.assertEqual(caught.exception.code, gdb.ErrorCode.DISCONNECTED)
+
+    def test_an_observer_refuses_every_command(self):
+        if not gdb.probe_all():
+            self.skipTest("no board attached, so there is nothing to observe")
+        with gdb.Observer(interval_ms=100) as observer:
+            self.assertEqual(observer.info["board"], 2)
+            self.assertEqual(observer.state, gdb.ConnectionState.CONNECTED)
+            calls = (
+                observer.status,
+                observer.barrier,
+                observer.release_all,
+                lambda: observer.command(0x06),
+            )
+            for call in calls:
+                with self.assertRaises(gdb.GdbError) as caught:
+                    call()
+                self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
+                self.assertIn("Feature 14", caught.exception.message)
 
 
 if __name__ == "__main__":

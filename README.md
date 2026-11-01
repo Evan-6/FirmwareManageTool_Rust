@@ -91,9 +91,11 @@ bash scripts/build-rust-firmware.sh
 ## GDBOX SDK
 
 `sdk/` 是 Host SDK，只有兩層：權威實作是 Rust 的 crate `gdb`；其他語言一律走 C ABI（`gdb.dll`＋
-`include/gdb.h`），C++／Python／Go 三個薄綁定只把名字翻譯過去，本身沒有邏輯。C ABI 有兩種句柄：直接句柄
+`include/gdb.h`），C++／Python／Go 三個薄綁定只把名字翻譯過去，本身沒有邏輯。C ABI 有三種句柄：直接句柄
 涵蓋 session、輸入、查詢、錯誤與日誌，外加 `gdb_command`／`gdb_move_raw` 兩個逃生口；附加句柄
-（`gdb_attach`／`gdb_remote_*`）接上持有裝置的 broker 行程。燒錄、broker 的伺服端、watch、量測、
+（`gdb_attach`／`gdb_remote_*`）接上持有裝置的 broker 行程；觀測句柄（`gdb_observer_*`）與
+`gdb_probe`／`gdb_probe_all` 只讀 `GET_FEATURE(14)`——沒有 session、不送封包，所以另一個程式拿著
+session 時也能看見板子，而它的每個指令都回 `GDB_UNSUPPORTED`。燒錄、broker 的伺服端、watch、量測、
 錄製重播與螢幕目標都只在 Rust。本工具自己也走 SDK：裝置列舉與實體 HID 通道呼叫
 `gdb::Manager::list()`／`gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
 

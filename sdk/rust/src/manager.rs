@@ -24,6 +24,17 @@ impl Manager {
         entries()
     }
 
+    /// The first attached board's identity, read from Feature 14 alone: no
+    /// session, no packet, safe while another program holds the session.
+    pub fn probe() -> Result<crate::probe::Probe> {
+        crate::probe::read_selector(None)
+    }
+
+    /// The same read for every attached vendor collection.
+    pub fn probe_all() -> Result<Vec<crate::probe::Probe>> {
+        crate::probe::all()
+    }
+
     pub fn open(selector: Option<&str>, options: DeviceOptions) -> Result<Device> {
         let devices = entries()?;
         let entry = match selector {

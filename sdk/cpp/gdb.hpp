@@ -260,6 +260,18 @@ struct Api {
     decltype(&gdb_remote_release_all) remote_release_all = nullptr;
     decltype(&gdb_remote_command) remote_command = nullptr;
     decltype(&gdb_remote_close) remote_close = nullptr;
+    /* Presence surface: same header, separate symbols, loaded softly too. */
+    decltype(&gdb_probe) probe = nullptr;
+    decltype(&gdb_probe_all) probe_all = nullptr;
+    decltype(&gdb_observer_start) observer_start = nullptr;
+    decltype(&gdb_observer_stop) observer_stop = nullptr;
+    decltype(&gdb_observer_free) observer_free = nullptr;
+    decltype(&gdb_observer_info) observer_info = nullptr;
+    decltype(&gdb_observer_state) observer_state = nullptr;
+    decltype(&gdb_observer_status) observer_status = nullptr;
+    decltype(&gdb_observer_barrier) observer_barrier = nullptr;
+    decltype(&gdb_observer_release_all) observer_release_all = nullptr;
+    decltype(&gdb_observer_command) observer_command = nullptr;
 };
 
 inline Api& api();
@@ -364,6 +376,17 @@ inline Api& api() {
         GDB_OPTIONAL(remote_release_all, "gdb_remote_release_all")
         GDB_OPTIONAL(remote_command, "gdb_remote_command")
         GDB_OPTIONAL(remote_close, "gdb_remote_close")
+        GDB_OPTIONAL(probe, "gdb_probe")
+        GDB_OPTIONAL(probe_all, "gdb_probe_all")
+        GDB_OPTIONAL(observer_start, "gdb_observer_start")
+        GDB_OPTIONAL(observer_stop, "gdb_observer_stop")
+        GDB_OPTIONAL(observer_free, "gdb_observer_free")
+        GDB_OPTIONAL(observer_info, "gdb_observer_info")
+        GDB_OPTIONAL(observer_state, "gdb_observer_state")
+        GDB_OPTIONAL(observer_status, "gdb_observer_status")
+        GDB_OPTIONAL(observer_barrier, "gdb_observer_barrier")
+        GDB_OPTIONAL(observer_release_all, "gdb_observer_release_all")
+        GDB_OPTIONAL(observer_command, "gdb_observer_command")
 #undef GDB_OPTIONAL
         return loaded;
     }();
@@ -388,10 +411,19 @@ inline std::string take(char* text) {
     return value;
 }
 
+// Throws with the code the library recorded, for a call that returns a handle and
+// so has no int32 of its own to check.
+[[noreturn]] inline void throw_last_error() {
+    char buffer[512] = {};
+    const int32_t code = api().last_error(buffer, sizeof(buffer));
+    throw Error(static_cast<ErrorCode>(code == 0 ? GDB_IO : code), buffer);
+}
+
 using DeviceHandle = std::unique_ptr<gdb_device, decltype(&gdb_device_free)>;
 using RemoteHandle = std::unique_ptr<gdb_remote, decltype(&gdb_remote_free)>;
 using MovementHandle = std::unique_ptr<gdb_movement, decltype(&gdb_movement_free)>;
 using SchedulerHandle = std::unique_ptr<gdb_scheduler, decltype(&gdb_scheduler_free)>;
+using ObserverHandle = std::unique_ptr<gdb_observer, decltype(&gdb_observer_free)>;
 
 inline gdb_profile profile_or_default(const Profile* profile) {
     if (profile != nullptr) {
@@ -412,6 +444,20 @@ inline void require_remote_surface() {
     throw Error(ErrorCode::Unsupported,
                 "this gdb.dll predates the attached surface; use a library that "
                 "exports gdb_attach");
+}
+
+// The presence surface arrived after the attached one, so it is loaded softly as
+// well: an older library still serves every direct call.
+inline void require_presence_surface() {
+    const Api& loaded = api();
+    if (loaded.probe != nullptr && loaded.probe_all != nullptr &&
+        loaded.observer_start != nullptr && loaded.observer_free != nullptr &&
+        loaded.observer_info != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the presence probe; use a library that "
+                "exports gdb_probe");
 }
 
 // Frees a packet's payload however the scope is left.
@@ -448,6 +494,20 @@ inline void log_trampoline(void* user, int32_t level, const char* message) {
 
 using detail::api;
 using detail::check;
+
+// Presence: the board's identity from Feature 14 alone - no session, no packet,
+// so it is safe while another program holds the session. The string is the JSON
+// object info_json() returns; probe_all() is the array of them, "[]" on an empty
+// bus. Both throw gdb::Error like every other call.
+inline std::string probe(const std::string& selector = std::string()) {
+    detail::require_presence_surface();
+    return detail::take(api().probe(selector.empty() ? nullptr : selector.c_str()));
+}
+
+inline std::string probe_all() {
+    detail::require_presence_surface();
+    return detail::take(api().probe_all());
+}
 
 class Movement {
 public:
@@ -687,6 +747,75 @@ private:
     explicit Remote(gdb_remote* raw) : handle_(raw, api().remote_free) {}
 
     detail::RemoteHandle handle_{nullptr, api().remote_free};
+};
+
+// Presence on a timer: the same Feature 14 read, and no way to command the
+// board. Use this instead of Device when another program owns the session - a
+// command would consume the IN queue its replies are read from.
+class Observer {
+public:
+    Observer() = default;
+
+    // Reads Feature 14 once, then polls it every interval_ms on its own thread.
+    static Observer start(const std::string& selector = std::string(),
+                          uint32_t interval_ms = 500) {
+        detail::require_presence_surface();
+        gdb_observer* raw = api().observer_start(
+            selector.empty() ? nullptr : selector.c_str(), interval_ms);
+        if (raw == nullptr) {
+            detail::throw_last_error();
+        }
+        return Observer(raw);
+    }
+
+    Observer(Observer&&) noexcept = default;
+    Observer& operator=(Observer&&) noexcept = default;
+    Observer(const Observer&) = delete;
+    Observer& operator=(const Observer&) = delete;
+
+    bool valid() const { return handle_ != nullptr; }
+    gdb_observer* raw() const { return handle_.get(); }
+
+    // The last probe, shaped exactly like Device::info_json().
+    std::string info_json() const { return detail::take(api().observer_info(raw())); }
+
+    // Connected while the last poll answered, Disconnected while it failed.
+    ConnectionState state() const {
+        const int32_t value = api().observer_state(raw());
+        if (value < 0) {
+            throw Error(ErrorCode::Invalid, "observer handle is NULL");
+        }
+        return static_cast<ConnectionState>(value);
+    }
+
+    // Stops the polling thread; the handle stays valid.
+    void stop() { api().observer_stop(raw()); }
+
+    void close() {
+        if (handle_) {
+            api().observer_stop(raw());
+            handle_.reset();
+        }
+    }
+
+    // Every command throws gdb::Error with ErrorCode::Unsupported and the SDK's
+    // own explanation: the handle has no session and sends no frame.
+    void status() const { detail::check(api().observer_status(raw())); }
+    void barrier() const { detail::check(api().observer_barrier(raw())); }
+    void release_all() const { detail::check(api().observer_release_all(raw())); }
+    void command(uint8_t opcode, const std::vector<uint8_t>& payload = {}) const {
+        detail::PacketGuard guard;
+        detail::check(api().observer_command(raw(), opcode,
+                                             payload.empty() ? nullptr : payload.data(),
+                                             payload.size(), &guard.packet));
+    }
+
+    ~Observer() = default;
+
+private:
+    explicit Observer(gdb_observer* raw) : handle_(raw, api().observer_free) {}
+
+    detail::ObserverHandle handle_{nullptr, api().observer_free};
 };
 
 class Device {

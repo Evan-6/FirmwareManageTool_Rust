@@ -69,6 +69,24 @@ int main() {
     assert(reply->payload.size() == 51);
     assert(!device.command(0x12, {0x2c, 0x01, 0xd8, 0xff}).has_value());
 
+    // Presence: Feature 14 only, so it is safe while another program holds the
+    // session. No board matches these selectors, so both calls are typed
+    // disconnects instead of crashes - and neither opens a session.
+    try {
+        (void)gdb::probe("cpp-mock-no-such-board");
+        assert(false && "no board matches that selector");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::Disconnected);
+    }
+    const std::string boards = gdb::probe_all();
+    assert(boards.size() >= 2 && boards.front() == '[' && boards.back() == ']');
+    try {
+        (void)gdb::Observer::start("cpp-mock-no-such-board", 100);
+        assert(false && "no board matches that selector");
+    } catch (const gdb::Error& error) {
+        assert(error.code() == gdb::ErrorCode::Disconnected);
+    }
+
     // The second surface loads from the same DLL and reports a missing broker
     // as a typed error instead of crashing: attach is how a second program
     // reaches a device another program holds.

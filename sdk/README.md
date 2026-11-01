@@ -35,8 +35,8 @@ nothing more.
 
 `include/gdb.h` is the compatibility layer: it is how a language with no
 implementation of its own reaches the SDK. `gdb_abi_version() == 1` pins the
-contract, and `GDB_ABI_VERSION_MINOR` (1) is the revision that added the attached
-handle. It carries two handle types.
+contract, and `GDB_ABI_VERSION_MINOR` (2) is the revision that added the attached
+handle and then the presence probe. It carries three handle types.
 
 A **direct** handle (`gdb_device`) owns the vendor collection: the session, the
 typed input calls, the queries, errors, logging, and the two escape hatches
@@ -49,12 +49,17 @@ start a broker when none is listening, the same four queries, `key`,
 `release_all`, `command` and `close`. Its JSON results are the direct calls'
 results, so one parser serves both.
 
+An **observer** handle (`gdb_observer`) has no session at all: it reads
+Feature 14 on a timer and every command on it returns `GDB_UNSUPPORTED`. It is
+what a program uses when another program owns the board.
+
 | In `gdb.h` | Not in `gdb.h` |
 | --- | --- |
 | direct: `gdb_open`, `gdb_open_mock`, `gdb_close`, `gdb_reconnect`, `gdb_set_auto_reconnect`, `gdb_device_state`, `gdb_device_list`, `gdb_device_info`, `gdb_status`, `gdb_status_ext`, `gdb_sessions`, `gdb_release_all`, `gdb_barrier`, `gdb_bootloader`, `gdb_set_event_handler` | flashing: build, UF2 packing, BOOTSEL copy, verification |
 | direct: `gdb_mouse_move_by/to/path`, `gdb_move_raw`, `gdb_mouse_start_move_*`, `gdb_movement_*`, `gdb_mouse_button`, `gdb_mouse_click`, `gdb_mouse_double_click`, `gdb_mouse_wheel`, `gdb_mouse_drag`, `gdb_key_*`, `gdb_keys_*`, `gdb_type_text`, `gdb_scheduler_*`, `gdb_profile_default` | the broker's server side: `broker::Server`, `Source`, `run_if_requested` |
 | attached: `gdb_attach`, `gdb_remote_spawn`, `gdb_remote_free`, `gdb_remote_info/status/status_ext/sessions`, `gdb_remote_key/mouse_move/move_by/move_raw/mouse_buttons/wheel/barrier/release_all/command/close` | the arrival watch (`gdb::watch`) |
-| both: `gdb_command`, `gdb_packet_free`, `gdb_last_error`, `gdb_string_free`, `gdb_set_log_level`, `gdb_set_log_sink` | the counters (`gdb::metrics`), recording and replay (`gdb::replay`), screen targets (`MotionOptions::screen`) |
+| presence: `gdb_probe`, `gdb_probe_all`, `gdb_observer_start/stop/free/info/state`, `gdb_observer_status/barrier/release_all/command` | the counters (`gdb::metrics`), recording and replay (`gdb::replay`), screen targets (`MotionOptions::screen`) |
+| both: `gdb_command`, `gdb_packet_free`, `gdb_last_error`, `gdb_string_free`, `gdb_set_log_level`, `gdb_set_log_sink` | |
 
 A binding over `gdb.dll` can therefore open a device itself or attach to the
 process that owns it. What it cannot do: flash, run a broker, watch the bus,
@@ -129,6 +134,7 @@ goes through the C ABI symbol in the cell beside it.
 | Mock device, virtual 1920×1080 cursor | `Manager::open_mock` | `gdb_open_mock` | `open_mock` | `open_mock` | `OpenMock` |
 | Device list, open by serial or path | `Manager::list` | `gdb_device_list` | `list_json` | `list_devices` | `ListJSON` |
 | Info: board, firmware, lease, poll, capabilities, device id, build | `info()` | `gdb_device_info` | `info_json` | `.info` | `InfoJSON` |
+| Presence: that identity with no session and no packet | `probe::read`, `Observer` | `gdb_probe`, `gdb_probe_all`, `gdb_observer_*` | `probe`, `Observer` | `probe`, `Observer` | `Probe`, `Observe` |
 | STATUS / STATUS_EXT / SESSION_LIST | `status`, `status_ext`, `sessions` | `gdb_status`, `gdb_status_ext`, `gdb_sessions` | `*_json()` | `.status`, `.status_ext`, `.sessions` | `*JSON()` |
 | Relative move, split at ±1024 per axis | `move_by` | `gdb_mouse_move_by` | `move_by` | `.move_by` | `MoveBy` |
 | Raw relative move, no barrier, no curve | `move_raw` | `gdb_move_raw` | `move_raw` | `.move_raw` | `MoveRaw` |
@@ -178,6 +184,38 @@ Known gaps:
 - Raw passthrough sends existing opcodes only; the firmware rejects unknown ones.
   `gdb_command` and the bindings take an opcode and payload, and an opcode the
   protocol does not define fails with `Invalid`.
+
+## Presence without a session
+
+A second program can see the board without disturbing the program that owns it.
+The identity — board id, firmware, lease length, poll interval, capability bits,
+device id, build — is `GET_FEATURE(14)`, and a feature report is a control
+transfer: it never enters the interrupt IN queue, so nothing is taken from the
+session that is running.
+
+```rust
+let board = gdb::probe::read_selector(None).unwrap();   // first attached board
+println!("{} {}", board.board, board.firmware);         // no OPEN, no packet
+let all = gdb::probe::all().unwrap();                   // every vendor collection
+
+let mut observer = gdb::Observer::start(Duration::from_millis(500), |event| {
+    // Present(Probe) on a new identity, Gone(Error) when polls start failing.
+    let _ = event;
+})
+.unwrap();
+observer.info();                                        // same shape as Device::info()
+observer.status();                                      // Err(Unsupported)
+```
+
+`gdb_probe`, `gdb_probe_all` and the `gdb_observer_*` handle carry the same thing
+into every binding. An observer refuses `status`, `barrier`, `release_all` and
+`command` with `Unsupported`, because a command would put a frame on the shared
+queue; that is also why `probe` writes nothing at all — a test asserts the
+transport's write count stays zero. What a program must still not do while
+another one holds the session: open a `Device` (OPEN competes for one of the
+eight owner slots, and its reply reads take from the same queue), read the IN
+endpoint itself, or send `BOOTLOADER`. A second program that needs to *drive* the
+board is the [broker](#broker)'s job.
 
 ## Broker
 
