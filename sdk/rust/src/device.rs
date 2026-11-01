@@ -3,6 +3,7 @@
 use crate::error::{Error, ErrorCode, Result};
 use crate::event::{ConnectionState, EventHandler, notify};
 use crate::log::Level;
+use crate::metrics::{Metrics, MetricsSnapshot};
 use crate::session::{Session, new_session_id};
 use crate::transport::Transport;
 use input_protocol::v3::{self, Command, SessionInfo, Status, StatusExt};
@@ -67,6 +68,9 @@ pub(crate) struct Inner {
     buttons: AtomicU8,
     virtual_cursor: Mutex<(i32, i32)>,
     heartbeat: Mutex<Option<JoinHandle<()>>>,
+    /// Shared with every session this device opens, so the counters outlive a
+    /// reconnect; every read and write goes through a relaxed atomic.
+    metrics: Metrics,
 }
 
 #[derive(Clone)]
@@ -82,7 +86,13 @@ impl Device {
         product: String,
         options: DeviceOptions,
     ) -> Result<Self> {
-        let session = Session::open(transport, options.timeout_ms, new_session_id())?;
+        let metrics = Metrics::new();
+        let session = Session::open(
+            transport,
+            options.timeout_ms,
+            new_session_id(),
+            metrics.clone(),
+        )?;
         let capabilities = session.capabilities().clone();
         let info = DeviceInfo {
             serial,
@@ -108,6 +118,7 @@ impl Device {
             buttons: AtomicU8::new(0),
             virtual_cursor: Mutex::new((960, 540)),
             heartbeat: Mutex::new(None),
+            metrics,
         });
         if inner.options.heartbeat {
             start_heartbeat(&inner);
@@ -124,6 +135,20 @@ impl Device {
 
     pub fn info(&self) -> DeviceInfo {
         self.inner.info.clone()
+    }
+
+    /// Counters as of now: frames, retries, reconnects, lease faults, timeouts
+    /// and the round-trip histogram.
+    ///
+    /// Cheap enough to poll from a UI: it reads atomics and walks the histogram,
+    /// it never takes the session lock, so it cannot stall a command in flight.
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.inner.metrics.snapshot()
+    }
+
+    /// Zeroes the counters, for instance when a host starts a new measurement.
+    pub fn reset_metrics(&self) {
+        self.inner.metrics.reset();
     }
 
     pub fn serial(&self) -> &str {
@@ -325,8 +350,14 @@ impl Device {
     fn reopen(&self, state: &mut MutexGuard<'_, State>) -> Result<()> {
         state.session = None;
         let transport = crate::manager::open_transport(&self.inner.target)?;
-        let session = Session::open(transport, self.inner.options.timeout_ms, new_session_id())?;
+        let session = Session::open(
+            transport,
+            self.inner.options.timeout_ms,
+            new_session_id(),
+            self.inner.metrics.clone(),
+        )?;
         state.session = Some(session);
+        self.inner.metrics.record_reconnect();
         crate::sdk_log!(Level::Info, "reconnected serial={}", self.inner.info.serial);
         notify(&self.handler(), |handler| {
             handler.state(ConnectionState::Connected)

@@ -1,8 +1,13 @@
 //! One vendor-HID session: Feature 14 handshake, OPEN, sequenced commands and
 //! reply matching. Nothing above this layer touches sequence numbers.
+//!
+//! Counters live here because this is the only place that knows a frame left, a
+//! frame was accepted, a wait looped again, or a reply ran out of time. All of
+//! that is one relaxed atomic add — the session never locks to report.
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::log::Level;
+use crate::metrics::Metrics;
 use crate::transport::Transport;
 use input_protocol::v3::{self, Capabilities, Command, Packet};
 use std::time::{Duration, Instant};
@@ -13,6 +18,8 @@ pub(crate) struct Session {
     sequence: u32,
     capabilities: Capabilities,
     timeout: Duration,
+    /// Shared with the device, so the counters survive a reconnect.
+    metrics: Metrics,
     /// When this session last sent something the device counts as a lease
     /// renewal. STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew
     /// (protocol-v3.md, 完成與租約), so a host polling any of them must still
@@ -26,6 +33,7 @@ impl Session {
         mut transport: Box<dyn Transport>,
         timeout_ms: u32,
         id: u32,
+        metrics: Metrics,
     ) -> Result<Self> {
         let report = transport
             .feature()?
@@ -37,6 +45,7 @@ impl Session {
             sequence: 0,
             capabilities,
             timeout: Duration::from_millis(u64::from(timeout_ms.max(100))),
+            metrics,
             last_renew: Instant::now(),
         };
         session.command(&Command::Open)?;
@@ -54,7 +63,22 @@ impl Session {
 
     /// Sends one command. Control commands return their reply packet; input
     /// commands return `None` without waiting.
+    ///
+    /// Accounting is deliberately thin: an input command costs one relaxed add,
+    /// a command that waits for a reply costs one more for the round trip.
     pub(crate) fn command(&mut self, command: &Command) -> Result<Option<Packet>> {
+        let outcome = self.exchange(command);
+        if let Err(error) = &outcome {
+            match error.code() {
+                ErrorCode::Lease => self.metrics.record_lease_fault(),
+                ErrorCode::Timeout => self.metrics.record_timeout(),
+                _ => {}
+            }
+        }
+        outcome
+    }
+
+    fn exchange(&mut self, command: &Command) -> Result<Option<Packet>> {
         let (opcode, payload) = command.wire().map_err(string_error)?;
         let sequence = self
             .sequence
@@ -78,11 +102,15 @@ impl Session {
             self.id,
             packet.payload
         );
+        // Only a round trip is timed; a fire-and-forget input command must not
+        // pay for a clock read it cannot use.
+        let started = command.expects_reply().then(Instant::now);
         self.transport.write(&report)?;
-        if !command.expects_reply() {
+        self.metrics.record_frame_sent();
+        let Some(started) = started else {
             return Ok(None);
-        }
-        let deadline = Instant::now() + self.timeout;
+        };
+        let deadline = started + self.timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -92,10 +120,12 @@ impl Session {
                 )));
             }
             let Some(report) = self.transport.read(remaining.as_millis() as i32)? else {
+                self.metrics.record_retry();
                 continue;
             };
             let packet = Packet::decode(&report, v3::IN_ID).map_err(framing_error)?;
             if packet.session != self.id {
+                self.metrics.record_retry();
                 crate::sdk_log!(
                     Level::Trace,
                     "skip opcode={} session={} sequence={} (not ours)",
@@ -105,6 +135,9 @@ impl Session {
                 );
                 continue;
             }
+            // Ours, whatever it says: this is the frame the caller was waiting
+            // for, and the counters are how a host sees the device answering.
+            self.metrics.record_frame_received();
             crate::sdk_log!(
                 Level::Trace,
                 "in opcode={} session={} sequence={} payload={:?}",
@@ -118,6 +151,7 @@ impl Session {
                 return Err(Error::from_result(code));
             }
             if packet.opcode != (opcode | 0x80) || packet.sequence != sequence {
+                self.metrics.record_retry();
                 continue;
             }
             if packet.payload.is_empty() {
@@ -126,6 +160,8 @@ impl Session {
             if opcode != v3::SESSION_LIST && packet.payload[0] != 0 {
                 return Err(Error::from_result(packet.payload[0]));
             }
+            self.metrics
+                .observe_latency(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
             return Ok(Some(packet));
         }
     }
@@ -142,7 +178,7 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         // Best effort: the lease is the backstop when this fails.
-        let _ = self.transport.write(
+        let written = self.transport.write(
             &Packet {
                 opcode: v3::CLOSE,
                 flags: 0,
@@ -153,6 +189,9 @@ impl Drop for Session {
             .encode(v3::OUT_ID)
             .unwrap_or([0u8; 64]),
         );
+        if written.is_ok() {
+            self.metrics.record_frame_sent();
+        }
     }
 }
 
