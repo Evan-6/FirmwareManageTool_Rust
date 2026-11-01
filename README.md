@@ -78,11 +78,11 @@ cargo run --release -p firmware-manage-tool-app
 
 ```powershell
 # 走 GUI 相同的主機路徑：enumerate → Feature 14 → OPEN → STATUS → HEARTBEAT → BARRIER
-cargo run --release --example probe
-cargo run --release --example probe -- --ext            # 讀 STATUS_EXT 診斷
-cargo run --release --example probe -- --keys           # 注入 'a'，確認鍵盤報告真的完成
-cargo run --release --example probe -- --lease          # 閒置超過租約，裝置應回收 session
-cargo run --release --example probe -- --bootloader     # 請裝置進 BOOTSEL
+cargo run --release --no-default-features --example probe
+cargo run --release --no-default-features --example probe -- --ext            # 讀 STATUS_EXT 診斷
+cargo run --release --no-default-features --example probe -- --keys           # 注入 'a'，確認鍵盤報告真的完成
+cargo run --release --no-default-features --example probe -- --lease          # 閒置超過租約，裝置應回收 session
+cargo run --release --no-default-features --example probe -- --bootloader     # 請裝置進 BOOTSEL
 
 # 建置韌體＋打包 UF2＋印容量
 bash scripts/build-rust-firmware.sh
@@ -97,7 +97,7 @@ bash scripts/build-rust-firmware.sh
 
 ```powershell
 cargo build -p gdb-ffi --release       # target/release/gdb.dll
-cargo test  -p gdb -p gdb-motion       # 23 個測試，免硬體
+cargo test  -p gdb -p gdb-motion       # 44 個測試，免硬體
 bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑）Go
 ```
 

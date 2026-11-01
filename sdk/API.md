@@ -275,6 +275,9 @@ does not expose any of it, so flashing is Rust or one of the native packages.
 gdb::flash::Config              // cargo, firmware dir, auto_bootloader, boot_drive
 gdb::flash::build(&config, &runner, &cancel, &mut report) -> Result<Image>
 gdb::flash::push(&config, Some(&device), &image, &cancel, &mut report) -> Result<Handshake>
+gdb::flash::Host                 // volumes() + devices() + verify(): what push reads
+gdb::flash::SystemHost           // the real one: drives(), Manager::list(), open and check
+gdb::flash::Waits { drive, handshake }   // 15 s each; push runs on the defaults
 gdb::flash::uf2::pack(&elf) -> Result<Vec<u8>>          // the packer on its own
 gdb::flash::write_image(path, bytes, &cancel) -> Result<()>
 gdb::flash::drives() -> Result<Vec<PathBuf>>            // mounted RPI-RP2 volumes
@@ -294,9 +297,10 @@ packages model the same outcome as `gdb.flash.Outcome` (`verified`, `board`,
 Unverified }` with `OK()` and `Label()`, and `flash::Handshake { ok, verified,
 failure }`.
 
-`Runner`, `Reporter` and `Cancel` are the seams: the host supplies the process
-runner, the progress sink and the cancel token, so the sequence needs no GUI and
-no drive to be tested.
+`Host`, `Waits`, `Runner`, `Reporter` and `Cancel` are the seams: the host
+supplies the volumes and devices it reads, the two waits, the process runner, the
+progress sink and the cancel token, so the sequence needs no GUI and no drive to
+be tested.
 
 ## Threading rules
 

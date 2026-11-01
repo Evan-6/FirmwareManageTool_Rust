@@ -12,7 +12,10 @@ shared/input-protocol   protocol constants, codecs, canonical client, test fake
 sdk/motion              gdb-motion: pure movement maths, no I/O
 sdk/rust                gdb: Device, Mouse, Keyboard, Scheduler, transport, mock, log
 sdk/ffi                 C ABI (include/gdb.h) + cdylib
-sdk/cpp|python|go       thin bindings, name translation only
+sdk/cpp|python|go       thin bindings over the C ABI, plus native/ ports
+clients/                generated per-language protocol clients (hid_v3.*)
+docs/                   architecture: where things live and what a change touches
+examples/               hardware smoke test for the host path the GUI uses
 src/                    tool library: session adapter, flashing, latency, uf2, worker
 src-tauri/              IPC shell (commands in generate_handler!, events in UiEvent)
 ui/                     React 19 + Vite, five pages

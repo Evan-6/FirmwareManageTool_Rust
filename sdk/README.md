@@ -51,7 +51,7 @@ typed results instead of JSON strings.
 
 ```bash
 cargo build -p gdb-ffi --release      # target/release/gdb.dll (or libgdb.so)
-cargo test  -p gdb -p gdb-motion      # 35 tests, mock device, no hardware
+cargo test  -p gdb -p gdb-motion      # 44 tests, mock device, no hardware
 cargo run   -p gdb --example mock     # end-to-end walkthrough
 ```
 
@@ -221,12 +221,12 @@ tag and still builds elsewhere.
 ## Verification
 
 ```
-cargo test -p gdb-motion -p gdb                  # 35 tests: 21 + 9 + 5
+cargo test -p gdb-motion -p gdb                  # 44 tests: 29 + 10 + 5
 python sdk/python/test_gdb.py                    # 12 tests through ctypes
-python sdk/python/native/test_native.py          # 81 tests, 1 skipped when the ELF and UF2 differ
-cd sdk/go && go test ./...                       # 5 through the DLL + 103 native (Windows)
+python sdk/python/native/test_native.py          # 83 tests, 1 skipped when the ELF and UF2 differ
+cd sdk/go && go test ./...                       # 5 through the DLL + 101 native (Windows)
 g++ -std=c++17 -I sdk/ffi/include -I sdk/cpp sdk/cpp/examples/mock.cpp
-g++ -std=c++17 -I sdk/cpp/native sdk/cpp/native/gdb_native_test.cpp   # one binary, 22 test functions
+g++ -std=c++17 -I sdk/cpp/native sdk/cpp/native/gdb_native_test.cpp   # one binary, 24 test functions
 bash scripts/check-sdk.sh                        # all of the above, run end to end
 ```
 

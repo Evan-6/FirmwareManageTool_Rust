@@ -1,4 +1,7 @@
-//! Session bookkeeping shared by the manager and remote worker; I/O stays platform owned.
+//! One host session as protocol 3 expects it: the sequence counter, the input
+//! state the host believes the device holds, and the reply, which has to agree
+//! on session, sequence and opcode. Reading and writing reports stays with the
+//! caller.
 use crate::v3::{self, Capabilities, Command, InputState, Packet, Status};
 use anyhow::{ensure, Result};
 #[derive(Debug)]
@@ -101,9 +104,9 @@ mod tests {
     /// prepare the next command, write it (a short write is a failure, never a
     /// success), then wait for the matching reply inside a fixed deadline.
     ///
-    /// The desktop tool used to own this loop; it lives here now so the four
-    /// behaviours below are tested against the client and the wire, not against
-    /// one consumer's session wrapper.
+    /// It sits next to the fake device so the behaviours below are tested
+    /// against the client and the wire, not against one consumer's session
+    /// wrapper.
     struct Link {
         client: Client,
         model: UsbModel,
