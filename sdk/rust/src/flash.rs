@@ -12,7 +12,10 @@
 //! Nothing here knows about a GUI. cargo comes in through [`Runner`], progress
 //! through [`Reporter`] and cancellation through [`Cancel`], so the same
 //! sequence runs from any host program; the messages are the ones a person
-//! reads while flashing, hence Chinese.
+//! reads while flashing, hence Chinese. The drive table and the board that comes
+//! back come in through [`Host`], which is how the whole
+//! bootloader → drive → copy → verify sequence is tested with no drive and no
+//! board attached.
 
 use crate::device::{Device, DeviceOptions};
 use crate::error::{Error, ErrorCode, Result};
@@ -405,6 +408,58 @@ pub enum Handshake {
     Unverified(Error),
 }
 
+/// The host as the flashing sequence reads it: the mounted volumes, the
+/// enumerated devices, and what one device answers when it is opened.
+///
+/// [`SystemHost`] is the real one. It is a separate seam from [`Runner`] because
+/// this is exactly what a test has to replace to run the whole
+/// bootloader → drive → copy → verify sequence without a drive or a board.
+pub trait Host {
+    /// Every mounted RP2040 bootloader volume; see [`drives`].
+    fn volumes(&self) -> Result<Vec<PathBuf>>;
+    /// Every enumerated vendor HID device; see [`Manager::list`].
+    fn devices(&self) -> Result<Vec<DeviceEntry>>;
+    /// Opens one enumerated device, reads Feature 14 and checks the board id.
+    fn verify(&self, entry: &DeviceEntry) -> Result<Verified>;
+}
+
+/// Win32 drive letters, hidapi enumeration and a real session.
+pub struct SystemHost;
+
+impl Host for SystemHost {
+    fn volumes(&self) -> Result<Vec<PathBuf>> {
+        drives()
+    }
+
+    fn devices(&self) -> Result<Vec<DeviceEntry>> {
+        Manager::list()
+    }
+
+    fn verify(&self, entry: &DeviceEntry) -> Result<Verified> {
+        open_and_check(entry)
+    }
+}
+
+/// How long the two waits may take.
+///
+/// The defaults are the 15 s the messages promise; a test shortens them instead
+/// of waiting.
+pub struct Waits {
+    /// For the UF2 drive to appear after the reboot.
+    pub drive: Duration,
+    /// For the runtime HID to come back and answer Feature 14.
+    pub handshake: Duration,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            drive: DRIVE_WAIT,
+            handshake: HANDSHAKE_WAIT,
+        }
+    }
+}
+
 /// Sends BOOTLOADER, copies the image onto the UF2 drive and waits for the board
 /// to come back.
 ///
@@ -418,12 +473,34 @@ pub fn push(
     cancel: &dyn Cancel,
     report: &mut dyn Reporter,
 ) -> Result<Handshake> {
+    push_with(
+        &SystemHost,
+        &Waits::default(),
+        config,
+        device,
+        image,
+        cancel,
+        report,
+    )
+}
+
+/// [`push`] with the host and the waits supplied; every step is the same.
+fn push_with(
+    host: &dyn Host,
+    waits: &Waits,
+    config: &Config,
+    device: Option<&Device>,
+    image: &Image,
+    cancel: &dyn Cancel,
+    report: &mut dyn Reporter,
+) -> Result<Handshake> {
     check(cancel)?;
     report.stage(3, "進入並選擇 bootloader");
     // Never auto-select a drive that was already mounted before this command:
     // it belongs to some other board.
     let previous = match (config.auto_bootloader, &config.boot_drive) {
-        (true, None) if device.is_some() => drives()?
+        (true, None) if device.is_some() => host
+            .volumes()?
             .iter()
             .map(|path| path.display().to_string())
             .collect(),
@@ -451,12 +528,16 @@ pub fn push(
     }
     let drive = match &config.boot_drive {
         Some(path) => path.clone(),
-        None => wait_drive(cancel, report, &previous)?,
+        None => wait_drive(host, waits.drive, cancel, report, &previous)?,
     };
     check(cancel)?;
     // Boards already in runtime here are unrelated to this transfer: excluding
     // them stops an existing board's hello from verifying another board.
-    let existing: Vec<String> = Manager::list()?.into_iter().map(|e| e.path).collect();
+    let existing: Vec<String> = host
+        .devices()?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
     report.stage(4, "傳輸韌體");
     if !drive.join("INFO_UF2.TXT").is_file() {
         return Err(Error::invalid("指定位置不是 UF2 bootloader 磁碟"));
@@ -468,7 +549,7 @@ pub fn push(
         .map(|device| device.info().serial)
         .filter(|serial| !serial.is_empty());
     Ok(
-        match verify_runtime(serial.as_deref(), cancel, HANDSHAKE_WAIT, &existing) {
+        match verify_runtime(host, serial.as_deref(), cancel, waits.handshake, &existing) {
             Ok(verified) => Handshake::Verified(verified),
             Err(error) => Handshake::Unverified(error),
         },
@@ -484,6 +565,24 @@ pub fn write_image(target: &Path, bytes: &[u8], cancel: &dyn Cancel) -> Result<(
             format!("建立 UF2 目的檔失敗：{}：{error}", target.display()),
         )
     })?;
+    let result = write_chunks(&mut output, target, bytes, cancel);
+    if result.is_err() {
+        // A cancelled or failed copy must leave nothing behind: the bootloader
+        // flashes whatever UF2 file it finds on the drive.
+        drop(output);
+        let _ = std::fs::remove_file(target);
+    }
+    result
+}
+
+/// The copy loop itself, over any sink: one [`COPY_CHUNK`] at a time, so a
+/// cancelled transfer stops between chunks instead of mid-block.
+fn write_chunks<W: Write>(
+    output: &mut W,
+    target: &Path,
+    bytes: &[u8],
+    cancel: &dyn Cancel,
+) -> Result<()> {
     for chunk in bytes.chunks(COPY_CHUNK) {
         check(cancel)?;
         output.write_all(chunk).map_err(|error| {
@@ -498,8 +597,7 @@ pub fn write_image(target: &Path, bytes: &[u8], cancel: &dyn Cancel) -> Result<(
     }
     output
         .flush()
-        .map_err(|error| Error::io(format!("UF2 重新整理失敗：{}：{error}", target.display())))?;
-    Ok(())
+        .map_err(|error| Error::io(format!("UF2 重新整理失敗：{}：{error}", target.display())))
 }
 
 /// Every mounted RP2040 bootloader drive.
@@ -528,14 +626,17 @@ pub fn drives() -> Result<Vec<PathBuf>> {
 }
 
 fn wait_drive(
+    host: &dyn Host,
+    timeout: Duration,
     cancel: &dyn Cancel,
     report: &mut dyn Reporter,
     previous: &[String],
 ) -> Result<PathBuf> {
-    let deadline = Instant::now() + DRIVE_WAIT;
+    let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         check(cancel)?;
-        let drives: Vec<PathBuf> = drives()?
+        let drives: Vec<PathBuf> = host
+            .volumes()?
             .into_iter()
             .filter(|path| !previous.contains(&path.display().to_string()))
             .collect();
@@ -554,12 +655,14 @@ fn wait_drive(
         }
         pause(cancel)?;
     }
-    Err(Error::timeout(
-        "15 秒內未偵測到 RP2040 UF2 磁碟；請 BOOTSEL 上電後重試",
-    ))
+    Err(Error::timeout(format!(
+        "{} 秒內未偵測到 RP2040 UF2 磁碟；請 BOOTSEL 上電後重試",
+        timeout.as_secs()
+    )))
 }
 
 fn verify_runtime(
+    host: &dyn Host,
     serial: Option<&str>,
     cancel: &dyn Cancel,
     timeout: Duration,
@@ -569,8 +672,8 @@ fn verify_runtime(
         cancel,
         timeout,
         serial,
-        || Ok(runtime_candidates(Manager::list()?, existing)),
-        open_and_check,
+        || Ok(runtime_candidates(host.devices()?, existing)),
+        |entry| host.verify(entry),
     )
 }
 
@@ -596,6 +699,11 @@ fn open_and_check(entry: &DeviceEntry) -> Result<Verified> {
 fn check_board(reported: u8) -> Result<()> {
     if reported == BOARD_ID {
         return Ok(());
+    }
+    // A hello that carried no board id at all is not the XIAO either, and the
+    // two cases are worth telling apart in the log.
+    if reported == 0 {
+        return Err(Error::invalid("重新列舉的裝置沒有回報板型（hello 為空）"));
     }
     Err(Error::invalid(format!(
         "重新列舉的板型不符：{reported}（預期 {BOARD_ID}）"
@@ -725,6 +833,9 @@ fn pause(cancel: &dyn Cancel) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::MockHandle;
+    use input_protocol::v3;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct Temp(PathBuf);
@@ -812,11 +923,19 @@ mod tests {
     }
 
     #[test]
-    fn flashed_capability_must_be_the_xiao_board_id() {
+    fn check_board_accepts_only_the_xiao_build() {
         assert!(check_board(BOARD_ID).is_ok());
         // board=1 (Pico) and board=3 (AVR) builds must not verify as a XIAO.
-        assert!(check_board(1).is_err());
-        assert!(check_board(3).is_err());
+        for reported in [1, 3] {
+            let error = check_board(reported).expect_err("a non-XIAO board verified");
+            assert_eq!(error.code(), ErrorCode::Invalid);
+            assert!(error.message.contains("板型不符"), "{}", error.message);
+        }
+        // A device that came back without a board id is a third verdict, not a
+        // mismatch: the hello was empty.
+        let error = check_board(0).expect_err("an empty hello verified");
+        assert_eq!(error.code(), ErrorCode::Invalid);
+        assert!(error.message.contains("沒有回報"), "{}", error.message);
     }
 
     #[test]
@@ -996,5 +1115,430 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code(), ErrorCode::Timeout);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    // --- the whole sequence, with the drive table and the board faked ---------
+
+    /// A directory that looks like a mounted RP2040 bootloader.
+    fn uf2_drive() -> Temp {
+        let drive = Temp::new();
+        std::fs::write(
+            drive.0.join("INFO_UF2.TXT"),
+            "UF2 Bootloader v3.0\nModel: Raspberry Pi RP2\nBoard-ID: RPI-RP2\n",
+        )
+        .unwrap();
+        drive
+    }
+
+    /// Keeps every line and stage; `choose_drive` keeps its refusing default,
+    /// which is the behaviour under test.
+    #[derive(Default)]
+    struct Recorder {
+        stages: Vec<u8>,
+        logs: Vec<String>,
+    }
+
+    impl Recorder {
+        fn saw(&self, fragment: &str) -> bool {
+            self.logs.iter().any(|line| line.contains(fragment))
+        }
+    }
+
+    impl Reporter for Recorder {
+        fn log(&mut self, line: String) {
+            self.logs.push(line);
+        }
+        fn stage(&mut self, stage: u8, _: &str) {
+            self.stages.push(stage);
+        }
+    }
+
+    /// An in-memory sink that remembers how large each `write` was.
+    #[derive(Default)]
+    struct Chunks {
+        sizes: Vec<usize>,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for Chunks {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.sizes.push(buffer.len());
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Answers no for the first `n` questions, so a copy can be stopped between
+    /// two chunks instead of before it starts.
+    struct After(AtomicUsize, usize);
+
+    impl After {
+        fn new(after: usize) -> Self {
+            Self(AtomicUsize::new(0), after)
+        }
+    }
+
+    impl Cancel for After {
+        fn cancelled(&self) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed) >= self.1
+        }
+    }
+
+    /// The host, answered from a script: no drive letter is probed, no hidapi
+    /// enumeration runs and no board is opened.
+    struct FakeHost {
+        /// Successive `volumes()` answers; the last one repeats.
+        polls: Mutex<Vec<Vec<PathBuf>>>,
+        /// Successive `devices()` answers; the last one repeats.
+        enumeration: Mutex<Vec<Vec<DeviceEntry>>>,
+        /// What `verify()` reports; `None` is a handshake that never came.
+        verified: Mutex<Option<Verified>>,
+        /// `(opcodes written so far, session closed)` at each poll, so a test
+        /// can see the order BOOTLOADER, CLOSE and the drive wait.
+        seen: Mutex<Vec<(Vec<u8>, bool)>>,
+        /// The mock board those opcodes went to.
+        board: Mutex<Option<MockHandle>>,
+        polls_taken: AtomicUsize,
+        enumerations: AtomicUsize,
+    }
+
+    impl FakeHost {
+        /// Empty volumes until a test says otherwise; the board is enumerated
+        /// only after the copy, which is when it comes back.
+        fn new(polls: Vec<Vec<PathBuf>>) -> Self {
+            Self {
+                polls: Mutex::new(polls),
+                enumeration: Mutex::new(vec![Vec::new(), vec![entry("re-enumerated", "MOCK")]]),
+                verified: Mutex::new(Some(Verified {
+                    board: BOARD_ID,
+                    firmware: "3.2.0".into(),
+                    lease_ms: 2000,
+                })),
+                seen: Mutex::new(Vec::new()),
+                board: Mutex::new(None),
+                polls_taken: AtomicUsize::new(0),
+                enumerations: AtomicUsize::new(0),
+            }
+        }
+
+        fn watching(&self, board: &MockHandle) {
+            *self.board.lock().unwrap() = Some(board.clone());
+        }
+
+        fn polls_taken(&self) -> usize {
+            self.polls_taken.load(Ordering::Relaxed)
+        }
+
+        fn seen(&self) -> Vec<(Vec<u8>, bool)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Host for FakeHost {
+        fn volumes(&self) -> Result<Vec<PathBuf>> {
+            if let Some(board) = self.board.lock().unwrap().as_ref() {
+                let opcodes = board.writes().iter().map(|packet| packet.opcode).collect();
+                self.seen.lock().unwrap().push((opcodes, board.is_closed()));
+            }
+            let index = self.polls_taken.fetch_add(1, Ordering::Relaxed);
+            let polls = self.polls.lock().unwrap();
+            Ok(polls
+                .get(index)
+                .or_else(|| polls.last())
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn devices(&self) -> Result<Vec<DeviceEntry>> {
+            let index = self.enumerations.fetch_add(1, Ordering::Relaxed);
+            let enumeration = self.enumeration.lock().unwrap();
+            Ok(enumeration
+                .get(index)
+                .or_else(|| enumeration.last())
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn verify(&self, _: &DeviceEntry) -> Result<Verified> {
+            self.verified
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| Error::timeout("delayed handshake"))
+        }
+    }
+
+    fn quick() -> Waits {
+        Waits {
+            drive: Duration::from_millis(40),
+            handshake: Duration::from_millis(40),
+        }
+    }
+
+    fn mock_device() -> (Device, MockHandle) {
+        Manager::open_mock_with_handle(DeviceOptions {
+            auto_reconnect: false,
+            timeout_ms: 1000,
+            heartbeat: false,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn push_sends_bootloader_and_closes_the_session_before_waiting_for_the_drive() {
+        let (device, board) = mock_device();
+        let drive = uf2_drive();
+        // Nothing is mounted when the command starts: the drive this board
+        // creates appears only after the reboot, on the first poll after it.
+        let host = FakeHost::new(vec![Vec::new(), vec![drive.0.clone()]]);
+        host.watching(&board);
+        let image = Image {
+            bytes: vec![0xA5; 3 * 512],
+            blocks: 3,
+        };
+        let mut report = Recorder::default();
+        let outcome = push_with(
+            &host,
+            &quick(),
+            &Config::default(),
+            Some(&device),
+            &image,
+            &Token::default(),
+            &mut report,
+        )
+        .unwrap();
+
+        match outcome {
+            Handshake::Verified(verified) => assert_eq!(verified.board, BOARD_ID),
+            Handshake::Unverified(error) => panic!("the fake board answered: {}", error.message),
+        }
+        assert_eq!(v3::BOOTLOADER, 0x09, "BOOTLOADER is opcode 0x09");
+        let written: Vec<u8> = board.writes().iter().map(|packet| packet.opcode).collect();
+        assert_eq!(
+            written
+                .iter()
+                .filter(|opcode| **opcode == v3::BOOTLOADER)
+                .count(),
+            1,
+            "BOOTLOADER frames: {written:?}"
+        );
+        let bootloader = written
+            .iter()
+            .position(|opcode| *opcode == v3::BOOTLOADER)
+            .expect("BOOTLOADER was never sent");
+        let close = written
+            .iter()
+            .position(|opcode| *opcode == v3::CLOSE)
+            .expect("the runtime session was never closed");
+        assert!(
+            bootloader < close,
+            "BOOTLOADER must go out before CLOSE: {written:?}"
+        );
+        assert!(board.is_closed(), "the mock session is still open");
+
+        // The drive wait is the boundary that matters: before BOOTLOADER there
+        // was no frame and the session was live, and the poll that found the
+        // drive saw both the command and the teardown already done.
+        let seen = host.seen();
+        assert_eq!(seen.len(), 2, "one poll before, one after: {seen:?}");
+        assert!(
+            !seen[0].0.contains(&v3::BOOTLOADER) && !seen[0].1,
+            "the pre-bootloader poll saw {seen:?}"
+        );
+        assert!(
+            seen[1].0.contains(&v3::BOOTLOADER) && seen[1].1,
+            "the drive was waited for with the session still open: {seen:?}"
+        );
+
+        let copied = std::fs::read(drive.0.join("Firmware.uf2")).unwrap();
+        assert_eq!(copied, image.bytes);
+        assert_eq!(report.stages, vec![3, 4, 5]);
+        assert!(report.saw("已確認 enter_bootloader"), "{:?}", report.logs);
+    }
+
+    #[test]
+    fn the_drive_appearing_on_a_later_poll_is_picked_up() {
+        let drive = uf2_drive();
+        // Device-less BOOTSEL: the first poll sees an empty drive table, the
+        // second finds the volume.
+        let host = FakeHost::new(vec![Vec::new(), vec![drive.0.clone()]]);
+        let image = Image {
+            bytes: vec![0x11; 4],
+            blocks: 1,
+        };
+        let waits = Waits {
+            drive: Duration::from_secs(2),
+            handshake: Duration::from_millis(40),
+        };
+        let outcome = push_with(
+            &host,
+            &waits,
+            &Config::default(),
+            None,
+            &image,
+            &Token::default(),
+            &mut Recorder::default(),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(outcome, Handshake::Verified(_)),
+            "the transfer did not verify"
+        );
+        assert_eq!(host.polls_taken(), 2, "the drive was found on poll two");
+        assert_eq!(
+            std::fs::read(drive.0.join("Firmware.uf2")).unwrap(),
+            image.bytes
+        );
+    }
+
+    #[test]
+    fn two_bootloader_volumes_are_refused_instead_of_guessed() {
+        let first = uf2_drive();
+        let second = uf2_drive();
+        let host = FakeHost::new(vec![vec![first.0.clone(), second.0.clone()]]);
+        let error = push_with(
+            &host,
+            &quick(),
+            &Config::default(),
+            None,
+            &Image {
+                bytes: vec![0x22; 4],
+                blocks: 1,
+            },
+            &Token::default(),
+            &mut Recorder::default(),
+        )
+        .err()
+        .expect("two candidate volumes were accepted");
+
+        assert_eq!(error.code(), ErrorCode::Invalid);
+        assert!(
+            error.message.contains("同時偵測到多個 UF2 磁碟"),
+            "{}",
+            error.message
+        );
+        for drive in [&first, &second] {
+            assert!(
+                !drive.0.join("Firmware.uf2").exists(),
+                "a drive was written without asking: {}",
+                drive.0.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_volume_without_info_uf2_is_not_a_bootloader_disk() {
+        let not_a_drive = Temp::new();
+        let config = Config {
+            boot_drive: Some(not_a_drive.0.clone()),
+            ..Config::default()
+        };
+        // An explicit boot drive is copied to as given; the drive table is never
+        // consulted, so nothing is detected or guessed.
+        let host = FakeHost::new(Vec::new());
+        let error = push_with(
+            &host,
+            &quick(),
+            &config,
+            None,
+            &Image {
+                bytes: vec![0x33; 4],
+                blocks: 1,
+            },
+            &Token::default(),
+            &mut Recorder::default(),
+        )
+        .err()
+        .expect("a plain folder was accepted as a bootloader disk");
+
+        assert_eq!(error.code(), ErrorCode::Invalid);
+        assert!(
+            error.message.contains("UF2 bootloader 磁碟"),
+            "{}",
+            error.message
+        );
+        assert_eq!(host.polls_taken(), 0, "the drive table was consulted");
+        assert!(
+            !not_a_drive.0.join("Firmware.uf2").exists(),
+            "the image was copied into a folder that is not a bootloader disk"
+        );
+    }
+
+    #[test]
+    fn a_drive_that_never_appears_times_out_without_copying() {
+        let host = FakeHost::new(Vec::new());
+        let mut report = Recorder::default();
+        let started = Instant::now();
+        let error = push_with(
+            &host,
+            &quick(),
+            &Config::default(),
+            None,
+            &Image {
+                bytes: vec![0x44; 4],
+                blocks: 1,
+            },
+            &Token::default(),
+            &mut report,
+        )
+        .err()
+        .expect("a transfer with no drive at all reported success");
+
+        assert_eq!(error.code(), ErrorCode::Timeout);
+        assert!(
+            error.message.contains("未偵測到 RP2040 UF2 磁碟"),
+            "{}",
+            error.message
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(report.stages, vec![3], "nothing past the bootloader ran");
+        assert!(report.saw("請使用實體 BOOTSEL"), "{:?}", report.logs);
+    }
+
+    #[test]
+    fn the_copy_is_written_in_sixteen_kib_chunks() {
+        assert_eq!(COPY_CHUNK, 16 * 1024);
+        // Two whole chunks plus a remainder, with data that is not constant so
+        // a lost or reordered chunk cannot hide.
+        let image: Vec<u8> = (0..COPY_CHUNK * 2 + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut sink = Chunks::default();
+        write_chunks(
+            &mut sink,
+            Path::new("Firmware.uf2"),
+            &image,
+            &Token::default(),
+        )
+        .unwrap();
+        assert_eq!(sink.sizes, vec![COPY_CHUNK, COPY_CHUNK, 7]);
+        assert_eq!(sink.bytes, image);
+    }
+
+    #[test]
+    fn a_cancelled_copy_leaves_no_partial_file() {
+        let root = Temp::new();
+        let target = root.0.join("Firmware.uf2");
+        let image = vec![0x55; COPY_CHUNK + 5];
+
+        // Stopped between the two chunks: the sink got exactly one of them.
+        let mut sink = Chunks::default();
+        let error =
+            write_chunks(&mut sink, &target, &image, &After::new(1)).expect_err("copy finished");
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        assert_eq!(sink.sizes, vec![COPY_CHUNK]);
+
+        // The same cancellation through the real file: nothing is left that the
+        // bootloader could mistake for a finished image.
+        let error = write_image(&target, &image, &After::new(1)).expect_err("copy finished");
+        assert_eq!(error.code(), ErrorCode::Cancelled);
+        assert!(
+            !target.exists(),
+            "a cancelled copy left a file that looks finished"
+        );
     }
 }
