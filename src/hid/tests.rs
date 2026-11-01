@@ -1,236 +1,255 @@
+//! Adapter tests: what the tool promises the worker, the UI and the latency
+//! tester, checked against the SDK's in-memory device.
+//!
+//! The session contract itself (short writes, foreign owners' frames, faults,
+//! timeouts) is tested where it lives now: `shared/input-protocol/src/client.rs`.
+
 use super::*;
-struct BinaryFake(input_protocol::testing::UsbModel);
-impl HidTransport for BinaryFake {
-    fn feature(&mut self) -> Result<Option<[u8; 64]>> {
-        Ok(Some(input_protocol::testing::UsbModel::feature()))
+use gdb::mock::MockHandle;
+
+/// The packet log is process-wide, so the tests that read it must not overlap.
+static LOG_TEST: Mutex<()> = Mutex::new(());
+
+fn mock(trace: bool) -> (Session, MockHandle) {
+    let (device, handle) = gdb::Manager::open_mock_with_handle(gdb::DeviceOptions {
+        auto_reconnect: false,
+        timeout_ms: 500,
+        heartbeat: false,
+    })
+    .unwrap();
+    let mut session = Session::new(device);
+    if trace {
+        session.set_trace(true);
     }
-    fn write(&mut self, r: &[u8]) -> Result<usize> {
-        self.0.write(r)
-    }
-    fn read_timeout(&mut self, r: &mut [u8], _: i32) -> Result<usize> {
-        Ok(self.0.read(r))
-    }
-}
-#[test]
-fn binary_session_negotiates_and_preserves_physical_keys_without_ack() {
-    use input_protocol::{KeyId, v3};
-    let cancel = Cancellation::default();
-    let mut s = Session::new(BinaryFake(Default::default()));
-    s.synchronize(&cancel).unwrap();
-    assert_eq!(s.hello(&cancel).unwrap().protocol, 3);
-    for token in [
-        "1",
-        "kp_1",
-        "enter",
-        "kp_enter",
-        "a",
-        "b",
-        "c",
-        "d",
-        "e",
-        "f",
-        "g",
-        "volume_up",
-    ] {
-        s.key(KeyId::from_token(token).unwrap(), true, &cancel)
-            .unwrap();
-    }
-    assert_eq!(s.transport.0.state.pressed().len(), 12);
-    assert!(!s.transport.0.writes.iter().any(|p| p.opcode == v3::BARRIER));
-    s.finish(&cancel).unwrap();
-    assert_eq!(s.transport.0.writes.last().unwrap().opcode, v3::BARRIER);
-    s.reset(&cancel).unwrap();
-    assert!(s.status(&cancel).unwrap().released());
-}
-#[test]
-fn binary_fault_short_write_timeout_and_cancel_invalidate() {
-    use input_protocol::{KeyId, v3};
-    let c = Cancellation::default();
-    for kind in 0..4 {
-        let mut s = Session::new(BinaryFake(Default::default()));
-        s.synchronize(&c).unwrap();
-        let result = match kind {
-            0 => {
-                s.transport.0.fault(5);
-                s.poll()
-            }
-            1 => {
-                s.transport.0.short = true;
-                s.key(KeyId::from_token("a").unwrap(), true, &c)
-            }
-            2 => {
-                s.transport.0.silent = true;
-                s.finish(&c)
-            }
-            _ => {
-                let token = Cancellation::default();
-                token.cancel();
-                s.input(v3::Command::Barrier, &token)
-            }
-        };
-        assert!(result.is_err());
-        // Cancellation before a write need not invalidate an untouched connection.
-        if kind != 3 {
-            assert!(!s.is_valid());
-        }
-    }
+    (session, handle)
 }
 
 #[test]
-fn idle_wait_renews_binary_lease_without_an_input_ack() {
+fn status_fields_keep_the_ui_contract() {
+    let (mut session, _handle) = mock(false);
     let cancel = Cancellation::default();
-    let mut session = Session::new(BinaryFake(Default::default()));
-    session.synchronize(&cancel).unwrap();
     session
-        .wait_until(Instant::now() + Duration::from_millis(510), &cancel)
+        .key(
+            input_protocol::KeyId::from_token("a").unwrap(),
+            true,
+            &cancel,
+        )
         .unwrap();
-    assert_eq!(
-        session.transport.0.writes.last().unwrap().opcode,
-        input_protocol::v3::HEARTBEAT
-    );
-    session.finish(&cancel).unwrap();
+    let status = session.status(&cancel).unwrap();
+    for name in [
+        "p",
+        "rx",
+        "tx",
+        "hid",
+        "fs",
+        "received",
+        "completed",
+        "pending",
+        "lease",
+        "mb",
+        "keys",
+    ] {
+        assert!(status.fields.contains_key(name), "缺少欄位 {name}");
+    }
+    assert_eq!(status.count("p"), 1);
+    assert_eq!(status.fields["keys"], "a");
+    assert!(!status.released());
+
+    session.set_button(1, true, &cancel).unwrap();
+    let status = session.status(&cancel).unwrap();
+    assert_eq!(status.buttons(), 1);
+    assert_eq!(status.fields["mb"], "01");
+    session.set_button(1, false, &cancel).unwrap();
+    assert_eq!(session.status(&cancel).unwrap().buttons(), 0);
+
+    // RELEASE_ALL clears keys and buttons together.
+    session
+        .key(
+            input_protocol::KeyId::from_token("a").unwrap(),
+            true,
+            &cancel,
+        )
+        .unwrap();
+    session.reset(&cancel).unwrap();
+    assert!(session.status(&cancel).unwrap().released());
 }
 
 #[test]
-fn binary_shared_reports_ignore_other_clients_replies_and_faults() {
-    use input_protocol::v3::{self, Packet};
+fn hello_comes_from_the_feature14_identity() {
+    let (mut session, _handle) = mock(false);
     let cancel = Cancellation::default();
-    let mut session = Session::new(BinaryFake(Default::default()));
-    session.synchronize(&cancel).unwrap();
-    let own_id = session.binary.as_ref().unwrap().session;
-    for opcode in [v3::EVENT, v3::BARRIER | 128, v3::OPEN | 128] {
-        session.transport.0.reads.push_back(
-            Packet {
-                opcode,
-                flags: 0,
-                session: own_id.wrapping_add(1),
-                sequence: 2,
-                payload: vec![5],
-            }
-            .encode(v3::IN_ID)
-            .unwrap(),
-        );
-    }
-    session.finish(&cancel).unwrap();
-    assert!(session.is_valid());
-    session.transport.0.fault(5);
-    assert!(session.poll().is_err());
+    let hello = session.hello(&cancel).unwrap();
+    assert_eq!(hello.protocol, 3);
+    assert!(hello.nkro, "mock reports NKRO");
+    assert!(hello.media, "mock reports Consumer");
+    assert!(hello.mouse, "mock reports relative mouse");
+    assert_eq!(hello.lease_ms, 2000);
+    assert_eq!(hello.firmware, "3.2.0");
+    let info = session.info().unwrap();
+    assert_eq!(info.board, 2);
+    assert_eq!(info.lease_ms, 2000);
+}
+
+#[test]
+fn typed_queries_parse_the_sdk_replies() {
+    let (mut session, _handle) = mock(false);
+    let cancel = Cancellation::default();
+    assert!(!session.sessions(&cancel).unwrap().is_empty());
+    assert_eq!(session.status_ext(&cancel).unwrap().build, 0x0DB0_0001);
+    let reply = session
+        .query(input_protocol::v3::Command::Barrier, &cancel)
+        .unwrap();
+    assert_eq!(reply.opcode, input_protocol::v3::BARRIER | 128);
+}
+
+#[test]
+fn close_frees_the_owner_slot_and_stops_the_session() {
+    let (mut session, handle) = mock(false);
+    let cancel = Cancellation::default();
+    session
+        .key(
+            input_protocol::KeyId::from_token("a").unwrap(),
+            true,
+            &cancel,
+        )
+        .unwrap();
+    session.close(&cancel).unwrap();
+    assert!(handle.is_closed());
+    assert!(handle.sessions().is_empty());
+    assert!(
+        handle.held().pressed().is_empty(),
+        "CLOSE releases our keys"
+    );
     assert!(!session.is_valid());
-}
-
-// An expired GUI/peer session raises the device-global failsafe counter while
-// the latency worker's own session remains healthy. Exercise real v3 I/O and
-// the status check used by both latency and mouse operations.
-struct PeerExpiryFake {
-    inner: BinaryFake,
-    failsafe: u16,
-    tx_errors: u16,
-    hid_errors: u16,
-}
-impl HidTransport for PeerExpiryFake {
-    fn feature(&mut self) -> Result<Option<[u8; 64]>> {
-        self.inner.feature()
-    }
-    fn write(&mut self, r: &[u8]) -> Result<usize> {
-        self.inner.write(r)
-    }
-    fn read_timeout(&mut self, r: &mut [u8], timeout: i32) -> Result<usize> {
-        use input_protocol::v3;
-        let n = self.inner.read_timeout(r, timeout)?;
-        if n > 0 {
-            let mut packet = v3::Packet::decode(&r[..n], v3::IN_ID)?;
-            if packet.opcode == v3::STATUS | 128 {
-                packet.payload[14..16].copy_from_slice(&self.tx_errors.to_le_bytes());
-                packet.payload[16..18].copy_from_slice(&self.hid_errors.to_le_bytes());
-                packet.payload[18..20].copy_from_slice(&self.failsafe.to_le_bytes());
-                r[..64].copy_from_slice(&packet.encode(v3::IN_ID)?);
-            }
-        }
-        Ok(n)
-    }
-}
-#[test]
-fn peer_lease_expiry_does_not_fail_an_active_measurement() {
-    use input_protocol::v3::{self, Packet};
-    let cancel = Cancellation::default();
-    let mut session = Session::new(PeerExpiryFake {
-        inner: BinaryFake(Default::default()),
-        failsafe: 0,
-        tx_errors: 0,
-        hid_errors: 0,
-    });
-    session.synchronize(&cancel).unwrap();
-    let before = session.status(&cancel).unwrap();
-    let own_id = session.binary.as_ref().unwrap().session;
-    session.transport.inner.0.reads.push_back(
-        Packet {
-            opcode: v3::EVENT,
-            flags: 0,
-            session: own_id.wrapping_add(1),
-            sequence: 3,
-            payload: vec![5],
-        }
-        .encode(v3::IN_ID)
-        .unwrap(),
-    );
-    session.transport.failsafe = 1;
-    session.finish(&cancel).unwrap();
-    let after = session.status(&cancel).unwrap();
-    assert_eq!(after.count("fs"), before.count("fs") + 1);
-    after.check_transport_since(&before).unwrap();
-    assert!(session.is_valid());
-
-    // Shared transport errors and an own-session lease fault still fail.
-    session.transport.tx_errors = 1;
-    assert!(
-        session
-            .status(&cancel)
-            .unwrap()
-            .check_transport_since(&before)
-            .is_err()
-    );
-    session.transport.tx_errors = 0;
-    session.transport.hid_errors = 1;
-    assert!(
-        session
-            .status(&cancel)
-            .unwrap()
-            .check_transport_since(&before)
-            .is_err()
-    );
-    session.transport.inner.0.fault(5);
+    // A closed session refuses further work instead of writing into the void.
     assert!(session.status(&cancel).is_err());
-    assert!(!session.is_valid());
+    assert!(session.poll().is_err());
 }
 
-struct Unsupported;
-impl HidTransport for Unsupported {
-    fn write(&mut self, _: &[u8]) -> Result<usize> {
-        panic!("unsupported device must not receive commands")
-    }
-    fn read_timeout(&mut self, _: &mut [u8], _: i32) -> Result<usize> {
-        Ok(0)
-    }
-}
 #[test]
-fn missing_v3_feature_rejects_without_sending_input() {
-    let mut s = Session::new(Unsupported);
+fn cancelling_before_a_call_sends_nothing() {
+    let (mut session, handle) = mock(false);
+    let cancel = Cancellation::default();
+    cancel.cancel();
     assert!(
-        s.synchronize(&Cancellation::default())
-            .unwrap_err()
-            .to_string()
-            .contains("不支援")
+        session
+            .key(
+                input_protocol::KeyId::from_token("a").unwrap(),
+                true,
+                &cancel
+            )
+            .is_err()
     );
-    assert!(!s.is_valid());
+    assert!(session.status(&cancel).is_err());
+    assert!(
+        !handle
+            .writes()
+            .iter()
+            .any(|packet| packet.opcode == input_protocol::v3::KEY),
+        "取消後不得送出輸入"
+    );
 }
+
 #[test]
-fn buttons_use_standard_left_right_middle_and_side_bits() {
-    let token = Cancellation::default();
-    let mut s = Session::new(BinaryFake(Default::default()));
-    s.synchronize(&token).unwrap();
-    for n in 1..=5 {
-        s.set_button(n, true, &token).unwrap();
-        assert_eq!(s.transport.0.state.buttons, 1 << (n - 1));
-        s.set_button(n, false, &token).unwrap();
+fn trace_events_capture_host_and_device_frames() {
+    let _guard = LOG_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (mut session, _handle) = mock(false);
+    let cancel = Cancellation::default();
+    session.set_trace(true);
+    // BARRIER both ways: a clean STATUS poll is deliberately filtered out.
+    session.finish(&cancel).unwrap();
+    let events = session.take_events();
+    session.set_trace(false);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.line.starts_with("→ BARRIER")),
+        "缺少送出的封包：{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.line.starts_with("← BARRIER")),
+        "缺少收到的封包"
+    );
+    assert!(events.iter().all(|event| event.unix_ms > 0));
+    // Draining is not asserted: the queue is process-wide, and other tests in
+    // this binary do device I/O while tracing is on. The worker is the only
+    // session in the real process, which is why one queue is the right shape
+    // there.
+}
+
+fn counters(hid: u64, tx: u64, failsafe: u64) -> crate::protocol::Status {
+    let fields = [("hid", hid), ("tx", tx), ("fs", failsafe)]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    crate::protocol::Status {
+        fields,
+        raw: String::new(),
     }
+}
+
+#[test]
+fn peer_lease_expiry_does_not_fail_a_measurement() {
+    let before = counters(0, 0, 0);
+    // An expired lease in another owner's session raises the device-global
+    // failsafe counter only; our own transport counters are what condemn a
+    // measurement. (That a foreign EVENT does not fault this session is covered
+    // in shared/input-protocol/src/client.rs.)
+    assert!(counters(0, 0, 1).check_transport_since(&before).is_ok());
+    assert!(counters(0, 1, 0).check_transport_since(&before).is_err());
+    assert!(counters(1, 0, 0).check_transport_since(&before).is_err());
+}
+
+#[test]
+fn the_packet_log_reads_like_sentences_and_drops_the_noise() {
+    let _guard = LOG_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = EVENTS.lock().map(|mut events| events.clear());
+    // Heartbeats and clean polling are noise; a reply with counters is a line.
+    record(
+        gdb::Level::Trace,
+        "out opcode=3 session=1 sequence=4 payload=[]",
+    );
+    record(
+        gdb::Level::Trace,
+        "in opcode=134 session=1 sequence=5 payload=[0,143,0,0,0,143,0,0,0,0,208,7,0,0,0,0,0,0,0,0,0,0]",
+    );
+    record(
+        gdb::Level::Trace,
+        "in opcode=134 session=1 sequence=6 payload=[5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]",
+    );
+    record(
+        gdb::Level::Trace,
+        "out opcode=16 session=1 sequence=7 payload=[7,0,4,0,1]",
+    );
+    let lines: Vec<String> = EVENTS
+        .lock()
+        .map(|mut events| events.drain(..).map(|event| event.line).collect())
+        .unwrap_or_default();
+
+    assert!(
+        !lines.iter().any(|line| line.contains("心跳")),
+        "heartbeats must not reach the log: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("完成 143/143")),
+        "a clean poll is noise, not a log line: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("錯誤碼 5（租約到期）")),
+        "a failed reply must keep its fault: {lines:?}"
+    );
+    let key = lines
+        .iter()
+        .find(|line| line.contains("按鍵"))
+        .unwrap_or_else(|| panic!("no readable key line in {lines:?}"));
+    assert!(key.contains("page 7 usage 4 按下"), "{key}");
+    assert!(!key.contains('['), "raw payload leaked: {key}");
 }

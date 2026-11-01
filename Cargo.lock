@@ -766,7 +766,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
- "hidapi",
+ "gdb",
+ "gdb-motion",
  "input-protocol",
  "libc",
  "rand",

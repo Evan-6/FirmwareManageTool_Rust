@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Screen {
     pub width: i32,
     pub height: i32,
@@ -203,80 +203,11 @@ pub fn firmware_dir() -> PathBuf {
 }
 
 pub fn locate_program(name: &str) -> Option<PathBuf> {
-    let paths: Vec<PathBuf> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    #[cfg(windows)]
-    let paths = {
-        let mut paths = paths;
-        paths.extend(registry_paths());
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            paths.push(PathBuf::from(local).join("Microsoft/WinGet/Links"));
-        }
-        paths
-    };
-    // Existing paths may contain environment expansions after a winget install.
-    paths
-        .into_iter()
-        .map(|dir| dir.join(name))
-        .find(|p| p.is_file())
+    gdb::platform::locate_program(name)
 }
-#[cfg(windows)]
-fn registry_paths() -> Vec<PathBuf> {
-    use windows_sys::Win32::System::Registry::*;
-    let mut result = Vec::new();
-    for (root, sub) in [
-        (HKEY_CURRENT_USER, "Environment"),
-        (
-            HKEY_LOCAL_MACHINE,
-            "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
-        ),
-    ] {
-        let key: Vec<u16> = sub.encode_utf16().chain(Some(0)).collect();
-        let value: Vec<u16> = "Path".encode_utf16().chain(Some(0)).collect();
-        let mut buffer = vec![0u16; 32768];
-        let mut size = (buffer.len() * 2) as u32;
-        unsafe {
-            if RegGetValueW(
-                root,
-                key.as_ptr(),
-                value.as_ptr(),
-                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
-                std::ptr::null_mut(),
-                buffer.as_mut_ptr().cast(),
-                &mut size,
-            ) == 0
-            {
-                let end = buffer.iter().position(|n| *n == 0).unwrap_or(buffer.len());
-                result.extend(std::env::split_paths(&std::ffi::OsString::from(
-                    String::from_utf16_lossy(&buffer[..end]),
-                )));
-            }
-        }
-    }
-    result
-}
+
 pub fn boot_drives() -> Result<Vec<PathBuf>> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
-        let mask = unsafe { GetLogicalDrives() };
-        let mut drives = Vec::new();
-        for bit in 0..26 {
-            if mask & (1 << bit) != 0 {
-                let root = PathBuf::from(format!("{}:\\", (b'A' + bit) as char));
-                if let Ok(info) = std::fs::read_to_string(root.join("INFO_UF2.TXT"))
-                    && (info.contains("RP2040") || info.contains("RPI-RP2"))
-                {
-                    drives.push(root);
-                }
-            }
-        }
-        Ok(drives)
-    }
-    #[cfg(not(windows))]
-    {
-        bail!("UF2 磁碟偵測僅支援 Windows")
-    }
+    Ok(gdb::flash::drives()?)
 }
 
 pub fn wait_until(deadline: Instant, cancel: &crate::cancel::Cancellation) -> Result<()> {

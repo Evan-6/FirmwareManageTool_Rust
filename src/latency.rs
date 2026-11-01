@@ -4,7 +4,7 @@ use crate::platform;
 use crate::platform::{Counter, PriorityGuard};
 use crate::{
     cancel::Cancellation,
-    hid::{self, Device, HidTransport, NativeSession, Session},
+    hid::{self, Device, Session},
     process::{Stream, read_lines, spawn_managed},
 };
 #[cfg(windows)]
@@ -229,8 +229,8 @@ fn wait_key(target: bool, counter: &Counter, mode: Mode, cancel: &Cancellation) 
         }
     }
 }
-pub fn measure<T: HidTransport>(
-    session: &mut Session<T>,
+pub fn measure(
+    session: &mut Session,
     device: Device,
     config: LatencyConfig,
     cancel: &Cancellation,
@@ -438,7 +438,7 @@ pub fn worker_entry() -> Result<()> {
     }
     Ok(())
 }
-pub fn recover_reset(device: &Device) -> Result<NativeSession> {
+pub fn recover_reset(device: &Device) -> Result<Session> {
     let mut session = hid::open(device)?;
     let token = Cancellation::default();
     session.synchronize(&token)?;

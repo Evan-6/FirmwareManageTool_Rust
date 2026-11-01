@@ -1,7 +1,7 @@
 use crate::{
     cancel::Cancellation,
     firmware::{self, UploadConfig, UploadObserver, UploadOutcome},
-    hid::{self, Device, NativeSession},
+    hid::{self, Device, Session},
     latency::{self, LatencyConfig, Mode, Report, Round},
     mouse,
     process::SystemRunner,
@@ -127,13 +127,22 @@ impl Drop for Backend {
 struct Observer<'a> {
     events: &'a Sender<AppEvent>,
     choices: &'a Receiver<String>,
+    stage: usize,
 }
 impl UploadObserver for Observer<'_> {
     fn log(&mut self, line: String) {
-        let _ = self.events.send(AppEvent::Log(line));
+        // Every upload line carries its stage, so a failure says *where* it
+        // stopped instead of leaving the user to guess from a wall of frames.
+        let _ = self
+            .events
+            .send(AppEvent::Log(format!("[燒錄 {}] {line}", self.stage)));
     }
     fn progress(&mut self, stage: usize, message: &str) {
+        self.stage = stage;
         let _ = self.events.send(AppEvent::Progress(stage, message.into()));
+        let _ = self
+            .events
+            .send(AppEvent::Log(format!("[燒錄 {stage}] {message}")));
     }
     fn choose_target(&mut self, candidates: Vec<String>, cancel: &Cancellation) -> Result<String> {
         for _ in self.choices.try_iter() {}
@@ -153,7 +162,7 @@ impl UploadObserver for Observer<'_> {
         }
     }
 }
-fn require(session: &mut Option<NativeSession>) -> Result<&mut NativeSession> {
+fn require(session: &mut Option<Session>) -> Result<&mut Session> {
     session
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("請先選取裝置並連線"))
@@ -177,8 +186,9 @@ fn reconnect_device(old: &Device) -> Result<Device> {
 }
 fn recover(
     selected: &mut Option<Device>,
-    session: &mut Option<NativeSession>,
+    session: &mut Option<Session>,
     events: &Sender<AppEvent>,
+    debug: bool,
 ) {
     log_responses(session, events);
     drop(session.take());
@@ -189,6 +199,7 @@ fn recover(
                 .ok_or_else(|| anyhow::anyhow!("未選取裝置"))?,
         )?;
         let mut reopened = latency::recover_reset(&device)?;
+        reopened.set_trace(debug);
         let hello = reopened.hello(&Cancellation::default())?;
         let status = reopened.status(&Cancellation::default())?;
         *selected = Some(device.clone());
@@ -206,7 +217,7 @@ fn recover(
         let _ = events.send(AppEvent::Disconnected);
     }
 }
-fn log_responses(session: &mut Option<NativeSession>, events: &Sender<AppEvent>) {
+fn log_responses(session: &mut Option<Session>, events: &Sender<AppEvent>) {
     if let Some(session) = session {
         for reply in session.take_events() {
             let _ = events.send(AppEvent::Log(format!(
@@ -223,12 +234,14 @@ fn worker(
     exit: Cancellation,
 ) {
     let mut selected = None;
-    let mut session: Option<NativeSession> = None;
+    let mut session: Option<Session> = None;
     let mut held = false;
     let mut debug = true;
     let mut heartbeat = Instant::now();
     let mut polled = Instant::now();
     let mut ext_polled = Instant::now();
+    // Consecutive idle-poll failures; one is a hiccup, two mean the session is gone.
+    let mut misses = 0u32;
     while !exit.is_cancelled() {
         match commands.recv_timeout(Duration::from_millis(50)) {
             Ok(work) => {
@@ -247,6 +260,7 @@ fn worker(
                             selected = Some(device.clone());
                             let mut opened = hid::open(&device)?;
                             opened.synchronize(&work.cancel)?;
+                            opened.set_trace(debug);
                             let hello = opened.hello(&work.cancel)?;
                             let status = opened.status(&work.cancel)?;
                             let _ = events.send(AppEvent::Connected(device, hello));
@@ -301,6 +315,11 @@ fn worker(
                         }
                         AppCommand::SetDebug(enabled) => {
                             debug = enabled;
+                            // Packet log = the SDK's frame trace; off in game mode
+                            // so the latency path does not format every frame.
+                            if let Some(active) = session.as_mut() {
+                                active.set_trace(enabled);
+                            }
                             let _ = events.send(AppEvent::Log(format!(
                                 "除錯模式{}：{}",
                                 if enabled { "開啟" } else { "關閉" },
@@ -380,6 +399,7 @@ fn worker(
                             let mut observer = Observer {
                                 events: &events,
                                 choices: &choices,
+                                stage: 1,
                             };
                             let outcome = firmware::upload(
                                 &config,
@@ -390,7 +410,7 @@ fn worker(
                             );
                             let _ = events.send(AppEvent::Upload(outcome));
                             if selected.is_some() {
-                                recover(&mut selected, &mut session, &events);
+                                recover(&mut selected, &mut session, &events, debug);
                             }
                         }
                         AppCommand::Latency(config) => {
@@ -424,7 +444,7 @@ fn worker(
                                 )?
                             };
                             if !report.cleanup_confirmed || session.is_none() {
-                                recover(&mut selected, &mut session, &events);
+                                recover(&mut selected, &mut session, &events, debug);
                                 report.cleanup_confirmed = session.is_some();
                             }
                             let _ = events.send(AppEvent::Cleanup(report.cleanup_confirmed));
@@ -440,7 +460,7 @@ fn worker(
                     let _ = events.send(AppEvent::Error(format!("{e:#}")));
                     held = false;
                     if selected.is_some() {
-                        recover(&mut selected, &mut session, &events);
+                        recover(&mut selected, &mut session, &events, debug);
                     }
                 }
                 let _ = events.send(AppEvent::Done);
@@ -449,6 +469,8 @@ fn worker(
                 let result = (|| -> Result<()> {
                     if let Some(active) = session.as_mut() {
                         active.poll()?;
+                        // The SDK keeps the 500 ms lease heartbeat on its own
+                        // thread, so the worker only polls the device here.
                         if active.needs_heartbeat(held)
                             && heartbeat.elapsed() >= active.heartbeat_interval()
                         {
@@ -483,10 +505,24 @@ fn worker(
                 if debug {
                     log_responses(&mut session, &events);
                 }
-                if let Err(e) = result {
-                    let _ = events.send(AppEvent::Error(format!("連線中斷／心跳失敗：{e:#}")));
-                    held = false;
-                    recover(&mut selected, &mut session, &events);
+                match result {
+                    Ok(()) => misses = 0,
+                    Err(e) => {
+                        misses += 1;
+                        // One missed poll is usually a busy bus or a reply stolen
+                        // by another reader. Tearing the session down for every
+                        // hiccup is what makes the device-global failsafe counter
+                        // climb, so require two in a row.
+                        if misses < 2 {
+                            let _ = events.send(AppEvent::Log(format!("略過一次輪詢失敗：{e:#}")));
+                        } else {
+                            misses = 0;
+                            let _ =
+                                events.send(AppEvent::Error(format!("連線中斷／心跳失敗：{e:#}")));
+                            held = false;
+                            recover(&mut selected, &mut session, &events, debug);
+                        }
+                    }
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,

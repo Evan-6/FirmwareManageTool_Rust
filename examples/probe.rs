@@ -56,23 +56,23 @@ fn main() -> anyhow::Result<()> {
     let mut session = hid::open(device)?;
 
     session.synchronize(&cancel)?;
-    let (board, firmware, lease_ms, poll_ms, flags, consumer, device_id, build) = {
-        let caps = session
-            .capabilities()
-            .ok_or_else(|| anyhow::anyhow!("synchronize 後沒有 capabilities"))?;
+    let (board, firmware, lease_ms, poll_ms, flags, device_id, build) = {
+        // The SDK's DeviceInfo is the Feature 14 report the session was opened with.
+        let info = session
+            .info()
+            .ok_or_else(|| anyhow::anyhow!("OPEN 後沒有能力資訊"))?;
         (
-            caps.board,
-            caps.firmware.clone(),
-            caps.lease_ms,
-            caps.poll_ms,
-            caps.flags,
-            caps.consumer,
-            caps.device_id,
-            caps.build,
+            info.board,
+            info.firmware.clone(),
+            info.lease_ms,
+            info.poll_ms,
+            info.capabilities,
+            info.device_id,
+            info.build,
         )
     };
     println!(
-        "feature14: board={board} firmware={firmware} build={build:08x} lease={lease_ms}ms poll={poll_ms}ms flags={flags:#08b} consumer={consumer:#04X} device={device_id:02X?}"
+        "feature14: board={board} firmware={firmware} build={build:08x} lease={lease_ms}ms poll={poll_ms}ms flags={flags:#08b} device={device_id:02X?}"
     );
     anyhow::ensure!(board == 2, "board id 應為 2（XIAO RP2040），實際 {board}");
 
