@@ -1900,9 +1900,130 @@ inline std::string device_list_json() {
 // Screen and cursor
 // ---------------------------------------------------------------------------
 
-// Primary-monitor rectangle and the cursor inside it. Absolute coordinates are
-// relative to that rectangle; the firmware never sees screen coordinates.
-inline bool screen_and_cursor(Screen& screen, std::int32_t& x, std::int32_t& y) {
+// A physical-pixel rectangle in virtual-desktop coordinates. Monitors are
+// half-open on the right and bottom edges: the pixel at right belongs to
+// whatever sits next to it.
+struct Rect {
+    std::int32_t left = 0;
+    std::int32_t top = 0;
+    std::int32_t right = 0;
+    std::int32_t bottom = 0;
+
+    std::int32_t width() const { return right - left; }
+    std::int32_t height() const { return bottom - top; }
+    std::pair<std::int32_t, std::int32_t> origin() const { return {left, top}; }
+
+    bool contains(std::pair<std::int32_t, std::int32_t> point) const {
+        return point.first >= left && point.first < right && point.second >= top &&
+               point.second < bottom;
+    }
+
+    Rect union_with(const Rect& other) const {
+        return Rect{std::min(left, other.left), std::min(top, other.top),
+                    std::max(right, other.right), std::max(bottom, other.bottom)};
+    }
+
+    // The smallest rectangle covering this one and one more point.
+    Rect union_point(std::pair<std::int32_t, std::int32_t> point) const {
+        return Rect{std::min(left, point.first), std::min(top, point.second),
+                    std::max(right, point.first + 1), std::max(bottom, point.second + 1)};
+    }
+
+    // The nearest point inside the rectangle.
+    std::pair<std::int32_t, std::int32_t> clamp(
+        std::pair<std::int32_t, std::int32_t> point) const {
+        return {std::clamp(point.first, left, std::max(right - 1, left)),
+                std::clamp(point.second, top, std::max(bottom - 1, top))};
+    }
+};
+
+// Which rectangle an absolute move is anchored to. `Primary` is the default, so
+// a caller that does not ask for another screen keeps the coordinates it always
+// had.
+enum class ScreenKind : std::int32_t {
+    Primary = 0,
+    Monitor = 1,
+    Window = 2,
+};
+
+struct ScreenTarget {
+    ScreenKind kind = ScreenKind::Primary;
+    // Monitor index in EnumDisplayMonitors order, or the window handle.
+    std::intptr_t value = 0;
+
+    static ScreenTarget primary() { return ScreenTarget{}; }
+
+    // The index-th display in EnumDisplayMonitors order. That order is the order
+    // the system enumerates the displays, so it is not the display number
+    // Windows settings shows and index 0 need not be the primary monitor.
+    static ScreenTarget monitor(std::size_t index) {
+        return ScreenTarget{ScreenKind::Monitor, static_cast<std::intptr_t>(index)};
+    }
+
+    static ScreenTarget window(std::intptr_t hwnd) {
+        return ScreenTarget{ScreenKind::Window, hwnd};
+    }
+
+    std::string describe() const {
+        switch (kind) {
+        case ScreenKind::Monitor:
+            return "monitor " + std::to_string(value);
+        case ScreenKind::Window: {
+            char text[32] = {};
+            std::snprintf(text, sizeof(text), "window 0x%llx",
+                          static_cast<unsigned long long>(value));
+            return text;
+        }
+        default:
+            return "the primary monitor";
+        }
+    }
+};
+
+// The pointer, the anchored rectangle and every monitor, all in virtual-desktop
+// physical pixels.
+struct Target {
+    // The requested rectangle: the move is clamped into it.
+    Rect rect;
+    // Where the pointer really is, which may be on another monitor.
+    std::pair<std::int32_t, std::int32_t> cursor{0, 0};
+    // Every monitor, so "is this point on a screen at all" has an answer.
+    std::vector<Rect> screens;
+
+    Rect bounds() const {
+        if (screens.empty()) {
+            return rect;
+        }
+        Rect result = screens.front();
+        for (std::size_t index = 1; index < screens.size(); ++index) {
+            result = result.union_with(screens[index]);
+        }
+        return result;
+    }
+
+    bool reaches(std::pair<std::int32_t, std::int32_t> point) const {
+        for (const Rect& screen : screens) {
+            if (screen.contains(point)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// The platform queries target resolution needs. Tests fill it in instead of
+// moving a real pointer; system_desktop() is the Windows one.
+struct Desktop {
+    std::function<std::vector<Rect>()> monitors;
+    std::function<std::size_t()> primary;
+    std::function<std::pair<std::int32_t, std::int32_t>()> cursor;
+    std::function<Rect(std::intptr_t)> window;
+};
+
+namespace detail {
+
+// Primary-monitor rectangle and the cursor inside it, straight from user32.
+inline bool read_screen_and_cursor(Screen& screen, std::int32_t& x, std::int32_t& y) {
 #if defined(_WIN32)
     POINT cursor{0, 0};
     if (GetPhysicalCursorPos(&cursor) == 0) {
@@ -1925,6 +2046,182 @@ inline bool screen_and_cursor(Screen& screen, std::int32_t& x, std::int32_t& y) 
     (void)y;
     return false;
 #endif
+}
+
+#if defined(_WIN32)
+// Every monitor rectangle and its flags, in EnumDisplayMonitors order.
+inline std::vector<std::pair<Rect, std::uint32_t>> enumerate_monitors() {
+    std::vector<std::pair<Rect, std::uint32_t>> found;
+    const auto collect = [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        auto* out = reinterpret_cast<std::vector<std::pair<Rect, std::uint32_t>>*>(data);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(monitor, &info) != 0) {
+            out->emplace_back(
+                Rect{info.rcMonitor.left, info.rcMonitor.top, info.rcMonitor.right,
+                     info.rcMonitor.bottom},
+                static_cast<std::uint32_t>(info.dwFlags));
+        }
+        return 1;
+    };
+    if (EnumDisplayMonitors(nullptr, nullptr, collect, reinterpret_cast<LPARAM>(&found)) == 0) {
+        throw Error(ErrorCode::Unsupported, "EnumDisplayMonitors failed");
+    }
+    if (found.empty()) {
+        throw Error(ErrorCode::Unsupported, "the system reports no monitors");
+    }
+    return found;
+}
+#endif
+
+}  // namespace detail
+
+// The live Windows desktop.
+inline Desktop system_desktop() {
+    Desktop desktop;
+    desktop.monitors = [] {
+        std::vector<Rect> rects;
+#if defined(_WIN32)
+        for (const auto& entry : detail::enumerate_monitors()) {
+            rects.push_back(entry.first);
+        }
+#else
+        throw Error(ErrorCode::Unsupported,
+                    "absolute mouse coordinates need Windows cursor APIs");
+#endif
+        return rects;
+    };
+    desktop.primary = [] {
+#if defined(_WIN32)
+        const auto found = detail::enumerate_monitors();
+        for (std::size_t index = 0; index < found.size(); ++index) {
+            if ((found[index].second & MONITORINFOF_PRIMARY) != 0) {
+                return index;
+            }
+        }
+        return std::size_t{0};
+#else
+        throw Error(ErrorCode::Unsupported,
+                    "absolute mouse coordinates need Windows cursor APIs");
+#endif
+    };
+    desktop.cursor = [] {
+#if defined(_WIN32)
+        POINT cursor{0, 0};
+        if (GetPhysicalCursorPos(&cursor) == 0) {
+            throw Error(ErrorCode::Unsupported, "GetPhysicalCursorPos failed");
+        }
+        return std::make_pair<std::int32_t, std::int32_t>(cursor.x, cursor.y);
+#else
+        throw Error(ErrorCode::Unsupported,
+                    "absolute mouse coordinates need Windows cursor APIs");
+#endif
+    };
+    desktop.window = [](std::intptr_t hwnd) {
+        Rect rect;
+#if defined(_WIN32)
+        RECT bounds{};
+        if (GetWindowRect(reinterpret_cast<HWND>(hwnd), &bounds) == 0) {
+            throw Error(ErrorCode::Unsupported,
+                        "GetWindowRect failed for " + ScreenTarget::window(hwnd).describe());
+        }
+        rect = Rect{bounds.left, bounds.top, bounds.right, bounds.bottom};
+#else
+        (void)hwnd;
+        throw Error(ErrorCode::Unsupported,
+                    "absolute mouse coordinates need Windows cursor APIs");
+#endif
+        return rect;
+    };
+    return desktop;
+}
+
+// Resolves `screen` against a desktop without touching the pointer.
+inline Target resolve(const Desktop& desktop, const ScreenTarget& screen) {
+    const std::vector<Rect> screens = desktop.monitors();
+    if (screens.empty()) {
+        throw Error(ErrorCode::Unsupported, "the system reports no monitors");
+    }
+    Rect rect;
+    switch (screen.kind) {
+    case ScreenKind::Monitor: {
+        const auto index = static_cast<std::size_t>(screen.value);
+        if (index >= screens.size()) {
+            throw Error(ErrorCode::Unsupported,
+                        "monitor index " + std::to_string(index) +
+                            " is out of range: the system reports " +
+                            std::to_string(screens.size()) + " monitor(s)");
+        }
+        rect = screens[index];
+        break;
+    }
+    case ScreenKind::Window:
+        rect = desktop.window(screen.value);
+        if (rect.width() <= 0 || rect.height() <= 0) {
+            throw Error(ErrorCode::Unsupported, screen.describe() + " has an empty rectangle (" +
+                                                     std::to_string(rect.width()) + "x" +
+                                                     std::to_string(rect.height()) + ")");
+        }
+        break;
+    default: {
+        const std::size_t index = desktop.primary();
+        if (index >= screens.size()) {
+            throw Error(ErrorCode::Unsupported,
+                        "the primary monitor is index " + std::to_string(index) +
+                            ", but the system reports " + std::to_string(screens.size()) +
+                            " monitor(s)");
+        }
+        rect = screens[index];
+        break;
+    }
+    }
+    Target target;
+    target.rect = rect;
+    target.cursor = desktop.cursor();
+    target.screens = screens;
+    return target;
+}
+
+// What an absolute move reports when its point is on no monitor at all: which
+// target was asked for and the desktop the host could see.
+inline std::string outside_message(const ScreenTarget& screen,
+                                   std::pair<std::int32_t, std::int32_t> point, Rect bounds) {
+    return "absolute move to (" + std::to_string(point.first) + ", " +
+           std::to_string(point.second) + ") targets " + screen.describe() +
+           ", but that point is on no screen: the monitors cover (" +
+           std::to_string(bounds.left) + ", " + std::to_string(bounds.top) + ")-(" +
+           std::to_string(bounds.right) + ", " + std::to_string(bounds.bottom) + ")";
+}
+
+// Target resolution plus the pointer, for one absolute move. The caller enables
+// DPI awareness first, the way every move does.
+inline Target screen_target_for(const ScreenTarget& screen = ScreenTarget{}) {
+    return resolve(system_desktop(), screen);
+}
+
+// Primary-monitor rectangle and the cursor inside it. Absolute coordinates are
+// relative to that rectangle; the firmware never sees screen coordinates.
+inline bool screen_and_cursor(Screen& screen, std::int32_t& x, std::int32_t& y) {
+    return detail::read_screen_and_cursor(screen, x, y);
+}
+
+// The single 1920x1080 desktop a mock device pretends to have.
+inline Target mock_target(const ScreenTarget& screen,
+                          std::pair<std::int32_t, std::int32_t> cursor) {
+    if (screen.kind == ScreenKind::Monitor && screen.value != 0) {
+        throw Error(ErrorCode::Unsupported,
+                    "monitor index " + std::to_string(screen.value) +
+                        " is out of range: a mock device has one 1920x1080 screen");
+    }
+    if (screen.kind == ScreenKind::Window) {
+        throw Error(ErrorCode::Unsupported,
+                    screen.describe() + " has no rectangle: a mock device has no windows");
+    }
+    Target target;
+    target.rect = Rect{0, 0, 1920, 1080};
+    target.cursor = cursor;
+    target.screens = {target.rect};
+    return target;
 }
 
 // Makes the process DPI aware so physical pixels are what the sensor sees.
@@ -2135,6 +2432,9 @@ struct DeviceImpl {
     std::atomic<std::uint8_t> buttons{0};
     std::mutex cursor_mutex;
     std::pair<std::int32_t, std::int32_t> cursor{960, 540};
+    // Filled in by Device::set_screen_source: the seam a test uses to put the
+    // pointer on a monitor the mock does not really have.
+    std::function<Target(const ScreenTarget&)> screen_source;
     std::mutex events_mutex;
     std::function<void(std::int32_t, std::int32_t, const std::string&)> events;
     std::shared_ptr<Beat> beat = std::make_shared<Beat>();
@@ -2516,21 +2816,49 @@ public:
 
     // Real cursor on hardware, simulated pointer for the mock/fake device.
     void cursor_state(Screen& screen, std::int32_t& x, std::int32_t& y) const {
+        const Target state = screen_target(ScreenTarget{});
+        screen.width = state.rect.width();
+        screen.height = state.rect.height();
+        x = state.cursor.first - state.rect.left;
+        y = state.cursor.second - state.rect.top;
+    }
+
+    // The anchored rectangle, the pointer and every monitor, for one absolute
+    // move. A mock/fake device answers from its simulated pointer, and
+    // set_screen_source() replaces the whole answer.
+    Target screen_target(const ScreenTarget& screen) const {
+        if (impl_->screen_source) {
+            return impl_->screen_source(screen);
+        }
         if (impl_->mock) {
-            screen.width = 1920;
-            screen.height = 1080;
-            std::lock_guard<std::mutex> lock(impl_->cursor_mutex);
-            x = impl_->cursor.first;
-            y = impl_->cursor.second;
-            return;
+            return mock_target(screen, mock_cursor());
         }
-        if (!screen_and_cursor(screen, x, y)) {
-            throw Error(ErrorCode::Unsupported,
-                        "absolute mouse coordinates need Windows cursor APIs");
+        return gdb::native::screen_target_for(screen);
+    }
+
+    // Test seam: absolute moves read the desktop through this instead of user32,
+    // so a test can put the pointer on a second monitor without moving the real
+    // one.
+    void set_screen_source(std::function<Target(const ScreenTarget&)> source) const {
+        impl_->screen_source = std::move(source);
+    }
+
+    // Where the pointer is right now, in virtual-desktop pixels, bypassing
+    // set_screen_source().
+    std::pair<std::int32_t, std::int32_t> pointer() const {
+        if (impl_->mock) {
+            return mock_cursor();
         }
+        return system_desktop().cursor();
     }
 
 private:
+    // The simulated pointer, read under its own lock.
+    std::pair<std::int32_t, std::int32_t> mock_cursor() const {
+        std::lock_guard<std::mutex> lock(impl_->cursor_mutex);
+        return impl_->cursor;
+    }
+
     template <typename Fn>
     auto with_session(Fn&& operation) const -> decltype(operation(std::declval<detail::Session&>())) {
         if (!impl_ || impl_->closed.load()) {
@@ -2591,12 +2919,22 @@ struct MotionOptions {
     // 0 = pick a natural duration from the distance.
     std::uint32_t duration_ms = 0;
     HumanProfile profile;
+    // Which rectangle an absolute move is anchored to. Relative moves ignore it;
+    // the default is the primary monitor.
+    ScreenTarget screen;
 
     static MotionOptions linear(std::uint32_t duration_ms) {
         MotionOptions options;
         options.duration_ms = duration_ms;
         options.profile = HumanProfile::linear();
         return options;
+    }
+
+    // The same options anchored to another monitor or window.
+    MotionOptions aiming_at(ScreenTarget target) const {
+        MotionOptions copy = *this;
+        copy.screen = target;
+        return copy;
     }
 };
 
@@ -2658,10 +2996,38 @@ private:
     std::exception_ptr error_;
 };
 
-inline std::pair<std::int32_t, std::int32_t> clamp_to_screen(std::int32_t x, std::int32_t y,
-                                                             Screen screen) {
-    return {std::clamp(x, 0, screen.width > 0 ? screen.width - 1 : 0),
-            std::clamp(y, 0, screen.height > 0 ? screen.height - 1 : 0)};
+// Translates a virtual-desktop point into the plan box.
+inline std::pair<std::int32_t, std::int32_t> local_point(
+    std::pair<std::int32_t, std::int32_t> point, std::pair<std::int32_t, std::int32_t> origin) {
+    return {point.first - origin.first, point.second - origin.second};
+}
+
+// The box the trajectory is planned in: the anchored rectangle widened to reach
+// the pointer, so a move that starts on another monitor still gets a straight
+// path instead of starting on an edge.
+inline std::pair<std::pair<std::int32_t, std::int32_t>, Screen> plan_box(const Target& state) {
+    const Rect bounds = state.rect.union_point(state.cursor);
+    return {bounds.origin(), Screen{bounds.width(), bounds.height()}};
+}
+
+// Clamps the caller's point into the anchored rectangle. A point no monitor
+// covers is refused: the pointer cannot go there at all, and the message names
+// the target and the desktop the host could see.
+inline std::pair<std::int32_t, std::int32_t> aim_at(
+    const Target& state, std::pair<std::int32_t, std::int32_t> point,
+    const ScreenTarget& screen) {
+    if (!state.reaches(point)) {
+        throw Error(ErrorCode::Unsupported, outside_message(screen, point, state.bounds()));
+    }
+    return state.rect.clamp(point);
+}
+
+inline std::vector<Node> plan_nodes(const Target& state,
+                                    std::pair<std::int32_t, std::int32_t> origin, Screen window,
+                                    std::pair<std::int32_t, std::int32_t> aim,
+                                    const MotionOptions& options, Rng& rng) {
+    return trajectory_with(local_point(state.cursor, origin), local_point(aim, origin), window,
+                           options.duration_ms, options.profile, rng);
 }
 
 // Relative move, paced over the chunks the HID report can carry. Cheap enough
@@ -2686,27 +3052,19 @@ inline void run_move_by(const Device& device, std::int32_t dx, std::int32_t dy,
     }
 }
 
-// Absolute move: read the real cursor, plan a trajectory, feed relative deltas
-// until the pointer arrives. A retarget replans from the current position, so
-// the same loop serves both.
+// Absolute move: read the real cursor and the anchored rectangle, plan a
+// trajectory, feed relative deltas until the pointer arrives. A retarget replans
+// from the current position, so the same loop serves both. The pointer may start
+// on another monitor: the plan box is widened to reach it.
 inline void run_move_to(const Device& device, std::int32_t x, std::int32_t y,
                         const MotionOptions& options, MovementCell& shared) {
     enable_dpi_awareness();
-    Screen screen;
-    std::int32_t cursor_x = 0;
-    std::int32_t cursor_y = 0;
-    device.cursor_state(screen, cursor_x, cursor_y);
-    if (cursor_x < 0 || cursor_y < 0 || cursor_x >= screen.width || cursor_y >= screen.height) {
-        throw Error(ErrorCode::Unsupported,
-                    "absolute coordinates are relative to the primary monitor (" +
-                        std::to_string(screen.width) + "x" + std::to_string(screen.height) +
-                        " at 0,0) and the cursor is at (" + std::to_string(cursor_x) + ", " +
-                        std::to_string(cursor_y) + "), so the move would start off that screen");
-    }
-    auto target = clamp_to_screen(x, y, screen);
+    const ScreenTarget anchor = options.screen;
+    Target state = device.screen_target(anchor);
+    auto aim = aim_at(state, {x, y}, anchor);
+    auto [origin, window] = plan_box(state);
     SplitMix64 rng = SplitMix64::from_entropy();
-    auto nodes = trajectory_with({cursor_x, cursor_y}, target, screen, options.duration_ms,
-                                 options.profile, rng);
+    auto nodes = plan_nodes(state, origin, window, aim, options, rng);
     auto started = std::chrono::steady_clock::now();
     auto deadline = started + std::chrono::milliseconds((nodes.empty() ? 0 : nodes.back().at_ms) + 500);
     std::size_t index = 0;
@@ -2716,20 +3074,22 @@ inline void run_move_to(const Device& device, std::int32_t x, std::int32_t y,
         }
         std::pair<std::int32_t, std::int32_t> next;
         if (shared.take_target(next)) {
-            target = clamp_to_screen(next.first, next.second, screen);
-            Screen current_screen;
-            std::int32_t now_x = 0;
-            std::int32_t now_y = 0;
-            device.cursor_state(current_screen, now_x, now_y);
-            if (current_screen.width != screen.width || current_screen.height != screen.height) {
+            const Target moved = device.screen_target(anchor);
+            if (moved.rect.width() != state.rect.width() ||
+                moved.rect.height() != state.rect.height()) {
                 throw Error(ErrorCode::Unsupported,
                             "monitor layout changed during the movement (" +
-                                std::to_string(screen.width) + "x" + std::to_string(screen.height) +
-                                " -> " + std::to_string(current_screen.width) + "x" +
-                                std::to_string(current_screen.height) + ")");
+                                std::to_string(state.rect.width()) + "x" +
+                                std::to_string(state.rect.height()) + " -> " +
+                                std::to_string(moved.rect.width()) + "x" +
+                                std::to_string(moved.rect.height()) + ")");
             }
-            nodes = trajectory_with({now_x, now_y}, target, screen, options.duration_ms,
-                                    options.profile, rng);
+            state = moved;
+            aim = aim_at(state, next, anchor);
+            const auto box = plan_box(state);
+            origin = box.first;
+            window = box.second;
+            nodes = plan_nodes(state, origin, window, aim, options, rng);
             started = std::chrono::steady_clock::now();
             index = 0;
             deadline = started +
@@ -2747,12 +3107,10 @@ inline void run_move_to(const Device& device, std::int32_t x, std::int32_t y,
             std::this_thread::sleep_for(std::chrono::milliseconds(std::max<std::int64_t>(1, wait)));
             continue;
         }
-        Screen ignored_screen;
-        std::int32_t now_x = 0;
-        std::int32_t now_y = 0;
-        device.cursor_state(ignored_screen, now_x, now_y);
-        const std::int32_t dx = node.x - now_x;
-        const std::int32_t dy = node.y - now_y;
+        const std::pair<std::int32_t, std::int32_t> position =
+            local_point(device.screen_target(anchor).cursor, origin);
+        const std::int32_t dx = node.x - position.first;
+        const std::int32_t dy = node.y - position.second;
         if (dx == 0 && dy == 0) {
             if (index + 1 == nodes.size()) {
                 device.barrier();
@@ -2940,6 +3298,20 @@ public:
         run_path(device_, points, options, shared);
     }
 
+    // The same two absolute moves anchored to another monitor or to a window. The
+    // coordinates are virtual-desktop pixels either way; the target says which
+    // rectangle they are clamped into.
+    void move_to(std::int32_t x, std::int32_t y, ScreenTarget screen,
+                 std::uint32_t duration_ms = 0, const HumanProfile* profile = nullptr) const {
+        move_to(x, y, motion_options(duration_ms, profile).aiming_at(screen));
+    }
+
+    void move_path(const std::vector<std::pair<std::int32_t, std::int32_t>>& points,
+                   ScreenTarget screen, std::uint32_t duration_ms = 0,
+                   const HumanProfile* profile = nullptr) const {
+        move_path(points, motion_options(duration_ms, profile).aiming_at(screen));
+    }
+
     // The same three moves on a worker thread: cancel, retarget or wait on the
     // returned handle while the pointer is still travelling.
     Movement start_move_to(std::int32_t x, std::int32_t y,
@@ -2962,6 +3334,19 @@ public:
         return Movement::spawn(device_, [points, options](const Device& device, MovementCell& shared) {
             run_path(device, points, options, shared);
         });
+    }
+
+    // The background absolute moves, anchored to another monitor or window.
+    Movement start_move_to(std::int32_t x, std::int32_t y, ScreenTarget screen,
+                           std::uint32_t duration_ms = 0,
+                           const HumanProfile* profile = nullptr) const {
+        return start_move_to(x, y, motion_options(duration_ms, profile).aiming_at(screen));
+    }
+
+    Movement start_move_path(const std::vector<std::pair<std::int32_t, std::int32_t>>& points,
+                             ScreenTarget screen, std::uint32_t duration_ms = 0,
+                             const HumanProfile* profile = nullptr) const {
+        return start_move_path(points, motion_options(duration_ms, profile).aiming_at(screen));
     }
 
     void button(Button button, bool down) const {
@@ -3002,6 +3387,18 @@ public:
 
     // Presses the button, moves, then releases: the button is never left down,
     // even when the move fails (the Rust SDK does the same with a guard).
+    void drag(Button button, std::int32_t x, std::int32_t y, ScreenTarget screen,
+              std::uint32_t duration_ms = 0, const HumanProfile* profile = nullptr) const {
+        this->button(button, true);
+        try {
+            move_to(x, y, screen, duration_ms, profile);
+        } catch (...) {
+            this->release_all();
+            throw;
+        }
+        this->release_all();
+    }
+
     void drag(Button button, std::int32_t x, std::int32_t y, std::uint32_t duration_ms = 0,
               const HumanProfile* profile = nullptr) const {
         this->button(button, true);

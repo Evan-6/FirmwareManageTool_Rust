@@ -543,18 +543,50 @@ class MouseTests(unittest.TestCase):
             self.assertLessEqual(abs(x - 200), 1, f"cursor at {device.cursor}")
             self.assertLessEqual(abs(y - 300), 1, f"cursor at {device.cursor}")
 
-    def test_absolute_move_off_the_primary_monitor_is_unsupported(self):
+    def test_an_absolute_move_from_a_second_monitor_converges(self):
         _transport, device = mock_device()
+        left = gdb.Rect(0, 0, 960, 540)
+        right = gdb.Rect(960, 0, 1920, 540)
         with device:
-            device.set_screen_source(lambda: (gdb.Screen(1920, 1080), (-5, 10)))
+            # The pointer sits on the first screen while the target is on the
+            # second one: the move must not be refused for that.
+            device.set_screen_source(
+                lambda _screen: gdb.Target(right, device.cursor, (left, right))
+            )
+            device.mouse.move_by(-800, -400)
+            self.assertLess(device.cursor[0], 960, f"cursor at {device.cursor}")
+
+            device.mouse.move_to(
+                1400,
+                300,
+                duration_ms=120,
+                profile=gdb.Profile.linear(),
+                screen=gdb.ScreenTarget.monitor(1),
+            )
+            x, y = device.cursor
+            self.assertLessEqual(abs(x - 1400), 1, f"cursor at {device.cursor}")
+            self.assertLessEqual(abs(y - 300), 1, f"cursor at {device.cursor}")
+
+    def test_an_absolute_move_off_every_screen_is_refused(self):
+        _transport, device = mock_device()
+        only = gdb.Rect(0, 0, 1920, 540)
+        with device:
+            device.set_screen_source(
+                lambda _screen: gdb.Target(only, device.cursor, (only,))
+            )
             with self.assertRaises(gdb.GdbError) as caught:
-                device.mouse.move_to(200, 300, duration_ms=60, profile=gdb.Profile.linear())
+                device.mouse.move_to(
+                    2400,
+                    300,
+                    duration_ms=60,
+                    profile=gdb.Profile.linear(),
+                    screen=gdb.ScreenTarget.monitor(1),
+                )
             self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
             self.assertEqual(
                 caught.exception.message,
-                "absolute coordinates are relative to the primary monitor "
-                "(1920x1080 at 0,0) and the cursor is at (-5, 10), "
-                "so the move would start off that screen",
+                "absolute move to (2400, 300) targets monitor 1, but that point is on no "
+                "screen: the monitors cover (0, 0)-(1920, 540)",
             )
 
     def test_movement_can_be_cancelled(self):
@@ -574,6 +606,43 @@ class MouseTests(unittest.TestCase):
 
 
 class MotionTests(unittest.TestCase):
+    def test_target_resolution_picks_the_requested_rectangle(self):
+        class Desktop:
+            """Two monitors, the right-hand one primary; no pointer involved."""
+
+            def monitors(self):
+                return [gdb.Rect(0, 0, 1920, 1080), gdb.Rect(1920, 0, 3200, 1024)]
+
+            def primary(self):
+                return 1
+
+            def cursor(self):
+                return (2500, 500)
+
+            def window(self, hwnd):
+                if hwnd != 0x1234:
+                    raise gdb.GdbError(gdb.ErrorCode.UNSUPPORTED, "no such window")
+                return gdb.Rect(2000, 100, 3000, 700)
+
+        primary = gdb.resolve(Desktop(), gdb.ScreenTarget())
+        self.assertEqual(primary.rect.origin(), (1920, 0), "primary follows the flag")
+        self.assertEqual(primary.cursor, (2500, 500))
+
+        first = gdb.resolve(Desktop(), gdb.ScreenTarget.monitor(0))
+        self.assertEqual((first.rect.width, first.rect.height), (1920, 1080))
+
+        window = gdb.resolve(Desktop(), gdb.ScreenTarget.window(0x1234))
+        self.assertEqual(window.rect.origin(), (2000, 100))
+        self.assertTrue(window.reaches((2500, 500)))
+        self.assertFalse(window.reaches((4000, 500)))
+
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.resolve(Desktop(), gdb.ScreenTarget.monitor(2))
+        self.assertEqual(
+            caught.exception.message,
+            "monitor index 2 is out of range: the system reports 2 monitor(s)",
+        )
+
     def test_a_straight_profile_hits_the_target_and_stays_on_the_line(self):
         nodes = gdb.trajectory_with(
             (100, 100),

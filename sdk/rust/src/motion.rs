@@ -2,9 +2,9 @@
 //! relative moves are paced chunks. Cancelling or retargeting works mid-flight.
 
 use crate::device::Device;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::platform;
-use gdb_motion::{HumanProfile, Screen, SplitMix64, trajectory_with};
+use gdb_motion::{HumanProfile, Node, Screen as ScreenSize, SplitMix64, trajectory_with};
 use input_protocol::pointer::{RelativeTracker, Step};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +16,10 @@ pub struct MotionOptions {
     /// 0 = pick a natural duration from the distance.
     pub duration_ms: u32,
     pub profile: HumanProfile,
+    /// Which rectangle an absolute move is anchored to. Relative moves ignore
+    /// it; the default is the primary monitor, so nothing changes for callers
+    /// that do not ask for another screen.
+    pub screen: platform::Screen,
 }
 
 impl MotionOptions {
@@ -23,7 +27,14 @@ impl MotionOptions {
         Self {
             duration_ms,
             profile: HumanProfile::linear(),
+            screen: platform::Screen::Primary,
         }
+    }
+
+    /// Aims the absolute move at another monitor or at a window.
+    pub fn with_screen(mut self, screen: platform::Screen) -> Self {
+        self.screen = screen;
+        self
     }
 }
 
@@ -180,6 +191,44 @@ pub(crate) fn run_move_by(
     Ok(())
 }
 
+/// Where the OS is asked for the pointer and the monitor layout. The mock device
+/// answers from its simulated pointer, and tests replace it to start a move on a
+/// monitor the mock does not really have.
+pub(crate) type TargetProbe = fn(&Device, platform::Screen) -> Result<platform::Target>;
+
+fn probe(device: &Device, screen: platform::Screen) -> Result<platform::Target> {
+    if device.is_mock() {
+        return platform::Target::mock(screen, device.cursor());
+    }
+    platform::screen_and_cursor_for(screen)
+}
+
+/// The box the trajectory is planned in, in its own coordinates.
+///
+/// It is the target rectangle widened to reach the pointer, so a move that starts
+/// on another monitor still gets a straight path instead of starting on an edge.
+struct Plan {
+    screen: ScreenSize,
+    origin: (i32, i32),
+}
+
+impl Plan {
+    fn around(target: &platform::Target) -> Self {
+        let bounds = target.rect.union_point(target.cursor);
+        Self {
+            screen: ScreenSize {
+                width: bounds.width(),
+                height: bounds.height(),
+            },
+            origin: bounds.origin(),
+        }
+    }
+
+    fn local(&self, point: (i32, i32)) -> (i32, i32) {
+        (point.0 - self.origin.0, point.1 - self.origin.1)
+    }
+}
+
 pub(crate) fn run_move_to(
     device: &Device,
     x: i32,
@@ -187,30 +236,25 @@ pub(crate) fn run_move_to(
     options: &MotionOptions,
     shared: &MovementShared,
 ) -> Result<()> {
+    run_move_to_with(device, probe, x, y, options, shared)
+}
+
+/// The absolute move with the pointer source injected.
+pub(crate) fn run_move_to_with(
+    device: &Device,
+    probe: TargetProbe,
+    x: i32,
+    y: i32,
+    options: &MotionOptions,
+    shared: &MovementShared,
+) -> Result<()> {
     platform::enable_dpi_awareness();
-    let (screen, position) = cursor_state(device)?;
-    if position.0 < 0 || position.1 < 0 || position.0 >= screen.width || position.1 >= screen.height
-    {
-        return Err(Error::new(
-            crate::error::ErrorCode::Unsupported,
-            format!(
-                "absolute coordinates are relative to the primary monitor ({}x{} at 0,0) and \
-                 the cursor is at ({}, {}), so the move would start off that screen",
-                screen.width, screen.height, position.0, position.1
-            ),
-        ));
-    }
-    let mut target = clamp_target(x, y, screen);
+    let screen = options.screen;
+    let target = probe(device, screen)?;
+    let mut aim = aim_at(&target, (x, y), screen)?;
+    let mut plan = Plan::around(&target);
     let mut rng = SplitMix64::from_entropy();
-    let mut nodes = trajectory_with(
-        position,
-        target,
-        screen,
-        options.duration_ms,
-        &options.profile,
-        &mut rng,
-    )
-    .map_err(|error| Error::invalid(error.to_string()))?;
+    let mut nodes = plan_nodes(&plan, target.cursor, aim, options, &mut rng)?;
     let mut started = Instant::now();
     let mut index = 0usize;
     let mut tracker = RelativeTracker::default();
@@ -222,26 +266,24 @@ pub(crate) fn run_move_to(
             return Err(Error::cancelled());
         }
         if let Some(next) = shared.take_target() {
-            target = clamp_target(next.0, next.1, screen);
-            let (current_screen, current) = cursor_state(device)?;
-            if current_screen.width != screen.width || current_screen.height != screen.height {
+            let moved = probe(device, screen)?;
+            if moved.rect.width() != target.rect.width()
+                || moved.rect.height() != target.rect.height()
+            {
                 return Err(Error::new(
-                    crate::error::ErrorCode::Unsupported,
+                    ErrorCode::Unsupported,
                     format!(
                         "monitor layout changed during the movement ({}x{} -> {}x{})",
-                        screen.width, screen.height, current_screen.width, current_screen.height
+                        target.rect.width(),
+                        target.rect.height(),
+                        moved.rect.width(),
+                        moved.rect.height()
                     ),
                 ));
             }
-            nodes = trajectory_with(
-                current,
-                target,
-                screen,
-                options.duration_ms,
-                &options.profile,
-                &mut rng,
-            )
-            .map_err(|error| Error::invalid(error.to_string()))?;
+            aim = aim_at(&moved, next, screen)?;
+            plan = Plan::around(&moved);
+            nodes = plan_nodes(&plan, moved.cursor, aim, options, &mut rng)?;
             started = Instant::now();
             index = 0;
             tracker = RelativeTracker::default();
@@ -259,7 +301,7 @@ pub(crate) fn run_move_to(
             thread::sleep(wait);
             continue;
         }
-        let (_, position) = cursor_state(device)?;
+        let position = plan.local(probe(device, screen)?.cursor);
         match tracker.step(position, (node.x, node.y), Instant::now()) {
             Step::Wait => thread::sleep(Duration::from_millis(1)),
             Step::Move(dx, dy) => {
@@ -280,23 +322,138 @@ pub(crate) fn run_move_to(
     }
 }
 
-/// Real cursor on hardware, simulated pointer for the mock device.
-fn cursor_state(device: &Device) -> Result<(Screen, (i32, i32))> {
-    if device.is_mock() {
-        return Ok((
-            Screen {
-                width: 1920,
-                height: 1080,
-            },
-            device.cursor(),
+/// Clamps the caller's point into the target rectangle. A point no monitor covers
+/// is refused: the pointer cannot go there at all, and the message names the
+/// target and the desktop the host could see.
+fn aim_at(
+    target: &platform::Target,
+    point: (i32, i32),
+    screen: platform::Screen,
+) -> Result<(i32, i32)> {
+    if !target.reaches(point) {
+        return Err(Error::new(
+            ErrorCode::Unsupported,
+            platform::outside_message(screen, point, target.bounds()),
         ));
     }
-    platform::screen_and_cursor()
+    Ok(target.rect.clamp(point))
 }
 
-fn clamp_target(x: i32, y: i32, screen: Screen) -> (i32, i32) {
-    (
-        x.clamp(0, screen.width.saturating_sub(1)),
-        y.clamp(0, screen.height.saturating_sub(1)),
+fn plan_nodes(
+    plan: &Plan,
+    cursor: (i32, i32),
+    aim: (i32, i32),
+    options: &MotionOptions,
+    rng: &mut SplitMix64,
+) -> Result<Vec<Node>> {
+    trajectory_with(
+        plan.local(cursor),
+        plan.local(aim),
+        plan.screen,
+        options.duration_ms,
+        &options.profile,
+        rng,
     )
+    .map_err(|error| Error::invalid(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::DeviceOptions;
+    use crate::platform::Rect;
+
+    /// Two 960x540 monitors side by side. The pointer is the mock's own, so the
+    /// loop really converges; only the rectangles are pretend.
+    fn two_screens(device: &Device, _screen: platform::Screen) -> Result<platform::Target> {
+        let left = Rect {
+            left: 0,
+            top: 0,
+            right: 960,
+            bottom: 540,
+        };
+        let right = Rect {
+            left: 960,
+            top: 0,
+            right: 1920,
+            bottom: 540,
+        };
+        Ok(platform::Target::new(
+            right,
+            device.cursor(),
+            vec![left, right],
+        ))
+    }
+
+    /// One 1920x540 screen: the right half of the pointer's world does not exist.
+    fn single_screen(device: &Device, _screen: platform::Screen) -> Result<platform::Target> {
+        let only = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 540,
+        };
+        Ok(platform::Target::new(only, device.cursor(), vec![only]))
+    }
+
+    fn mock() -> Device {
+        crate::manager::Manager::open_mock_with_handle(DeviceOptions::default())
+            .expect("mock device")
+            .0
+    }
+
+    #[test]
+    fn absolute_move_from_another_monitor_converges() {
+        let device = mock();
+        // The mock pointer starts in the middle of its 1920x1080 space, which is
+        // on the left screen here.
+        device
+            .mouse()
+            .move_by(-800, -400, MotionOptions::linear(0))
+            .expect("move by");
+        let start = device.cursor();
+        assert!(
+            start.0 < 960 && start.1 < 540,
+            "the pointer should start on the left screen, at {start:?}"
+        );
+
+        let options = MotionOptions::linear(120).with_screen(platform::Screen::Monitor(1));
+        let shared = MovementShared::default();
+        run_move_to_with(&device, two_screens, 1400, 300, &options, &shared)
+            .expect("cross-monitor");
+
+        let landed = device.cursor();
+        assert!(
+            (landed.0 - 1400).abs() <= 1 && (landed.1 - 300).abs() <= 1,
+            "the pointer should land on (1400, 300), not {landed:?}"
+        );
+    }
+
+    #[test]
+    fn a_point_on_no_screen_is_refused_with_the_target_and_the_union() {
+        let device = mock();
+        let options = MotionOptions::linear(80).with_screen(platform::Screen::Monitor(1));
+        let shared = MovementShared::default();
+        let failure = run_move_to_with(&device, single_screen, 2400, 300, &options, &shared)
+            .expect_err("a point beside every screen");
+        assert_eq!(failure.code(), ErrorCode::Unsupported);
+        assert_eq!(
+            failure.message,
+            "absolute move to (2400, 300) targets monitor 1, but that point is on no screen: \
+             the monitors cover (0, 0)-(1920, 540)"
+        );
+    }
+
+    #[test]
+    fn the_primary_target_still_lands_on_the_mock_screen() {
+        let device = mock();
+        let shared = MovementShared::default();
+        let options = MotionOptions::linear(80);
+        run_move_to(&device, 200, 150, &options, &shared).expect("primary move");
+        let landed = device.cursor();
+        assert!(
+            (landed.0 - 200).abs() <= 1 && (landed.1 - 150).abs() <= 1,
+            "the default target is still the primary monitor, not {landed:?}"
+        );
+    }
 }

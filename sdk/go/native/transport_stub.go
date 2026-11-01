@@ -20,6 +20,11 @@ func Open(selector string, opts Options) (*Device, error) {
 	return nil, errorf(Unsupported, "hardware access needs Windows HID APIs")
 }
 
+// screenTargetFor reports that absolute coordinates need Windows.
+func screenTargetFor(screen ScreenTarget) (Target, error) {
+	return Target{}, errorf(Unsupported, "absolute mouse coordinates need Windows cursor APIs")
+}
+
 // screenAndCursor reports that absolute coordinates need Windows.
 func screenAndCursor() (Screen, [2]int32, error) {
 	return Screen{}, [2]int32{}, errorf(Unsupported, "absolute mouse coordinates need Windows cursor APIs")

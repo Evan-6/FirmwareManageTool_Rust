@@ -184,6 +184,8 @@ unsafe fn motion_options(duration_ms: u32, profile: *const GdbProfile) -> Motion
     MotionOptions {
         duration_ms,
         profile,
+        // The C ABI has no target yet: absolute moves stay on the primary monitor.
+        ..MotionOptions::default()
     }
 }
 

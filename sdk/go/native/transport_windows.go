@@ -32,10 +32,11 @@ var (
 	procDeviceIDListSize = cfgmgr32DLL.NewProc("CM_Get_Device_ID_List_SizeW")
 	procDeviceIDList     = cfgmgr32DLL.NewProc("CM_Get_Device_ID_ListW")
 
-	procPhysicalCursorPos = user32DLL.NewProc("GetPhysicalCursorPos")
-	procMonitorInfo       = user32DLL.NewProc("GetMonitorInfoW")
-	procMonitorFromPoint  = user32DLL.NewProc("MonitorFromPoint")
-	procDPIAwareness      = user32DLL.NewProc("SetProcessDpiAwarenessContext")
+	procPhysicalCursorPos   = user32DLL.NewProc("GetPhysicalCursorPos")
+	procMonitorInfo         = user32DLL.NewProc("GetMonitorInfoW")
+	procEnumDisplayMonitors = user32DLL.NewProc("EnumDisplayMonitors")
+	procGetWindowRect       = user32DLL.NewProc("GetWindowRect")
+	procDPIAwareness        = user32DLL.NewProc("SetProcessDpiAwarenessContext")
 )
 
 // hidInterfaceGUID is the device interface class every HID collection exposes.
@@ -48,9 +49,9 @@ const (
 	cmGetIDListFilterEnumerator uint32 = 0x00000002
 )
 
-// MONITOR_DEFAULTTOPRIMARY makes MonitorFromPoint answer the primary monitor.
+// MONITORINFOF_PRIMARY marks the primary monitor in GetMonitorInfoW's dwFlags.
 const (
-	monitorDefaultToPrimary uint32 = 2
+	monitorInfoPrimary uint32 = 1
 	// dpiAwarenessPerMonitorV2 is DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 	// which is the handle value -4.
 	dpiAwarenessPerMonitorV2 = ^uintptr(3)
@@ -448,32 +449,125 @@ func (h *hidTransport) stringProperty(proc *syscall.LazyProc) string {
 	return syscall.UTF16ToString(buffer)
 }
 
-// screenAndCursor reports the primary monitor rectangle and the pointer
-// position relative to it, in physical pixels.
-func screenAndCursor() (Screen, [2]int32, error) {
+// screenTargetFor resolves one absolute move against the live desktop: which
+// rectangle it is anchored to, where the pointer is and every monitor.
+func screenTargetFor(screen ScreenTarget) (Target, error) {
 	enableDPIAwareness()
+	return Resolve(systemDesktop{}, screen)
+}
+
+// screenAndCursor reports the primary monitor rectangle and the pointer position
+// relative to it, in physical pixels.
+func screenAndCursor() (Screen, [2]int32, error) {
+	target, err := screenTargetFor(PrimaryScreen())
+	if err != nil {
+		return Screen{}, [2]int32{}, err
+	}
+	return Screen{Width: target.Rect.Width(), Height: target.Rect.Height()}, [2]int32{
+		target.Cursor[0] - target.Rect.Left,
+		target.Cursor[1] - target.Rect.Top,
+	}, nil
+}
+
+// systemDesktop is the live Windows desktop.
+type systemDesktop struct{}
+
+// Monitors reports every monitor rectangle, in EnumDisplayMonitors order.
+func (systemDesktop) Monitors() ([]Rect, error) {
+	found, err := enumerateMonitors()
+	if err != nil {
+		return nil, err
+	}
+	rects := make([]Rect, 0, len(found))
+	for _, entry := range found {
+		rects = append(rects, entry.rect)
+	}
+	return rects, nil
+}
+
+// Primary is the index of the monitor the system flags as primary. That flag is
+// the same rectangle MonitorFromPoint((0,0), MONITOR_DEFAULTTOPRIMARY) answers,
+// and it does not assume the primary monitor is index 0.
+func (systemDesktop) Primary() (int, error) {
+	found, err := enumerateMonitors()
+	if err != nil {
+		return 0, err
+	}
+	for index, entry := range found {
+		if entry.flags&monitorInfoPrimary != 0 {
+			return index, nil
+		}
+	}
+	return 0, nil
+}
+
+// Cursor is the pointer in virtual-desktop pixels.
+func (systemDesktop) Cursor() ([2]int32, error) {
 	var cursor point
 	ok, _, err := procPhysicalCursorPos.Call(uintptr(unsafe.Pointer(&cursor)))
 	if ok == 0 {
-		return Screen{}, [2]int32{}, errorf(Unsupported, "GetPhysicalCursorPos failed: %v", err)
+		return [2]int32{}, errorf(Unsupported, "GetPhysicalCursorPos failed: %v", err)
 	}
-	// MonitorFromPoint takes a POINT by value; (0,0) with the primary flag is
-	// the primary monitor whatever the multi-monitor layout is.
-	monitor, _, _ := procMonitorFromPoint.Call(0, uintptr(monitorDefaultToPrimary))
-	info := monitorInfo{}
-	info.Size = uint32(unsafe.Sizeof(info))
-	ok, _, err = procMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
+	return [2]int32{cursor.X, cursor.Y}, nil
+}
+
+// Window is a window's bounding rectangle in virtual-desktop pixels.
+func (systemDesktop) Window(hwnd int) (Rect, error) {
+	var bounds rect
+	ok, _, err := procGetWindowRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&bounds)))
 	if ok == 0 {
-		return Screen{}, [2]int32{}, errorf(Unsupported, "GetMonitorInfoW failed: %v", err)
+		return Rect{}, errorf(Unsupported, "GetWindowRect failed for window 0x%x: %v", hwnd, err)
 	}
-	screen := Screen{
-		Width:  info.Monitor.Right - info.Monitor.Left,
-		Height: info.Monitor.Bottom - info.Monitor.Top,
+	return Rect{Left: bounds.Left, Top: bounds.Top, Right: bounds.Right, Bottom: bounds.Bottom}, nil
+}
+
+// monitorEntry is one monitor rectangle plus its flags.
+type monitorEntry struct {
+	rect  Rect
+	flags uint32
+}
+
+var (
+	// The enumeration callback writes here: syscall.NewCallback cannot capture a
+	// closure per call without leaking a stub every time a move reads the
+	// pointer, so the buffer is package level and the mutex serialises readers.
+	monitorMu     sync.Mutex
+	monitorBuffer []monitorEntry
+
+	// monitorEnumProc collects one monitor for EnumDisplayMonitors.
+	monitorEnumProc = syscall.NewCallback(func(monitor, _hdc, _clip, _data uintptr) uintptr {
+		info := monitorInfo{}
+		info.Size = uint32(unsafe.Sizeof(info))
+		ok, _, _ := procMonitorInfo.Call(monitor, uintptr(unsafe.Pointer(&info)))
+		if ok != 0 {
+			monitorBuffer = append(monitorBuffer, monitorEntry{
+				rect: Rect{
+					Left:   info.Monitor.Left,
+					Top:    info.Monitor.Top,
+					Right:  info.Monitor.Right,
+					Bottom: info.Monitor.Bottom,
+				},
+				flags: info.Flags,
+			})
+		}
+		return 1
+	})
+)
+
+// enumerateMonitors is every monitor rectangle and its flags, in
+// EnumDisplayMonitors order.
+func enumerateMonitors() ([]monitorEntry, error) {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	monitorBuffer = monitorBuffer[:0]
+	ok, _, err := procEnumDisplayMonitors.Call(0, 0, monitorEnumProc, 0)
+	if ok == 0 {
+		return nil, errorf(Unsupported, "EnumDisplayMonitors failed: %v", err)
 	}
-	return screen, [2]int32{
-		cursor.X - info.Monitor.Left,
-		cursor.Y - info.Monitor.Top,
-	}, nil
+	if len(monitorBuffer) == 0 {
+		return nil, errorf(Unsupported, "the system reports no monitors")
+	}
+	return append([]monitorEntry(nil), monitorBuffer...), nil
 }
 
 // enableDPIAwareness makes the process per-monitor DPI aware so the cursor and

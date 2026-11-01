@@ -506,10 +506,17 @@ void test_move_to_converges() {
                                     std::to_string(y) + ")");
     check(fake->count_opcode(BARRIER) > 0, "move_to flushes with BARRIER");
 
-    // Off-screen targets clamp to the primary monitor.
-    device.mouse().move_to(5000, -20, 80, &linear);
-    device.cursor_state(screen, x, y);
-    check(x == 1919 && y == 0, "targets clamp to the screen");
+    // A point no monitor covers is refused.
+    bool refused_clamp = false;
+    try {
+        device.mouse().move_to(5000, -20, 80, &linear);
+    } catch (const Error& error) {
+        refused_clamp = error.code() == ErrorCode::Unsupported &&
+                        std::string(error.what()) ==
+                            "absolute move to (5000, -20) targets the primary monitor, but "
+                            "that point is on no screen: the monitors cover (0, 0)-(1920, 1080)";
+    }
+    check(refused_clamp, "a point off every screen names the target and the union");
 
     // move_by is relative and split at +/-1024.
     fake->raw_writes();
@@ -590,16 +597,66 @@ void test_reconnect_and_raw_command() {
     device.close();
 }
 
-void test_unsupported_absolute_move_off_screen() {
-    // The mock cursor is always on screen, so this only checks the platform
-    // helper's contract rather than the error path.
-    Screen screen;
-    std::int32_t x = 0;
-    std::int32_t y = 0;
-    const bool available = gdb::native::screen_and_cursor(screen, x, y);
-    if (!available) {
-        std::printf("note  cursor API unavailable on this platform\n");
+void test_target_resolution_and_cross_monitor_moves() {
+    // Resolution against a fake desktop: two monitors, the right-hand one
+    // primary, a window on it, and a pointer that never moves.
+    Desktop desktop;
+    desktop.monitors = [] {
+        return std::vector<Rect>{Rect{0, 0, 1920, 1080}, Rect{1920, 0, 3200, 1024}};
+    };
+    desktop.primary = [] { return std::size_t{1}; };
+    desktop.cursor = [] { return std::make_pair<std::int32_t, std::int32_t>(2500, 500); };
+    desktop.window = [](std::intptr_t hwnd) {
+        if (hwnd != 0x1234) {
+            throw Error(ErrorCode::Unsupported, "no such window");
+        }
+        return Rect{2000, 100, 3000, 700};
+    };
+
+    const Target primary = resolve(desktop, ScreenTarget{});
+    check(primary.rect.origin() == std::make_pair(1920, 0), "the primary target follows the flag");
+    check(primary.cursor == std::make_pair(2500, 500), "the cursor stays in desktop space");
+    const Target first = resolve(desktop, ScreenTarget::monitor(0));
+    check(first.rect.width() == 1920 && first.rect.height() == 1080,
+          "monitor 0 is the left-hand screen");
+    const Target window = resolve(desktop, ScreenTarget::window(0x1234));
+    check(window.rect.origin() == std::make_pair(2000, 100),
+          "a window target uses the window rectangle");
+    check(window.reaches({2500, 500}) && !window.reaches({4000, 500}),
+          "reaches answers per monitor");
+    bool rejected = false;
+    try {
+        resolve(desktop, ScreenTarget::monitor(2));
+    } catch (const Error& error) {
+        rejected = error.code() == ErrorCode::Unsupported &&
+                   std::string(error.what()) ==
+                       "monitor index 2 is out of range: the system reports 2 monitor(s)";
     }
+    check(rejected, "a monitor index past the last one is refused");
+
+    // A move that starts on another monitor converges: the pointer is the fake
+    // device's own, only the rectangles are pretend.
+    auto fake = std::make_shared<FakeTransport>();
+    Device device = Device::open_fake(fake, 500, false, false);
+    const Rect left{0, 0, 960, 540};
+    const Rect right{960, 0, 1920, 540};
+    device.set_screen_source([&device, left, right](const ScreenTarget&) {
+        return Target{right, device.pointer(), {left, right}};
+    });
+
+    device.mouse().move_by(-800, -400, 0);
+    const auto start = device.pointer();
+    check(start.first < 960 && start.second < 540,
+          "the pointer starts on the left-hand screen (at " + std::to_string(start.first) +
+              "," + std::to_string(start.second) + ")");
+
+    const HumanProfile linear = HumanProfile::linear();
+    device.mouse().move_to(1400, 300, ScreenTarget::monitor(1), 120, &linear);
+    const auto landed = device.pointer();
+    check(std::abs(landed.first - 1400) <= 2 && std::abs(landed.second - 300) <= 2,
+          "a cross-monitor move lands on the target (at " + std::to_string(landed.first) +
+              "," + std::to_string(landed.second) + ")");
+    device.close();
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1229,7 @@ int main() {
     test_move_to_converges();
     test_scheduler_order();
     test_reconnect_and_raw_command();
-    test_unsupported_absolute_move_off_screen();
+    test_target_resolution_and_cross_monitor_moves();
     test_log_sink();
     test_background_movement();
     test_uf2_pack_matches_reference();

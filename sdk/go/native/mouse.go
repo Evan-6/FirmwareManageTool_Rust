@@ -114,21 +114,49 @@ func (m *Mouse) MoveBy(dx, dy int32, durationMs uint32, profile *Profile) error 
 	return nil
 }
 
+// targetProbe is the platform probe for one absolute move. Tests replace it to
+// put the pointer on a monitor the mock device does not really have; nil means
+// the mock desktop or the real one.
+var targetProbe func(device *Device, screen ScreenTarget) (Target, error)
+
+// targetState is the injected probe, the mock's simulated desktop or the real
+// one.
+func (d *Device) targetState(screen ScreenTarget) (Target, error) {
+	if targetProbe != nil {
+		return targetProbe(d, screen)
+	}
+	if d.mock {
+		return MockTarget(screen, d.cursorState())
+	}
+	return screenTargetFor(screen)
+}
+
 // MoveTo moves the real pointer to absolute primary-monitor coordinates.
 func (m *Mouse) MoveTo(x, y int32, durationMs uint32, profile *Profile) error {
+	return m.MoveToOn(PrimaryScreen(), x, y, durationMs, profile)
+}
+
+// MoveToOn moves the pointer to absolute coordinates anchored to target, which
+// may be another monitor or a window.
+func (m *Mouse) MoveToOn(screen ScreenTarget, x, y int32, durationMs uint32, profile *Profile) error {
 	shared := &movementShared{}
-	return m.runMoveTo(x, y, durationMs, profileOr(profile), shared)
+	return m.runMoveTo(x, y, durationMs, profileOr(profile), shared, screen)
 }
 
 // MovePath visits each point in order; every segment uses the same profile.
 func (m *Mouse) MovePath(points [][2]int32, durationMs uint32, profile *Profile) error {
+	return m.MovePathOn(PrimaryScreen(), points, durationMs, profile)
+}
+
+// MovePathOn is MovePath anchored to target instead of the primary monitor.
+func (m *Mouse) MovePathOn(screen ScreenTarget, points [][2]int32, durationMs uint32, profile *Profile) error {
 	if len(points) == 0 {
 		return errorf(Invalid, "a path needs at least one point")
 	}
 	chosen := profileOr(profile)
 	shared := &movementShared{}
 	for _, point := range points {
-		if err := m.runMoveTo(point[0], point[1], durationMs, chosen, shared); err != nil {
+		if err := m.runMoveTo(point[0], point[1], durationMs, chosen, shared, screen); err != nil {
 			return err
 		}
 		if shared.cancelled() {
@@ -140,10 +168,15 @@ func (m *Mouse) MovePath(points [][2]int32, durationMs uint32, profile *Profile)
 
 // Drag presses, moves and releases.
 func (m *Mouse) Drag(button Button, x, y int32, durationMs uint32, profile *Profile) error {
+	return m.DragOn(PrimaryScreen(), button, x, y, durationMs, profile)
+}
+
+// DragOn is Drag anchored to target instead of the primary monitor.
+func (m *Mouse) DragOn(screen ScreenTarget, button Button, x, y int32, durationMs uint32, profile *Profile) error {
 	if err := m.Button(button, true); err != nil {
 		return err
 	}
-	result := m.MoveTo(x, y, durationMs, profile)
+	result := m.MoveToOn(screen, x, y, durationMs, profile)
 	// Release even when the move failed, the way the C ABI's guard does.
 	if err := m.ReleaseAll(); err != nil && result == nil {
 		result = err
@@ -198,9 +231,14 @@ func (s *movementShared) takeTarget() *[2]int32 {
 // StartMoveTo starts an absolute move on a goroutine so the caller can retarget
 // or cancel it while it runs.
 func (m *Mouse) StartMoveTo(x, y int32, durationMs uint32, profile *Profile) *Movement {
+	return m.StartMoveToOn(PrimaryScreen(), x, y, durationMs, profile)
+}
+
+// StartMoveToOn is StartMoveTo anchored to target instead of the primary monitor.
+func (m *Mouse) StartMoveToOn(screen ScreenTarget, x, y int32, durationMs uint32, profile *Profile) *Movement {
 	chosen := profileOr(profile)
 	return m.spawn(func(shared *movementShared) error {
-		return m.runMoveTo(x, y, durationMs, chosen, shared)
+		return m.runMoveTo(x, y, durationMs, chosen, shared, screen)
 	})
 }
 
@@ -216,13 +254,19 @@ func (m *Mouse) StartMoveBy(dx, dy int32, durationMs uint32, profile *Profile) *
 
 // StartMovePath visits each point on a goroutine.
 func (m *Mouse) StartMovePath(points [][2]int32, durationMs uint32, profile *Profile) *Movement {
+	return m.StartMovePathOn(PrimaryScreen(), points, durationMs, profile)
+}
+
+// StartMovePathOn is StartMovePath anchored to target instead of the primary
+// monitor.
+func (m *Mouse) StartMovePathOn(screen ScreenTarget, points [][2]int32, durationMs uint32, profile *Profile) *Movement {
 	chosen := profileOr(profile)
 	return m.spawn(func(shared *movementShared) error {
 		for _, point := range points {
 			if shared.cancelled() {
 				return codeError(Cancelled)
 			}
-			if err := m.runMoveTo(point[0], point[1], durationMs, chosen, shared); err != nil {
+			if err := m.runMoveTo(point[0], point[1], durationMs, chosen, shared, screen); err != nil {
 				return err
 			}
 		}
@@ -308,19 +352,18 @@ func (m *Mouse) moveByShared(dx, dy int32, durationMs uint32, shared *movementSh
 
 // runMoveTo is the absolute move: read the pointer, plan a path, then close the
 // loop with relative reports until the host pointer reaches the node.
-func (m *Mouse) runMoveTo(x, y int32, durationMs uint32, profile Profile, shared *movementShared) error {
-	screen, position, err := m.device.cursorPosition()
+func (m *Mouse) runMoveTo(x, y int32, durationMs uint32, profile Profile, shared *movementShared, screen ScreenTarget) error {
+	state, err := m.device.targetState(screen)
 	if err != nil {
 		return err
 	}
-	if position[0] < 0 || position[1] < 0 || position[0] >= screen.Width || position[1] >= screen.Height {
-		return errorf(Unsupported,
-			"absolute coordinates are relative to the primary monitor (%dx%d at 0,0) and the cursor is at (%d, %d), so the move would start off that screen",
-			screen.Width, screen.Height, position[0], position[1])
+	aim, err := aimAt(state, [2]int32{x, y}, screen)
+	if err != nil {
+		return err
 	}
-	target := clampTarget(x, y, screen)
+	origin, window := planBox(state)
 	rng := NewEntropySplitMix64()
-	nodes, err := TrajectoryWith(position, target, screen, durationMs, profile, rng)
+	nodes, err := planNodes(state, origin, window, aim, durationMs, profile, rng)
 	if err != nil {
 		return err
 	}
@@ -333,16 +376,21 @@ func (m *Mouse) runMoveTo(x, y int32, durationMs uint32, profile Profile, shared
 			return codeError(Cancelled)
 		}
 		if next := shared.takeTarget(); next != nil {
-			target = clampTarget(next[0], next[1], screen)
-			currentScreen, current, err := m.device.cursorPosition()
+			moved, err := m.device.targetState(screen)
 			if err != nil {
 				return err
 			}
-			if currentScreen.Width != screen.Width || currentScreen.Height != screen.Height {
+			if moved.Rect.Width() != state.Rect.Width() || moved.Rect.Height() != state.Rect.Height() {
 				return errorf(Unsupported, "monitor layout changed during the movement (%dx%d -> %dx%d)",
-					screen.Width, screen.Height, currentScreen.Width, currentScreen.Height)
+					state.Rect.Width(), state.Rect.Height(), moved.Rect.Width(), moved.Rect.Height())
 			}
-			nodes, err = TrajectoryWith(current, target, screen, durationMs, profile, rng)
+			state = moved
+			aim, err = aimAt(state, *next, screen)
+			if err != nil {
+				return err
+			}
+			origin, window = planBox(state)
+			nodes, err = planNodes(state, origin, window, aim, durationMs, profile, rng)
 			if err != nil {
 				return err
 			}
@@ -365,11 +413,12 @@ func (m *Mouse) runMoveTo(x, y int32, durationMs uint32, profile Profile, shared
 			time.Sleep(wait)
 			continue
 		}
-		_, current, err := m.device.cursorPosition()
+		current, err := m.device.targetState(screen)
 		if err != nil {
 			return err
 		}
-		switch step := tracker.Step(current, [2]int32{node.X, node.Y}, time.Now()); step.Kind {
+		position := localPoint(current.Cursor, origin)
+		switch step := tracker.Step(position, [2]int32{node.X, node.Y}, time.Now()); step.Kind {
 		case StepWait:
 			time.Sleep(time.Millisecond)
 		case StepMove:
@@ -398,9 +447,29 @@ func nodeSpan(nodes []Node) time.Duration {
 	return time.Duration(nodes[len(nodes)-1].AtMs) * time.Millisecond
 }
 
-func clampTarget(x, y int32, screen Screen) [2]int32 {
-	return [2]int32{
-		clampInt32(x, 0, screen.Width-1),
-		clampInt32(y, 0, screen.Height-1),
+// localPoint translates a virtual-desktop point into the plan box.
+func localPoint(point, origin [2]int32) [2]int32 {
+	return [2]int32{point[0] - origin[0], point[1] - origin[1]}
+}
+
+// planBox is the rectangle the trajectory is planned in: the anchored rectangle
+// widened to reach the pointer, so a move that starts on another monitor still
+// has a straight path instead of starting on an edge.
+func planBox(state Target) ([2]int32, Screen) {
+	bounds := state.Rect.UnionPoint(state.Cursor)
+	return bounds.Origin(), Screen{Width: bounds.Width(), Height: bounds.Height()}
+}
+
+// aimAt clamps the caller's point into the anchored rectangle. A point no
+// monitor covers is refused: the pointer cannot go there at all, and the message
+// names the target and the desktop the host could see.
+func aimAt(state Target, point [2]int32, screen ScreenTarget) ([2]int32, error) {
+	if !state.Reaches(point) {
+		return [2]int32{}, errorf(Unsupported, "%s", OutsideMessage(screen, point, state.Bounds()))
 	}
+	return state.Rect.Clamp(point), nil
+}
+
+func planNodes(state Target, origin [2]int32, window Screen, aim [2]int32, durationMs uint32, profile Profile, rng *SplitMix64) ([]Node, error) {
+	return TrajectoryWith(localPoint(state.Cursor, origin), localPoint(aim, origin), window, durationMs, profile, rng)
 }

@@ -1,6 +1,7 @@
 package gdbnative
 
 import (
+	"fmt"
 	"math"
 	"time"
 )
@@ -14,6 +15,229 @@ type Screen struct {
 
 // DefaultScreen is the layout the mock device pretends to have.
 func DefaultScreen() Screen { return Screen{Width: 1920, Height: 1080} }
+
+// Rect is a physical-pixel rectangle in virtual-desktop coordinates. Monitors
+// are half-open on the right and bottom edges: the pixel at Right belongs to
+// whatever sits next to it.
+type Rect struct {
+	Left   int32
+	Top    int32
+	Right  int32
+	Bottom int32
+}
+
+// Width is the rectangle width in pixels.
+func (r Rect) Width() int32 { return r.Right - r.Left }
+
+// Height is the rectangle height in pixels.
+func (r Rect) Height() int32 { return r.Bottom - r.Top }
+
+// Origin is the top-left corner.
+func (r Rect) Origin() [2]int32 { return [2]int32{r.Left, r.Top} }
+
+// Contains reports whether the point is inside the rectangle.
+func (r Rect) Contains(point [2]int32) bool {
+	return point[0] >= r.Left && point[0] < r.Right && point[1] >= r.Top && point[1] < r.Bottom
+}
+
+// Union is the smallest rectangle covering both.
+func (r Rect) Union(other Rect) Rect {
+	return Rect{
+		Left:   minInt32(r.Left, other.Left),
+		Top:    minInt32(r.Top, other.Top),
+		Right:  maxInt32(r.Right, other.Right),
+		Bottom: maxInt32(r.Bottom, other.Bottom),
+	}
+}
+
+// UnionPoint is the smallest rectangle covering this one and one more point.
+func (r Rect) UnionPoint(point [2]int32) Rect {
+	return Rect{
+		Left:   minInt32(r.Left, point[0]),
+		Top:    minInt32(r.Top, point[1]),
+		Right:  maxInt32(r.Right, point[0]+1),
+		Bottom: maxInt32(r.Bottom, point[1]+1),
+	}
+}
+
+// Clamp is the nearest point inside the rectangle.
+func (r Rect) Clamp(point [2]int32) [2]int32 {
+	return [2]int32{
+		clampInt32(point[0], r.Left, maxInt32(r.Right-1, r.Left)),
+		clampInt32(point[1], r.Top, maxInt32(r.Bottom-1, r.Top)),
+	}
+}
+
+// ScreenKind names the three shapes a ScreenTarget can take.
+type ScreenKind int32
+
+const (
+	// ScreenPrimary is the primary monitor: the zero value and the default.
+	ScreenPrimary ScreenKind = iota
+	// ScreenMonitor is the index-th display in EnumDisplayMonitors order.
+	ScreenMonitor
+	// ScreenWindow is a window's bounding rectangle.
+	ScreenWindow
+)
+
+// ScreenTarget is which rectangle an absolute move is anchored to.
+//
+// The zero value is the primary monitor, so a caller that does not ask for
+// another screen keeps the coordinates it always had.
+type ScreenTarget struct {
+	Kind  ScreenKind
+	Value int
+}
+
+// PrimaryScreen is the primary monitor.
+func PrimaryScreen() ScreenTarget { return ScreenTarget{} }
+
+// MonitorScreen is the index-th display in EnumDisplayMonitors order. That order
+// is the order the system enumerates the displays, so it is not the display
+// number Windows settings shows and index 0 need not be the primary monitor.
+func MonitorScreen(index int) ScreenTarget {
+	return ScreenTarget{Kind: ScreenMonitor, Value: index}
+}
+
+// WindowScreen is a window's bounding rectangle, hwnd being the caller's handle.
+func WindowScreen(hwnd int) ScreenTarget {
+	return ScreenTarget{Kind: ScreenWindow, Value: hwnd}
+}
+
+// Describe names the target the way error messages do.
+func (s ScreenTarget) Describe() string {
+	switch s.Kind {
+	case ScreenMonitor:
+		return fmt.Sprintf("monitor %d", s.Value)
+	case ScreenWindow:
+		return fmt.Sprintf("window 0x%x", s.Value)
+	default:
+		return "the primary monitor"
+	}
+}
+
+// String is Describe.
+func (s ScreenTarget) String() string { return s.Describe() }
+
+// Target is the pointer, the anchored rectangle and every monitor, all in
+// virtual-desktop physical pixels.
+type Target struct {
+	// Rect is the requested rectangle: the move is clamped into it.
+	Rect Rect
+	// Cursor is where the pointer really is, which may be on another monitor.
+	Cursor [2]int32
+	// Screens is every monitor, so "is this point on a screen at all" has an
+	// answer.
+	Screens []Rect
+}
+
+// Bounds is the union of every monitor: the desktop as one rectangle.
+func (t Target) Bounds() Rect {
+	if len(t.Screens) == 0 {
+		return t.Rect
+	}
+	bounds := t.Screens[0]
+	for _, rect := range t.Screens[1:] {
+		bounds = bounds.Union(rect)
+	}
+	return bounds
+}
+
+// Reaches reports whether some monitor covers the point.
+func (t Target) Reaches(point [2]int32) bool {
+	for _, rect := range t.Screens {
+		if rect.Contains(point) {
+			return true
+		}
+	}
+	return false
+}
+
+// Desktop is the platform queries target resolution needs. Tests implement it
+// instead of moving a real pointer; the Windows one is systemDesktop.
+type Desktop interface {
+	// Monitors is every monitor rectangle, in enumeration order.
+	Monitors() ([]Rect, error)
+	// Primary is the index into Monitors of the primary monitor.
+	Primary() (int, error)
+	// Cursor is the pointer, in virtual-desktop pixels.
+	Cursor() ([2]int32, error)
+	// Window is a window's bounding rectangle, in virtual-desktop pixels.
+	Window(hwnd int) (Rect, error)
+}
+
+// Resolve resolves screen against a desktop without touching the pointer.
+func Resolve(desktop Desktop, screen ScreenTarget) (Target, error) {
+	screens, err := desktop.Monitors()
+	if err != nil {
+		return Target{}, err
+	}
+	if len(screens) == 0 {
+		return Target{}, errorf(Unsupported, "the system reports no monitors")
+	}
+	var rect Rect
+	switch screen.Kind {
+	case ScreenMonitor:
+		if screen.Value < 0 || screen.Value >= len(screens) {
+			return Target{}, errorf(Unsupported,
+				"monitor index %d is out of range: the system reports %d monitor(s)",
+				screen.Value, len(screens))
+		}
+		rect = screens[screen.Value]
+	case ScreenWindow:
+		rect, err = desktop.Window(screen.Value)
+		if err != nil {
+			return Target{}, err
+		}
+		if rect.Width() <= 0 || rect.Height() <= 0 {
+			return Target{}, errorf(Unsupported,
+				"window 0x%x has an empty rectangle (%dx%d)",
+				screen.Value, rect.Width(), rect.Height())
+		}
+	default:
+		index, err := desktop.Primary()
+		if err != nil {
+			return Target{}, err
+		}
+		if index < 0 || index >= len(screens) {
+			return Target{}, errorf(Unsupported,
+				"the primary monitor is index %d, but the system reports %d monitor(s)",
+				index, len(screens))
+		}
+		rect = screens[index]
+	}
+	cursor, err := desktop.Cursor()
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{Rect: rect, Cursor: cursor, Screens: screens}, nil
+}
+
+// OutsideMessage is what an absolute move reports when its point is on no
+// monitor at all: which target was asked for and the desktop the host could see.
+func OutsideMessage(screen ScreenTarget, point [2]int32, bounds Rect) string {
+	return fmt.Sprintf(
+		"absolute move to (%d, %d) targets %s, but that point is on no screen: "+
+			"the monitors cover (%d, %d)-(%d, %d)",
+		point[0], point[1], screen.Describe(), bounds.Left, bounds.Top, bounds.Right, bounds.Bottom)
+}
+
+// MockTarget is the single 1920x1080 desktop a mock device pretends to have.
+func MockTarget(screen ScreenTarget, cursor [2]int32) (Target, error) {
+	switch screen.Kind {
+	case ScreenMonitor:
+		if screen.Value != 0 {
+			return Target{}, errorf(Unsupported,
+				"monitor index %d is out of range: a mock device has one 1920x1080 screen",
+				screen.Value)
+		}
+	case ScreenWindow:
+		return Target{}, errorf(Unsupported,
+			"window 0x%x has no rectangle: a mock device has no windows", screen.Value)
+	}
+	rect := Rect{Right: 1920, Bottom: 1080}
+	return Target{Rect: rect, Cursor: cursor, Screens: []Rect{rect}}, nil
+}
 
 // Node is one host-side waypoint. AtMs is relative to the movement start; only
 // relative deltas ever reach the device.
@@ -407,6 +631,20 @@ func absInt32(value int32) int32 {
 		return -value
 	}
 	return value
+}
+
+func minInt32(a, b int32) int32 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func clampFloat(value, low, high float64) float64 {

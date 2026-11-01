@@ -64,6 +64,9 @@ __all__ = [
     "Point",
     "Node",
     "Screen",
+    "Rect",
+    "ScreenTarget",
+    "Target",
     "Status",
     "StatusExt",
     "SessionInfo",
@@ -758,6 +761,141 @@ class Screen:
 
 
 @dataclass(frozen=True)
+class Rect:
+    """A physical-pixel rectangle in virtual-desktop coordinates.
+
+    Monitors are half-open on the right and bottom edges: the pixel at ``right``
+    belongs to whatever sits next to it.
+    """
+
+    left: int = 0
+    top: int = 0
+    right: int = 0
+    bottom: int = 0
+
+    @property
+    def width(self) -> int:
+        return self.right - self.left
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top
+
+    def origin(self) -> Point:
+        return (self.left, self.top)
+
+    def contains(self, point: Point) -> bool:
+        return (
+            self.left <= point[0] < self.right and self.top <= point[1] < self.bottom
+        )
+
+    def union(self, other: "Rect") -> "Rect":
+        return Rect(
+            min(self.left, other.left),
+            min(self.top, other.top),
+            max(self.right, other.right),
+            max(self.bottom, other.bottom),
+        )
+
+    def union_point(self, point: Point) -> "Rect":
+        """The smallest rectangle covering this one and one more point."""
+        return Rect(
+            min(self.left, point[0]),
+            min(self.top, point[1]),
+            max(self.right, point[0] + 1),
+            max(self.bottom, point[1] + 1),
+        )
+
+    def clamp(self, point: Point) -> Point:
+        """The nearest point inside the rectangle."""
+        return (
+            max(self.left, min(max(self.right - 1, self.left), point[0])),
+            max(self.top, min(max(self.bottom - 1, self.top), point[1])),
+        )
+
+
+#: Kinds of :class:`ScreenTarget`.
+PRIMARY = "primary"
+MONITOR = "monitor"
+WINDOW = "window"
+
+
+@dataclass(frozen=True)
+class ScreenTarget:
+    """Which rectangle an absolute move is anchored to.
+
+    ``ScreenTarget()`` is the primary monitor, which is what every caller got
+    before targets existed. A game on a second screen or in a window is reached
+    with :meth:`monitor` / :meth:`window`.
+    """
+
+    kind: str = PRIMARY
+    value: int = 0
+
+    @classmethod
+    def monitor(cls, index: int) -> "ScreenTarget":
+        """The ``index``-th display in ``EnumDisplayMonitors`` order.
+
+        That order is the order the system enumerates the displays, so it is not
+        the display number Windows settings shows and index 0 need not be the
+        primary monitor; ask for :meth:`primary` instead.
+        """
+        return cls(MONITOR, int(index))
+
+    @classmethod
+    def window(cls, hwnd: int) -> "ScreenTarget":
+        """A window's bounding rectangle, ``hwnd`` being the caller's pointer."""
+        return cls(WINDOW, int(hwnd))
+
+    def describe(self) -> str:
+        if self.kind == MONITOR:
+            return f"monitor {self.value}"
+        if self.kind == WINDOW:
+            return f"window {self.value:#x}"
+        return "the primary monitor"
+
+    def __str__(self) -> str:
+        return self.describe()
+
+
+@dataclass(frozen=True)
+class Target:
+    """The pointer, the anchored rectangle and every monitor, in desktop pixels."""
+
+    rect: Rect
+    cursor: Point
+    screens: tuple[Rect, ...]
+
+    @classmethod
+    def mock(cls, screen: ScreenTarget, cursor: Point) -> "Target":
+        """The single 1920x1080 desktop a mock device pretends to have."""
+        if screen.kind == MONITOR and screen.value != 0:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"monitor index {screen.value} is out of range: "
+                "a mock device has one 1920x1080 screen",
+            )
+        if screen.kind == WINDOW:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"window {screen.value:#x} has no rectangle: a mock device has no windows",
+            )
+        rect = Rect(0, 0, 1920, 1080)
+        return cls(rect, (int(cursor[0]), int(cursor[1])), (rect,))
+
+    def bounds(self) -> Rect:
+        """Union of every monitor: the desktop as one rectangle, for messages."""
+        result = self.rect
+        for rect in self.screens:
+            result = result.union(rect)
+        return result
+
+    def reaches(self, point: Point) -> bool:
+        """Whether some monitor covers this point."""
+        return any(rect.contains(point) for rect in self.screens)
+
+
+@dataclass(frozen=True)
 class Node:
     at_ms: int
     x: int
@@ -1115,9 +1253,12 @@ class _MONITORINFO(ctypes.Structure):
 _USER32 = None
 _dpi_done = False
 
+# MONITORENUMPROC: BOOL (HMONITOR, HDC, LPRECT, LPARAM)
+_MONITORENUMPROC = None
+
 
 def _user32():
-    global _USER32
+    global _USER32, _MONITORENUMPROC
     if _USER32 is None:
         dll = ctypes.WinDLL("user32.dll", use_last_error=True)
         dll.GetPhysicalCursorPos.argtypes = [ctypes.POINTER(_POINT)]
@@ -1126,6 +1267,22 @@ def _user32():
         dll.MonitorFromPoint.restype = ctypes.c_void_p
         dll.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MONITORINFO)]
         dll.GetMonitorInfoW.restype = ctypes.c_int
+        dll.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        dll.GetWindowRect.restype = ctypes.c_int
+        _MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        )
+        dll.EnumDisplayMonitors.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            _MONITORENUMPROC,
+            ctypes.c_void_p,
+        ]
+        dll.EnumDisplayMonitors.restype = ctypes.c_int
         dll.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
         dll.SetProcessDpiAwarenessContext.restype = ctypes.c_int
         _USER32 = dll
@@ -1145,32 +1302,137 @@ def enable_dpi_awareness() -> None:
         pass
 
 
-def screen_and_cursor() -> tuple:
-    """Primary-monitor rect and the cursor relative to its top-left corner."""
+MONITORINFOF_PRIMARY = 1
+
+
+class _SystemDesktop:
+    """The live Windows desktop: monitors, pointer and window rectangles."""
+
+    def _enumerate(self) -> list:
+        user32 = _user32()
+        found = []
+
+        def collect(monitor, _hdc, _clip, _data):
+            info = _MONITORINFO()
+            info.cbSize = ctypes.sizeof(_MONITORINFO)
+            if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                found.append(
+                    (
+                        Rect(
+                            info.rcMonitor.left,
+                            info.rcMonitor.top,
+                            info.rcMonitor.right,
+                            info.rcMonitor.bottom,
+                        ),
+                        info.dwFlags,
+                    )
+                )
+            return 1
+
+        callback_type = _MONITORENUMPROC
+        if callback_type is None:  # pragma: no cover - _user32() installs it
+            raise GdbError(ErrorCode.UNSUPPORTED, "EnumDisplayMonitors is unavailable")
+        callback = callback_type(collect)
+
+        if user32.EnumDisplayMonitors(None, None, callback, None) == 0:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"EnumDisplayMonitors failed: {ctypes.WinError(ctypes.get_last_error())}",
+            )
+        if not found:
+            raise GdbError(ErrorCode.UNSUPPORTED, "the system reports no monitors")
+        return found
+
+    def monitors(self) -> list:
+        return [rect for rect, _flags in self._enumerate()]
+
+    def primary(self) -> int:
+        for index, (_rect, flags) in enumerate(self._enumerate()):
+            if flags & MONITORINFOF_PRIMARY:
+                return index
+        return 0
+
+    def cursor(self) -> Point:
+        point = _POINT()
+        if _user32().GetPhysicalCursorPos(ctypes.byref(point)) == 0:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"GetPhysicalCursorPos failed: {ctypes.WinError(ctypes.get_last_error())}",
+            )
+        return (point.x, point.y)
+
+    def window(self, hwnd: int) -> Rect:
+        rect = _RECT()
+        if _user32().GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)) == 0:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"GetWindowRect failed for window {hwnd:#x}: "
+                f"{ctypes.WinError(ctypes.get_last_error())}",
+            )
+        return Rect(rect.left, rect.top, rect.right, rect.bottom)
+
+
+def resolve(desktop, screen: ScreenTarget) -> Target:
+    """Resolves ``screen`` against a desktop without touching the pointer."""
+    screens = desktop.monitors()
+    if not screens:
+        raise GdbError(ErrorCode.UNSUPPORTED, "the system reports no monitors")
+    if screen.kind == MONITOR:
+        if not 0 <= screen.value < len(screens):
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"monitor index {screen.value} is out of range: "
+                f"the system reports {len(screens)} monitor(s)",
+            )
+        rect = screens[screen.value]
+    elif screen.kind == WINDOW:
+        rect = desktop.window(screen.value)
+        if rect.width <= 0 or rect.height <= 0:
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"window {screen.value:#x} has an empty rectangle "
+                f"({rect.width}x{rect.height})",
+            )
+    else:
+        index = desktop.primary()
+        if not 0 <= index < len(screens):
+            raise GdbError(
+                ErrorCode.UNSUPPORTED,
+                f"the primary monitor is index {index}, but the system reports "
+                f"{len(screens)} monitor(s)",
+            )
+        rect = screens[index]
+    return Target(rect, desktop.cursor(), tuple(screens))
+
+
+def screen_target_for(screen: ScreenTarget | None = None) -> Target:
+    """Target resolution plus the pointer, for one absolute move."""
     if sys.platform != "win32":
         raise GdbError(
             ErrorCode.UNSUPPORTED, "absolute mouse coordinates need Windows cursor APIs"
         )
-    user32 = _user32()
-    point = _POINT()
-    if user32.GetPhysicalCursorPos(ctypes.byref(point)) == 0:
-        raise GdbError(
-            ErrorCode.UNSUPPORTED,
-            f"GetPhysicalCursorPos failed: {ctypes.WinError(ctypes.get_last_error())}",
-        )
-    monitor = user32.MonitorFromPoint(_POINT(0, 0), 1)  # MONITOR_DEFAULTTOPRIMARY
-    info = _MONITORINFO()
-    info.cbSize = ctypes.sizeof(_MONITORINFO)
-    if user32.GetMonitorInfoW(monitor, ctypes.byref(info)) == 0:
-        raise GdbError(
-            ErrorCode.UNSUPPORTED,
-            f"GetMonitorInfoW failed: {ctypes.WinError(ctypes.get_last_error())}",
-        )
-    screen = Screen(
-        width=info.rcMonitor.right - info.rcMonitor.left,
-        height=info.rcMonitor.bottom - info.rcMonitor.top,
+    return resolve(_SystemDesktop(), screen or ScreenTarget())
+
+
+def outside_message(screen: ScreenTarget, point: Point, bounds: Rect) -> str:
+    """The message an absolute move reports when its point is on no monitor."""
+    return (
+        f"absolute move to ({point[0]}, {point[1]}) targets {screen}, "
+        "but that point is on no screen: "
+        f"the monitors cover ({bounds.left}, {bounds.top})-({bounds.right}, {bounds.bottom})"
     )
-    return screen, (point.x - info.rcMonitor.left, point.y - info.rcMonitor.top)
+
+
+def screen_and_cursor() -> tuple:
+    """Primary-monitor rect and the cursor relative to its top-left corner."""
+    target = screen_target_for(ScreenTarget())
+    return (
+        Screen(width=target.rect.width, height=target.rect.height),
+        (
+            target.cursor[0] - target.rect.left,
+            target.cursor[1] - target.rect.top,
+        ),
+    )
 
 
 # --- HID.dll transport ----------------------------------------------------
@@ -1906,10 +2168,47 @@ class Movement:
 # --- device ---------------------------------------------------------------
 
 
-def _clamp_target(x: int, y: int, screen: Screen) -> Point:
-    return (
-        max(0, min(screen.width - 1, int(x))),
-        max(0, min(screen.height - 1, int(y))),
+def _local(point: Point, origin: Point) -> Point:
+    return (point[0] - origin[0], point[1] - origin[1])
+
+
+def _plan_box(state: Target) -> tuple[Point, Screen]:
+    """The box the trajectory is planned in: the anchored rectangle widened to
+    reach the pointer, so a move that starts on another monitor still gets a
+    straight path instead of starting on an edge."""
+    bounds = state.rect.union_point(state.cursor)
+    return bounds.origin(), Screen(width=bounds.width, height=bounds.height)
+
+
+def _aim_at(state: Target, point: Point, screen: ScreenTarget) -> Point:
+    """Clamps the caller's point into the anchored rectangle.
+
+    A point no monitor covers is refused: the pointer cannot go there at all, and
+    the message names the target and the desktop the host could see.
+    """
+    if not state.reaches(point):
+        raise GdbError(
+            ErrorCode.UNSUPPORTED, outside_message(screen, point, state.bounds())
+        )
+    return state.rect.clamp(point)
+
+
+def _plan_nodes(
+    state: Target,
+    origin: Point,
+    window: Screen,
+    aim: Point,
+    duration_ms: int,
+    profile: Profile,
+    rng: SplitMix64,
+) -> list:
+    return trajectory_with(
+        _local(state.cursor, origin),
+        _local(aim, origin),
+        window,
+        duration_ms,
+        profile,
+        rng,
     )
 
 
@@ -2075,8 +2374,14 @@ class Device:
         """Simulated pointer of a mock device (real cursor otherwise)."""
         return (self._cursor[0], self._cursor[1])
 
-    def set_screen_source(self, source: Callable[[], tuple] | None) -> None:
-        """Overrides where screen size and cursor come from (``() -> (Screen, (x, y))``)."""
+    def set_screen_source(
+        self, source: Callable[[ScreenTarget], Target] | None
+    ) -> None:
+        """Overrides where the target rectangle and pointer come from.
+
+        ``source(ScreenTarget) -> Target`` puts the pointer on a monitor the mock
+        device does not really have, without moving the real one.
+        """
         self._screen_source = source
 
     def set_event_handler(self, callback: Callable[[int, int, str], None] | None) -> None:
@@ -2258,12 +2563,12 @@ class Device:
     def _is_mock(self) -> bool:
         return self._target[0] == "mock"
 
-    def _cursor_state(self) -> tuple:
+    def _target_state(self, screen: ScreenTarget) -> Target:
         if self._screen_source is not None:
-            return self._screen_source()
+            return self._screen_source(screen)
         if self._is_mock():
-            return Screen(), (int(self._cursor[0]), int(self._cursor[1]))
-        return screen_and_cursor()
+            return Target.mock(screen, (int(self._cursor[0]), int(self._cursor[1])))
+        return screen_target_for(screen)
 
     def _send_mouse_move(self, dx: int, dy: int) -> None:
         self._with_session(lambda session: session.mouse_move(dx, dy))
@@ -2388,24 +2693,43 @@ class Mouse:
             self._device._with_session(lambda session: session.mouse_move(chunk_x, chunk_y))
 
     def move_to(
-        self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None
+        self,
+        x: int,
+        y: int,
+        duration_ms: int = 0,
+        profile: Profile | None = None,
+        screen: ScreenTarget | None = None,
     ) -> None:
-        self._run_move_to(x, y, duration_ms, profile or Profile(), _MovementShared())
+        """Absolute move on the primary monitor unless ``screen`` says otherwise."""
+        self._run_move_to(
+            x, y, duration_ms, profile or Profile(), _MovementShared(), screen
+        )
 
     def move_path(
-        self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None
+        self,
+        points: Sequence[Point],
+        duration_ms: int = 0,
+        profile: Profile | None = None,
+        screen: ScreenTarget | None = None,
     ) -> None:
         if not points:
             raise GdbError(ErrorCode.INVALID, "path needs at least one point")
         shared = _MovementShared()
         for x, y in points:
-            self._run_move_to(x, y, duration_ms, profile or Profile(), shared)
+            self._run_move_to(x, y, duration_ms, profile or Profile(), shared, screen)
 
     def start_move_to(
-        self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None
+        self,
+        x: int,
+        y: int,
+        duration_ms: int = 0,
+        profile: Profile | None = None,
+        screen: ScreenTarget | None = None,
     ) -> Movement:
         return self._spawn(
-            lambda shared: self._run_move_to(x, y, duration_ms, profile or Profile(), shared)
+            lambda shared: self._run_move_to(
+                x, y, duration_ms, profile or Profile(), shared, screen
+            )
         )
 
     def start_move_by(
@@ -2416,7 +2740,11 @@ class Mouse:
         )
 
     def start_move_path(
-        self, points: Sequence[Point], duration_ms: int = 0, profile: Profile | None = None
+        self,
+        points: Sequence[Point],
+        duration_ms: int = 0,
+        profile: Profile | None = None,
+        screen: ScreenTarget | None = None,
     ) -> Movement:
         if not points:
             raise GdbError(ErrorCode.INVALID, "path needs at least one point")
@@ -2424,7 +2752,7 @@ class Mouse:
 
         def work(shared: _MovementShared) -> None:
             for x, y in snapshot:
-                self._run_move_to(x, y, duration_ms, profile or Profile(), shared)
+                self._run_move_to(x, y, duration_ms, profile or Profile(), shared, screen)
 
         return self._spawn(work)
 
@@ -2464,10 +2792,11 @@ class Mouse:
         y: int,
         duration_ms: int = 0,
         profile: Profile | None = None,
+        screen: ScreenTarget | None = None,
     ) -> None:
         self.button(button, True)
         try:
-            self.move_to(x, y, duration_ms, profile)
+            self.move_to(x, y, duration_ms, profile, screen)
         finally:
             try:
                 self._device.release_all()
@@ -2504,26 +2833,21 @@ class Mouse:
                 time.sleep(pause)
 
     def _run_move_to(
-        self, x: int, y: int, duration_ms: int, profile: Profile, shared: _MovementShared
+        self,
+        x: int,
+        y: int,
+        duration_ms: int,
+        profile: Profile,
+        shared: _MovementShared,
+        screen: ScreenTarget | None = None,
     ) -> None:
         device = self._device
         enable_dpi_awareness()
-        screen, position = device._cursor_state()
-        if (
-            position[0] < 0
-            or position[1] < 0
-            or position[0] >= screen.width
-            or position[1] >= screen.height
-        ):
-            raise GdbError(
-                ErrorCode.UNSUPPORTED,
-                "absolute coordinates are relative to the primary monitor "
-                f"({screen.width}x{screen.height} at 0,0) and the cursor is at "
-                f"({position[0]}, {position[1]}), so the move would start off that screen",
-            )
-        target = _clamp_target(x, y, screen)
-        rng = SplitMix64.from_entropy()
-        nodes = trajectory_with(position, target, screen, duration_ms, profile, rng)
+        target = screen or ScreenTarget()
+        state = device._target_state(target)
+        aim = _aim_at(state, (x, y), target)
+        origin, window = _plan_box(state)
+        nodes = _plan_nodes(state, origin, window, aim, duration_ms, profile, SplitMix64.from_entropy())
         started = time.monotonic()
         index = 0
         tracker = RelativeTracker()
@@ -2533,16 +2857,23 @@ class Mouse:
                 raise GdbError(ErrorCode.CANCELLED, ErrorCode.MESSAGES[9])
             retarget = shared.take_target()
             if retarget is not None:
-                target = _clamp_target(retarget[0], retarget[1], screen)
-                current_screen, current = device._cursor_state()
-                if (current_screen.width, current_screen.height) != (screen.width, screen.height):
+                moved = device._target_state(target)
+                if (moved.rect.width, moved.rect.height) != (
+                    state.rect.width,
+                    state.rect.height,
+                ):
                     raise GdbError(
                         ErrorCode.UNSUPPORTED,
                         "monitor layout changed during the movement "
-                        f"({screen.width}x{screen.height} -> "
-                        f"{current_screen.width}x{current_screen.height})",
+                        f"({state.rect.width}x{state.rect.height} -> "
+                        f"{moved.rect.width}x{moved.rect.height})",
                     )
-                nodes = trajectory_with(current, target, screen, duration_ms, profile, rng)
+                state = moved
+                aim = _aim_at(state, retarget, target)
+                origin, window = _plan_box(state)
+                nodes = _plan_nodes(
+                    state, origin, window, aim, duration_ms, profile, SplitMix64.from_entropy()
+                )
                 started = time.monotonic()
                 index = 0
                 tracker = RelativeTracker()
@@ -2554,7 +2885,7 @@ class Mouse:
             if elapsed_ms < node.at_ms:
                 time.sleep(min((node.at_ms - elapsed_ms) / 1000.0, 0.002))
                 continue
-            _, position = device._cursor_state()
+            position = _local(device._target_state(target).cursor, origin)
             step = tracker.step(position, (node.x, node.y))
             if step.kind == STEP_WAIT:
                 time.sleep(0.001)
