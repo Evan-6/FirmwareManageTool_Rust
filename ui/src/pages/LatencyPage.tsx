@@ -1,15 +1,25 @@
 import { useEffect, useState } from "react";
 
 import { Panel } from "../components/Panel";
+import { describeError } from "../lib/errors";
 import { call } from "../lib/ipc";
-import type { LatencyConfig, Mode } from "../lib/types";
-import { useStore } from "../store";
+import { intValue } from "../lib/num";
+import { DEFAULT_LATENCY } from "../lib/types";
+import type { LatencyConfig, Mode, RoundOutcome } from "../lib/types";
+import { useDeferredSave } from "../lib/useDeferredSave";
+import { reportError, useStore } from "../store";
 
 const MODES: { value: Mode; label: string }[] = [
   { value: "Normal", label: "一般" },
   { value: "HighPrecision", label: "高精度" },
   { value: "Extreme", label: "極限 REALTIME（僅送出）" },
 ];
+
+const OUTCOME_LABEL: Record<RoundOutcome, string> = {
+  Success: "成功",
+  Failed: "失敗",
+  Timeout: "逾時",
+};
 
 function stats(values: number[]) {
   if (values.length === 0) return null;
@@ -28,24 +38,28 @@ function stats(values: number[]) {
 }
 
 export function LatencyPage() {
-  const { state, dispatch } = useStore();
-  const [config, setConfig] = useState<LatencyConfig>(state.settings?.latency ?? { rounds: 50, mode: "Normal" });
+  const { state, dispatch, saveSettings } = useStore();
+  const [config, setConfig] = useState<LatencyConfig>(state.settings?.latency ?? DEFAULT_LATENCY);
 
   useEffect(() => {
-    if (state.settings) setConfig(state.settings.latency);
+    const saved = state.settings?.latency;
+    if (!saved) return;
+    setConfig((current) => (JSON.stringify(current) === JSON.stringify(saved) ? current : saved));
   }, [state.settings]);
+
+  // The chosen mode and round count used to survive only if a run finished;
+  // a cancelled test threw away exactly the settings being iterated on.
+  useDeferredSave(state.settings !== null, [config], () => {
+    void saveSettings({ latency: config }).catch((error) => reportError(dispatch, error, "settings_save"));
+  });
 
   const start = async () => {
     dispatch({ type: "busy", busy: true });
     try {
+      await saveSettings({ latency: config }).catch((error) => reportError(dispatch, error, "settings_save"));
       await call("latency", { config });
-      if (state.settings) {
-        const settings = { ...state.settings, latency: config };
-        await call("settings_save", { settings });
-        dispatch({ type: "settings", settings });
-      }
     } catch (error) {
-      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+      reportError(dispatch, error, "latency");
     }
   };
 
@@ -58,11 +72,19 @@ export function LatencyPage() {
         title="輸入延遲測試"
         actions={
           state.busy ? (
-            <button className="danger" onClick={() => void call("cancel", {})}>
+            <button
+              className="danger"
+              onClick={() => void call("cancel", {}).catch((error) => reportError(dispatch, error, "latency"))}
+            >
               停止
             </button>
           ) : (
-            <button className="primary" onClick={() => void start()}>
+            <button
+              className="primary"
+              onClick={() => void start()}
+              disabled={!state.connected}
+              title={state.connected ? "量測「送出到回報」的端到端延遲" : "先到「裝置」頁連線"}
+            >
               開始
             </button>
           )
@@ -86,12 +108,14 @@ export function LatencyPage() {
               min={1}
               max={10000}
               value={config.rounds}
-              onChange={(event) => setConfig({ ...config, rounds: Number(event.target.value) || 1 })}
+              onChange={(event) => setConfig({ ...config, rounds: intValue(event.target.value, config.rounds, 1, 10000) })}
             />
           </label>
         </div>
         <p className="muted">
-          測試會另外啟動一個 worker 行程量測「送出到回報」的端到端延遲；Extreme 模式只送出、不等待回報。
+          {state.connected
+            ? "測試會另外啟動一個 worker 行程量測「送出到回報」的端到端延遲；Extreme 模式只送出、不等待回報。"
+            : "需要先連線才能量測：測試會獨佔這塊板子的 session。"}
         </p>
       </Panel>
 
@@ -120,9 +144,11 @@ export function LatencyPage() {
         )}
         {state.report && (
           <p className="muted">
-            {state.report.rounds.length} 輪，取消 {String(state.report.cancelled)}，清理確認{" "}
-            {String(state.report.cleanup_confirmed)}
-            {state.report.terminal_error ? `，錯誤：${state.report.terminal_error}` : ""}
+            {state.report.rounds.length} 輪，取消 {state.report.cancelled ? "是" : "否"}，清理確認{" "}
+            {state.report.cleanup_confirmed ? "是" : "否"}
+            {state.report.terminal_error
+              ? `，錯誤：${describeError(state.report.terminal_error, "latency").title}`
+              : ""}
           </p>
         )}
       </Panel>
@@ -130,8 +156,15 @@ export function LatencyPage() {
       <Panel title="逐輪結果">
         <div className="console">
           {(state.report?.rounds ?? []).slice(-200).reverse().map((round) => (
-            <div key={round.round} className={round.outcome === "Success" ? "" : "bad-line"}>
-              #{round.round} {round.outcome === "Success" ? `${round.latency_ms?.toFixed(2)} ms` : `${round.outcome} ${round.error}`}
+            <div
+              key={round.round}
+              className={round.outcome === "Success" ? "" : "bad-line"}
+              title={round.error || undefined}
+            >
+              #{round.round}{" "}
+              {round.outcome === "Success"
+                ? `${round.latency_ms?.toFixed(2)} ms`
+                : `${OUTCOME_LABEL[round.outcome]}${round.error ? `：${describeError(round.error, "latency").title}` : ""}`}
             </div>
           ))}
           {state.report?.rounds.length ? null : <span className="muted">尚無資料。</span>}

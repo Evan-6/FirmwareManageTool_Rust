@@ -24,13 +24,26 @@ export function StatusPage() {
   const pending = series(samples, (s) => s.pending);
   const lease = series(samples, (s) => s.leaseMs);
 
-  const transportBad = rx.at(-1)! > 0 || tx.at(-1)! > 0 || hid.at(-1)! > 0;
-  const failsafeBad = failsafe.at(-1)! > 0;
-  const health = transportBad
-    ? { cls: "bad", text: "傳輸計數在增加：檢查線材／hub／USB 埠" }
-    : failsafeBad
-      ? { cls: "warn", text: "租約回收：有程式沒有送出 CLOSE（崩潰或直接拔線）" }
-      : { cls: "ok", text: "傳輸正常" };
+  const last = (values: number[]) => values.at(-1) ?? 0;
+  const transportBad = last(rx) > 0 || last(tx) > 0 || last(hid) > 0;
+  const failsafeBad = last(failsafe) > 0;
+  // fs is device-global: it also counts a *peer* session's lease expiry, so say
+  // which case this is instead of blaming the user's own connection.
+  const peers = state.sessions.length;
+  const health =
+    samples.length < 2
+      ? { cls: "warn", text: "等待第一筆樣本：連線後 150 ms 內會開始回報" }
+      : transportBad
+        ? { cls: "bad", text: "傳輸計數在增加：檢查線材／hub／USB 埠" }
+        : failsafeBad
+          ? {
+              cls: "warn",
+              text:
+                peers > 1
+                  ? `failsafe 在增加：同時有 ${peers} 個 session，其中一個沒送 CLOSE 就到期了（另一個程式或先前的崩潰）。看下方擁有者清單。`
+                  : "failsafe 在增加：只有本連線在場，代表自己的租約曾到期——心跳被長操作卡住或裝置沒回，重連一次即可；持續發生請回報。",
+            }
+          : { cls: "ok", text: "傳輸正常" };
 
   return (
     <div className="page">

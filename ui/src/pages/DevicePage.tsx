@@ -1,25 +1,71 @@
-import { useState } from "react";
-
+import { useEffect, useState } from "react";
 import { Panel } from "../components/Panel";
 import { call, isMock } from "../lib/ipc";
-import { useStore } from "../store";
+import { reportError, useStore } from "../store";
+
+// How often a disconnected tool looks for a board. Plugging the cable in is the
+/// common case, so waiting for a click is the wrong default.
+const RESCAN_MS = 2000;
 
 export function DevicePage() {
   const { state, dispatch } = useStore();
-  const [message, setMessage] = useState("");
+  const [autoTried, setAutoTried] = useState<string | null>(null);
 
-  const connect = async () => {
+  const connect = async (index = state.selected) => {
+    dispatch({ type: "busy", busy: true });
     try {
-      await call("connect", { index: state.selected });
-      dispatch({ type: "busy", busy: true });
+      await call("connect", { index });
     } catch (error) {
-      setMessage(String(error));
+      reportError(dispatch, error, "connect");
     }
   };
 
   const disconnect = async () => {
-    await call("disconnect", {});
-    dispatch({ type: "busy", busy: false });
+    try {
+      await call("disconnect", {});
+      dispatch({ type: "busy", busy: false });
+    } catch (error) {
+      reportError(dispatch, error, "disconnect");
+    }
+  };
+
+  const scan = async () => {
+    try {
+      const devices = await call("scan", {});
+      dispatch({ type: "event", event: { kind: "devices", devices } });
+    } catch (error) {
+      reportError(dispatch, error, "scan");
+    }
+  };
+
+  // Look once on mount, then keep looking while disconnected: plugging the board
+  // in should be enough, the same way the firmware pages assume it is there.
+  useEffect(() => {
+    if (state.connected) return;
+    void scan();
+    const timer = setInterval(() => void scan(), RESCAN_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.connected]);
+
+  // One board on the bus and we have not tried it yet: connect to it. The guard
+  // resets when the bus empties, so unplug/replug tries again.
+  useEffect(() => {
+    if (state.connected || state.busy) return;
+    if (state.devices.length === 0) {
+      if (autoTried !== null) setAutoTried(null);
+      return;
+    }
+    if (state.devices.length !== 1) return;
+    const key = state.devices[0].serial || state.devices[0].label;
+    if (autoTried === key) return;
+    setAutoTried(key);
+    void connect(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.devices, state.connected, state.busy, autoTried]);
+
+  const run = (name: "reset_input" | "request_status") => {
+    void call(name, {}).catch((error) => reportError(dispatch, error, name));
   };
 
   const capabilities = state.hello;
@@ -31,7 +77,7 @@ export function DevicePage() {
         title="Vendor HID 裝置"
         actions={
           <>
-            <button onClick={() => void call("scan", {}).then((devices) => dispatch({ type: "event", event: { kind: "devices", devices } }))}>
+            <button onClick={() => void scan()}>
               重新掃描
             </button>
             {state.connected ? (
@@ -47,7 +93,10 @@ export function DevicePage() {
         }
       >
         {state.devices.length === 0 ? (
-          <p className="muted">找不到 Vendor HID（03F0:0024，usage FF60:0061）。插上板子後按「重新掃描」。</p>
+          <p className="muted">
+            找不到 Vendor HID（03F0:0024，usage FF60:0061）。每 2 秒自動重新掃描，插上板子就會自動連線；
+            只有一個裝置時不用選，直接連上。
+          </p>
         ) : (
           <table className="table">
             <thead>
@@ -79,7 +128,6 @@ export function DevicePage() {
             </tbody>
           </table>
         )}
-        {message && <p className="error-text">{message}</p>}
         {isMock() && <p className="muted">目前是 mock 後端（瀏覽器模式），所有命令都是假的。</p>}
       </Panel>
 
@@ -124,13 +172,13 @@ export function DevicePage() {
           </div>
         )}
         <div className="row">
-          <button disabled={!state.connected} onClick={() => void call("reset_input", {})}>
+          <button disabled={!state.connected} onClick={() => run("reset_input")}>
             全部放開
           </button>
           <span className={state.info?.hotkey ? "pill ok" : "pill warn"}>
             {state.info?.hotkey ? "緊急放開：Ctrl+Alt+Shift+Esc" : "緊急放開熱鍵不可用"}
           </span>
-          <button disabled={!state.connected} onClick={() => void call("request_status", {})}>
+          <button disabled={!state.connected} onClick={() => run("request_status")}>
             立即讀取 STATUS
           </button>
         </div>

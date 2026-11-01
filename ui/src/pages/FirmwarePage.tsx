@@ -2,44 +2,52 @@ import { useEffect, useState } from "react";
 
 import { Panel } from "../components/Panel";
 import { call } from "../lib/ipc";
+import { DEFAULT_UPLOAD } from "../lib/types";
 import type { UploadConfig } from "../lib/types";
 import { outcomeDetail, outcomeLabel } from "../lib/types";
-import { useStore } from "../store";
+import { useDeferredSave } from "../lib/useDeferredSave";
+import { reportError, useStore } from "../store";
 
 const STAGES = ["工具鏈", "引擎", "編譯", "打包 UF2", "BOOTLOADER", "複製", "驗證"];
 
-const empty: UploadConfig = {
-  cargo_path: "",
-  firmware_path: "",
-  skip_dependencies: false,
-  auto_bootloader: true,
-  boot_target: "",
-};
-
 export function FirmwarePage() {
-  const { state, dispatch } = useStore();
-  const [config, setConfig] = useState<UploadConfig>(state.settings?.upload ?? empty);
+  const { state, dispatch, saveSettings } = useStore();
+  const [config, setConfig] = useState<UploadConfig>(state.settings?.upload ?? DEFAULT_UPLOAD);
 
   useEffect(() => {
-    if (state.settings) setConfig(state.settings.upload);
+    const saved = state.settings?.upload;
+    if (!saved) return;
+    // Adopting the saved value unconditionally would loop: saveSettings dispatches
+    // a fresh Settings object, which re-arms the debounced autosave below.
+    setConfig((current) => (JSON.stringify(current) === JSON.stringify(saved) ? current : saved));
   }, [state.settings]);
 
   const patch = (update: Partial<UploadConfig>) => setConfig((current) => ({ ...current, ...update }));
 
   const save = async () => {
-    if (!state.settings) return;
-    const settings = { ...state.settings, upload: config };
-    await call("settings_save", { settings });
-    dispatch({ type: "settings", settings });
-    dispatch({ type: "event", event: { kind: "log", line: "已儲存燒錄設定" } });
+    try {
+      await saveSettings({ upload: config });
+      dispatch({ type: "event", event: { kind: "log", line: "已儲存燒錄設定" } });
+    } catch (error) {
+      reportError(dispatch, error, "settings_save");
+    }
   };
+
+  // Paths are easy to type and easy to lose: persist them once the edit settles.
+  // The explicit button stays as the "I am sure" path.
+  useDeferredSave(state.settings !== null, [config], () => {
+    void saveSettings({ upload: config }).catch((error) => reportError(dispatch, error, "settings_save"));
+  });
 
   const start = async () => {
     dispatch({ type: "busy", busy: true });
     try {
+      // Persist what is about to be built first; otherwise a failed flash also
+      // loses the paths that were typed to debug it.
+      await saveSettings({ upload: config }).catch((error) => reportError(dispatch, error, "settings_save"));
       await call("upload", { config });
     } catch (error) {
-      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+      reportError(dispatch, error, "upload");
     }
   };
 
@@ -51,11 +59,9 @@ export function FirmwarePage() {
         title="韌體燒錄"
         actions={
           <>
-            <button onClick={() => void save()} disabled={!state.settings}>
-              儲存設定
-            </button>
+            <button onClick={() => void save()}>儲存設定</button>
             {state.busy ? (
-              <button className="danger" onClick={() => void call("cancel", {})}>
+              <button className="danger" onClick={() => void call("cancel", {}).catch((error) => reportError(dispatch, error, "upload"))}>
                 取消
               </button>
             ) : (

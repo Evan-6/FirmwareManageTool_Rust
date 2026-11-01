@@ -249,8 +249,10 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
 
 export async function mockEvents(handler: (event: UiEvent) => void): Promise<() => void> {
   listeners.push(handler);
-  emit({ kind: "devices", devices });
-  emit({ kind: "log", line: "mock 後端已啟動（?mock=1）" });
+  // Bootstrap goes to the subscriber only, like the real backend: broadcasting it
+  // made every remount replay "已啟動" into the other (still attached) listeners.
+  handler({ kind: "devices", devices });
+  handler({ kind: "log", line: "mock 後端已啟動（?mock=1）" });
   return () => {
     listeners = listeners.filter((entry) => entry !== handler);
   };

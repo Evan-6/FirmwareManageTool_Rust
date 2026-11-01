@@ -72,6 +72,8 @@ export interface LatencyConfig {
   mode: Mode;
 }
 
+export const DEFAULT_LATENCY: LatencyConfig = { rounds: 50, mode: "Normal" };
+
 export interface LatencyReport {
   config: LatencyConfig;
   device: Device;
@@ -94,6 +96,14 @@ export interface UploadConfig {
   auto_bootloader: boolean;
   boot_target: string;
 }
+
+export const DEFAULT_UPLOAD: UploadConfig = {
+  cargo_path: "",
+  firmware_path: "",
+  skip_dependencies: false,
+  auto_bootloader: true,
+  boot_target: "",
+};
 
 export interface Settings {
   upload: UploadConfig;
@@ -184,6 +194,15 @@ export const DEFAULT_PROFILE: HumanProfile = {
   ease: "Jerk",
   minStepPx: 1,
 };
+
+/** Mirrors `Settings::default()` in `src/settings.rs`. */
+export const DEFAULT_SETTINGS: Settings = {
+  upload: DEFAULT_UPLOAD,
+  latency: DEFAULT_LATENCY,
+  mouse: DEFAULT_PROFILE,
+  debug: true,
+};
+
 
 export interface MouseRequest {
   action: MouseAction;

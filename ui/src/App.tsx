@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 
+import { ErrorBanner } from "./components/ErrorBanner";
 import { DevicePage } from "./pages/DevicePage";
 import { FirmwarePage } from "./pages/FirmwarePage";
 import { LatencyPage } from "./pages/LatencyPage";
 import { MousePage } from "./pages/MousePage";
 import { StatusPage } from "./pages/StatusPage";
 import { call, isMock } from "./lib/ipc";
-import { useStore } from "./store";
+import { reportError, useStore } from "./store";
 
 const PAGES = [
   { id: "device", label: "裝置", component: DevicePage },
@@ -29,34 +30,41 @@ function StalePill({ build, commit, onOpen }: { build: number; commit: string; o
 }
 
 export default function App() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, saveSettings } = useStore();
   const [page, setPage] = useState<PageId>("device");
   const Page = PAGES.find((entry) => entry.id === page)!.component;
 
   const choose = async (target: string) => {
-    await call("choose_target", { target });
+    try {
+      await call("choose_target", { target });
+    } catch (error) {
+      reportError(dispatch, error, "choose_target");
+    }
   };
 
-  const [debug, setDebug] = useState(true);
+  // Mirrors Settings::debug; starts from the in-memory default until the file loads.
+  const [debug, setDebug] = useState<boolean>(true);
   useEffect(() => {
-    if (state.settings) setDebug(state.settings.debug ?? true);
+    if (state.settings) setDebug(state.settings.debug);
   }, [state.settings]);
   // Keep the worker in step with the saved mode, including right after connect.
   useEffect(() => {
-    if (state.connected) void call("set_debug", { enabled: debug }).catch(() => undefined);
-  }, [state.connected, debug]);
+    if (state.connected) {
+      void call("set_debug", { enabled: debug }).catch((error) => reportError(dispatch, error, "set_debug"));
+    }
+  }, [state.connected, debug, dispatch]);
 
   const toggleDebug = async () => {
     const next = !debug;
     setDebug(next);
-    if (!state.settings) return;
-    const settings = { ...state.settings, debug: next };
     try {
       await call("set_debug", { enabled: next });
-      await call("settings_save", { settings });
-      dispatch({ type: "settings", settings });
+      // Persist even when settings_load has not landed yet: saveSettings starts
+      // from the defaults, so the toggle no longer silently drops the change.
+      await saveSettings({ debug: next });
     } catch (error) {
-      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+      setDebug(!next);
+      reportError(dispatch, error, "set_debug");
     }
   };
 
@@ -110,7 +118,10 @@ export default function App() {
             </button>
             {state.busy && <span className="pill warn">工作中…</span>}
             {state.connected && (
-              <button className="danger small" onClick={() => void call("disconnect", {})}>
+              <button
+                className="danger small"
+                onClick={() => void call("disconnect", {}).catch((error) => reportError(dispatch, error, "disconnect"))}
+              >
                 中斷
               </button>
             )}
@@ -119,13 +130,12 @@ export default function App() {
 
         {state.errors.length > 0 && (
           <div className="errors">
-            {state.errors.slice(-3).map((message, index) => (
-              <div className="banner bad" key={index}>
-                {message}
-                <button className="small" onClick={() => dispatch({ type: "clearErrors" })}>
-                  知道了
-                </button>
-              </div>
+            {state.errors.map((error, index) => (
+              <ErrorBanner
+                key={`${error.title}-${index}`}
+                error={error}
+                onDismiss={() => dispatch({ type: "dismissError", index })}
+              />
             ))}
           </div>
         )}

@@ -1,10 +1,13 @@
 // Single store for everything the five pages render. The worker already speaks in
 // events, so the reducer just accumulates them: samples for the charts, logs for
 // the console, rounds for the latency table.
-import { createContext, useContext, useEffect, useMemo, useReducer } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from "react";
 import type { ReactNode } from "react";
 
+import { describeError } from "./lib/errors";
+import type { UiError } from "./lib/errors";
 import { call, onEvent } from "./lib/ipc";
+import { DEFAULT_SETTINGS } from "./lib/types";
 import type {
   AppInfo,
   Device,
@@ -18,6 +21,7 @@ import type {
   UiEvent,
   UploadOutcome,
 } from "./lib/types";
+
 
 export interface Sample {
   at: number;
@@ -36,7 +40,7 @@ export interface Store {
   sessions: SessionInfo[];
   samples: Sample[];
   logs: string[];
-  errors: string[];
+  errors: UiError[];
   busy: boolean;
   progress: { stage: number; message: string } | null;
   bootChoices: string[] | null;
@@ -49,6 +53,7 @@ export interface Store {
 
 const MAX_SAMPLES = 600; // 150 ms cadence → about 90 s of history
 const MAX_LOGS = 500;
+const MAX_ERRORS = 5;
 
 const initial: Store = {
   info: null,
@@ -79,6 +84,8 @@ type Action =
   | { type: "settings"; settings: Settings }
   | { type: "select"; index: number }
   | { type: "busy"; busy: boolean }
+  | { type: "error"; error: UiError }
+  | { type: "dismissError"; index: number }
   | { type: "clearErrors" }
   | { type: "clearLogs" };
 
@@ -92,8 +99,15 @@ function reducer(state: Store, action: Action): Store {
       return { ...state, selected: action.index };
     case "busy":
       return { ...state, busy: action.busy, progress: action.busy ? state.progress : null };
+    case "error": {
+      const errors = [...state.errors, action.error].slice(-MAX_ERRORS);
+      return { ...state, errors, busy: false };
+    }
+    case "dismissError":
+      return { ...state, errors: state.errors.filter((_, index) => index !== action.index) };
     case "clearErrors":
       return { ...state, errors: [] };
+
     case "clearLogs":
       return { ...state, logs: [] };
     case "event": {
@@ -112,6 +126,9 @@ function reducer(state: Store, action: Action): Store {
             device: event.device,
             hello: event.hello,
             errors: [],
+            // A successful connect ends the "工作中…" pill the page started.
+            busy: false,
+            progress: null,
           };
         case "disconnected":
           return {
@@ -124,6 +141,12 @@ function reducer(state: Store, action: Action): Store {
             sessions: [],
             samples: [],
             busy: false,
+            progress: null,
+            bootChoices: null,
+            // The report described a session that no longer exists; keeping it
+            // left the latency page showing statistics for a disconnected board.
+            report: null,
+            rounds: [],
           };
         case "status": {
           const samples = [...state.samples, { at: Date.now(), status: event.status }];
@@ -140,7 +163,11 @@ function reducer(state: Store, action: Action): Store {
           return { ...state, logs };
         }
         case "error":
-          return { ...state, errors: [...state.errors, event.message], busy: false };
+          return {
+            ...state,
+            errors: [...state.errors, describeError(event.message, "worker")].slice(-MAX_ERRORS),
+            busy: false,
+          };
         case "progress":
           return {
             ...state,
@@ -170,22 +197,65 @@ function reducer(state: Store, action: Action): Store {
   }
 }
 
-const Context = createContext<{ state: Store; dispatch: React.Dispatch<Action> } | null>(null);
+const Context = createContext<StoreValue | null>(null);
+
+export interface StoreValue {
+  state: Store;
+  dispatch: React.Dispatch<Action>;
+  /** Merge one section into the saved settings and write it to disk. */
+  saveSettings: (patch: Partial<Settings>) => Promise<Settings>;
+}
+
+/** Pushes a caught error into the one error area, formatted for humans. */
+export function reportError(dispatch: React.Dispatch<Action>, error: unknown, source = "") {
+  dispatch({ type: "error", error: describeError(error, source) });
+}
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initial);
 
   useEffect(() => {
+    // StrictMode mounts twice in dev, and `listen()` resolves asynchronously: the
+    // first effect's cleanup ran before its promise landed, so its listener stayed
+    // attached and every worker line/sample arrived twice (duplicated log pane,
+    // doubled sample counters). Cancel whichever arrives after unmount.
+    let active = true;
     let dispose: (() => void) | undefined;
-    void onEvent((event) => dispatch({ type: "event", event })).then((unlisten) => {
-      dispose = unlisten;
+    void onEvent((event) => {
+      // The discarded first mount's handler must stay silent too: React keeps the
+      // reducer state across StrictMode's simulated remount, so its events landed.
+      if (active) dispatch({ type: "event", event });
+    }).then((unlisten) => {
+      if (active) dispose = unlisten;
+      else unlisten();
     });
     void call("app_info", {}).then((info) => dispatch({ type: "info", info }));
-    void call("settings_load", {}).then((settings) => dispatch({ type: "settings", settings }));
-    return () => dispose?.();
+    void call("settings_load", {})
+      .then((settings) => dispatch({ type: "settings", settings }))
+      .catch((error) => reportError(dispatch, error, "settings_load"));
+    return () => {
+      active = false;
+      dispose?.();
+    };
   }, []);
 
-  const value = useMemo(() => ({ state, dispatch }), [state]);
+  // Every page writes through here so two pages editing different sections never
+  // overwrite each other with a stale snapshot of the whole Settings object.
+  const settingsRef = useRef<Settings | null>(state.settings);
+  settingsRef.current = state.settings;
+
+  const saveSettings = useCallback(async (patch: Partial<Settings>) => {
+    const settings: Settings = { ...DEFAULT_SETTINGS, ...(settingsRef.current ?? {}), ...patch };
+    if (settingsRef.current && JSON.stringify(settingsRef.current) === JSON.stringify(settings)) {
+      return settingsRef.current; // nothing changed: do not rewrite the file
+    }
+    settingsRef.current = settings;
+    dispatch({ type: "settings", settings });
+    await call("settings_save", { settings });
+    return settings;
+  }, []);
+
+  const value = useMemo(() => ({ state, dispatch, saveSettings }), [state, saveSettings]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 
@@ -194,6 +264,7 @@ export function useStore() {
   if (!context) throw new Error("useStore 必須在 StoreProvider 內使用");
   return context;
 }
+
 
 /** Monotonic counters wrap at 16 or 32 bits; gauges (lease, pending) do not. */
 export function series(samples: Sample[], read: (status: Status) => number): number[] {

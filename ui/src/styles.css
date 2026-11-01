@@ -493,6 +493,49 @@ input[type="checkbox"] {
   margin: 0;
 }
 
+/* Error banner: headline + hint are the action; the raw chain is one click away. */
+.error-banner {
+  align-items: flex-start;
+}
+
+.error-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.error-hint {
+  font-size: 12px;
+  color: #ffd7d7;
+  opacity: 0.92;
+}
+
+.error-detail summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.error-detail pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: #101319;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+.error-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .trajectory {
   width: 100%;
   max-height: 320px;

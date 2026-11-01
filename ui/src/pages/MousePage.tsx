@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ErrorLine } from "../components/ErrorBanner";
 import { Panel } from "../components/Panel";
+import { describeError } from "../lib/errors";
+import type { UiError } from "../lib/errors";
 import { call } from "../lib/ipc";
+import { intValue } from "../lib/num";
+import { loadPref, savePref } from "../lib/prefs";
 import type {
   ChordConfig,
   Ease,
@@ -13,7 +18,8 @@ import type {
   TypeTextConfig,
 } from "../lib/types";
 import { DEFAULT_PROFILE } from "../lib/types";
-import { useStore } from "../store";
+import { useDeferredSave } from "../lib/useDeferredSave";
+import { reportError, useStore } from "../store";
 
 const EASES: { value: Ease; label: string }[] = [
   { value: "Jerk", label: "jerk（人體加減速）" },
@@ -69,7 +75,7 @@ function TrajectoryView({ preview }: { preview: TrajectoryPreview | null }) {
 }
 
 export function MousePage() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, saveSettings } = useStore();
   const [profile, setProfile] = useState<HumanProfile>(state.settings?.mouse ?? DEFAULT_PROFILE);
   const [x, setX] = useState(120);
   const [y, setY] = useState(-80);
@@ -78,23 +84,39 @@ export function MousePage() {
   const [count, setCount] = useState(1);
   const [wheel, setWheel] = useState(120);
   const [preview, setPreview] = useState<TrajectoryPreview | null>(null);
-  const [previewError, setPreviewError] = useState("");
+  const [previewError, setPreviewError] = useState<UiError | null>(null);
   const [text, setText] = useState("hello world");
   const [typing, setTyping] = useState<TypeTextConfig>({ text: "hello world", intervalMs: 45, holdMs: 18, jitterMs: 30 });
   const [chordKeys, setChordKeys] = useState("E0,E1,06");
   const [chordHold, setChordHold] = useState(60);
   const [history, setHistory] = useState<string[]>([]);
   const [recording, setRecording] = useState<MacroStep[] | null>(null);
-  const [macroName, setMacroName] = useState("macro-1");
+  // `Settings` has no field for the macro being edited, so this one lives in
+  // localStorage instead of the settings file.
+  const [macroName, setMacroName] = useState(() => loadPref("macroName", "macro-1"));
   const [macros, setMacros] = useState<string[]>([]);
   const startedAt = useRef(Date.now());
 
   useEffect(() => {
-    if (state.settings) setProfile(state.settings.mouse ?? DEFAULT_PROFILE);
+    const saved = state.settings?.mouse;
+    if (!saved) return;
+    setProfile((current) => (JSON.stringify(current) === JSON.stringify(saved) ? current : saved));
   }, [state.settings]);
 
+  // Sliders are cheap to move and easy to forget: persist the shape once the
+  // drag settles, so a restart keeps the tuned profile.
+  useDeferredSave(state.settings !== null, [profile], () => {
+    void saveSettings({ mouse: profile }).catch((error) => reportError(dispatch, error, "settings_save"));
+  });
+
   useEffect(() => {
-    void call("macro_list", {}).then(setMacros).catch(() => setMacros([]));
+    savePref("macroName", macroName);
+  }, [macroName]);
+
+  useEffect(() => {
+    void call("macro_list", {})
+      .then(setMacros)
+      .catch(() => setMacros([]));
   }, []);
 
   // Preview the exact nodes the worker will send.
@@ -120,10 +142,13 @@ export function MousePage() {
             })),
           };
           setPreview(shifted);
+          // A recovered preview has to clear the old failure, otherwise the red
+          // line stayed under a perfectly good trajectory forever.
+          setPreviewError(null);
         })
         .catch((error) => {
           setPreview(null);
-          setPreviewError(String(error));
+          setPreviewError(describeError(error, "trajectory_preview"));
         });
     }, 180);
     return () => window.clearTimeout(handle);
@@ -139,31 +164,56 @@ export function MousePage() {
     const request: MouseRequest = { action, profile };
     try {
       await call("mouse", { request });
-      setHistory((current) => [`${label}（${path} 節點）`, ...current].slice(0, 20));
+      setHistory((current) => [`${label}${preview ? `（${path} 節點）` : ""}`, ...current].slice(0, 20));
       record({ kind: "mouse", at: Date.now() - startedAt.current, request });
     } catch (error) {
-      dispatch({ type: "event", event: { kind: "error", message: String(error) } });
+      reportError(dispatch, error, "mouse");
     }
   };
 
   const saveProfile = async () => {
-    if (!state.settings) return;
-    const settings = { ...state.settings, mouse: profile };
-    await call("settings_save", { settings });
-    dispatch({ type: "settings", settings });
-    dispatch({ type: "event", event: { kind: "log", line: "已儲存擬人化參數" } });
+    try {
+      await saveSettings({ mouse: profile });
+      dispatch({ type: "event", event: { kind: "log", line: "已儲存擬人化參數" } });
+    } catch (error) {
+      reportError(dispatch, error, "settings_save");
+    }
   };
 
   const runMacro = async (steps: MacroStep[], speed: number) => {
     let previous = 0;
-    for (const step of steps) {
-      const wait = Math.max(0, (step.at - previous) / speed);
-      previous = step.at;
-      await new Promise((resolve) => window.setTimeout(resolve, Math.min(wait, 2000)));
-      if (step.kind === "mouse") await call("mouse", { request: step.request });
-      if (step.kind === "text") await call("type_text", { config: step.config });
-      if (step.kind === "chord") await call("chord", { config: step.config });
+    try {
+      for (const step of steps) {
+        const wait = Math.max(0, (step.at - previous) / speed);
+        previous = step.at;
+        await new Promise((resolve) => window.setTimeout(resolve, Math.min(wait, 2000)));
+        if (step.kind === "mouse") await call("mouse", { request: step.request });
+        if (step.kind === "text") await call("type_text", { config: step.config });
+        if (step.kind === "chord") await call("chord", { config: step.config });
+      }
+    } catch (error) {
+      reportError(dispatch, error, "macro_load");
     }
+  };
+
+  const typeText = () => {
+    const config = { ...typing, text };
+    void call("type_text", { config }).catch((error) => reportError(dispatch, error, "type_text"));
+    record({ kind: "text", at: Date.now() - startedAt.current, config });
+  };
+
+  const sendChord = () => {
+    const usages = chordKeys
+      .split(",")
+      .map((part) => Number.parseInt(part.trim(), 16))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (usages.length === 0) {
+      reportError(dispatch, new Error("組合鍵沒有送出：至少要有一個 16 進位鍵碼，例如 E0,E1,06"), "chord");
+      return;
+    }
+    const config: ChordConfig = { usages, holdMs: chordHold };
+    void call("chord", { config }).catch((error) => reportError(dispatch, error, "chord"));
+    record({ kind: "chord", at: Date.now() - startedAt.current, config });
   };
 
   return (
@@ -195,7 +245,7 @@ export function MousePage() {
           </label>
         </div>
         <TrajectoryView preview={preview} />
-        {previewError && <p className="error-text">預覽失敗：{previewError}</p>}
+        {previewError && <ErrorLine error={previewError} />}
         <p className="muted">
           預覽與實際送出的節點是同一支 `trajectory_with`。目前 {path} 個節點
           {preview ? `、約 ${preview.nodes[preview.nodes.length - 1]?.atMs ?? 0} ms` : ""}。
@@ -206,15 +256,15 @@ export function MousePage() {
         <div className="grid four">
           <label className="field">
             <span>dx</span>
-            <input type="number" value={x} onChange={(event) => setX(Number(event.target.value))} />
+            <input type="number" value={x} onChange={(event) => setX(intValue(event.target.value, x))} />
           </label>
           <label className="field">
             <span>dy</span>
-            <input type="number" value={y} onChange={(event) => setY(Number(event.target.value))} />
+            <input type="number" value={y} onChange={(event) => setY(intValue(event.target.value, y))} />
           </label>
           <label className="field">
             <span>時間 (ms)</span>
-            <input type="number" value={duration} onChange={(event) => setDuration(Number(event.target.value))} />
+            <input type="number" value={duration} onChange={(event) => setDuration(intValue(event.target.value, duration, 0, 60000))} />
           </label>
           <div className="field">
             <span>&nbsp;</span>
@@ -237,15 +287,15 @@ export function MousePage() {
         <div className="grid four">
           <label className="field">
             <span>按鍵 1–5</span>
-            <input type="number" min={1} max={5} value={button} onChange={(event) => setButton(Number(event.target.value))} />
+            <input type="number" min={1} max={5} value={button} onChange={(event) => setButton(intValue(event.target.value, button, 1, 5))} />
           </label>
           <label className="field">
             <span>次數</span>
-            <input type="number" min={1} max={2} value={count} onChange={(event) => setCount(Number(event.target.value))} />
+            <input type="number" min={1} max={2} value={count} onChange={(event) => setCount(intValue(event.target.value, count, 1, 2))} />
           </label>
           <label className="field">
             <span>滾輪</span>
-            <input type="number" value={wheel} onChange={(event) => setWheel(Number(event.target.value))} />
+            <input type="number" value={wheel} onChange={(event) => setWheel(intValue(event.target.value, wheel, -12000, 12000))} />
           </label>
           <div className="field">
             <span>&nbsp;</span>
@@ -264,7 +314,7 @@ export function MousePage() {
           <button disabled={!state.connected} onClick={() => void send({ Wheel: { vertical: 0, horizontal: wheel } }, "水平滾輪")}>
             水平滾輪
           </button>
-          <button className="danger" disabled={!state.connected} onClick={() => void call("reset_input", {})}>
+          <button className="danger" disabled={!state.connected} onClick={() => void call("reset_input", {}).catch((error) => reportError(dispatch, error, "reset_input"))}>
             全部放開
           </button>
         </div>
@@ -282,13 +332,7 @@ export function MousePage() {
             <Slider label="抖動" value={typing.jitterMs} min={0} max={200} step={5} suffix=" ms" onChange={(jitterMs) => setTyping({ ...typing, jitterMs })} />
             <div className="field">
               <span>&nbsp;</span>
-              <button
-                disabled={!state.connected}
-                onClick={() => {
-                  void call("type_text", { config: { ...typing, text } });
-                  record({ kind: "text", at: Date.now() - startedAt.current, config: { ...typing, text } });
-                }}
-              >
+              <button disabled={!state.connected} onClick={typeText}>
                 開始輸入
               </button>
             </div>
@@ -305,22 +349,11 @@ export function MousePage() {
           </label>
           <label className="field">
             <span>按住 (ms)</span>
-            <input type="number" value={chordHold} onChange={(event) => setChordHold(Number(event.target.value))} />
+            <input type="number" value={chordHold} onChange={(event) => setChordHold(intValue(event.target.value, chordHold, 8, 5000))} />
           </label>
           <div className="field">
             <span>&nbsp;</span>
-            <button
-              disabled={!state.connected}
-              onClick={() => {
-                const usages = chordKeys
-                  .split(",")
-                  .map((part) => Number.parseInt(part.trim(), 16))
-                  .filter((value) => Number.isFinite(value) && value > 0);
-                const config: ChordConfig = { usages, holdMs: chordHold };
-                void call("chord", { config });
-                record({ kind: "chord", at: Date.now() - startedAt.current, config });
-              }}
-            >
+            <button disabled={!state.connected} onClick={sendChord}>
               按下組合
             </button>
           </div>
@@ -358,7 +391,7 @@ export function MousePage() {
                     return call("macro_list", {});
                   })
                   .then(setMacros)
-                  .catch((error) => dispatch({ type: "event", event: { kind: "error", message: String(error) } }));
+                  .catch((error) => reportError(dispatch, error, "macro_save"));
               }}
             >
               儲存巨集
@@ -382,9 +415,10 @@ export function MousePage() {
                     key={name}
                     className="small"
                     onClick={() => {
+                      setMacroName(name);
                       void call("macro_load", { name })
                         .then((steps) => runMacro(steps as MacroStep[], 1))
-                        .catch((error) => dispatch({ type: "event", event: { kind: "error", message: String(error) } }));
+                        .catch((error) => reportError(dispatch, error, "macro_load"));
                     }}
                   >
                     播放 {name}
