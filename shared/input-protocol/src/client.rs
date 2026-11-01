@@ -93,6 +93,119 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::UsbModel;
+    use anyhow::bail;
+    use std::time::Instant;
+
+    /// Drives a `Client` the way any host must: pump what the device sent,
+    /// prepare the next command, write it (a short write is a failure, never a
+    /// success), then wait for the matching reply inside a fixed deadline.
+    ///
+    /// The desktop tool used to own this loop; it lives here now so the four
+    /// behaviours below are tested against the client and the wire, not against
+    /// one consumer's session wrapper.
+    struct Link {
+        client: Client,
+        model: UsbModel,
+        deadline: std::time::Duration,
+    }
+
+    impl Link {
+        fn open() -> Self {
+            let mut link = Self {
+                client: Client::new(Capabilities::parse(&UsbModel::feature()).unwrap(), 4242),
+                model: UsbModel::default(),
+                deadline: std::time::Duration::from_millis(150),
+            };
+            link.exchange(&Command::Open).unwrap();
+            link
+        }
+
+        fn exchange(&mut self, command: &Command) -> Result<Option<Packet>> {
+            self.pump()?;
+            let report = self.client.prepare(command)?;
+            match self.model.write(&report)? {
+                64 => {}
+                written => bail!("HID 短寫入 {written}/64"),
+            }
+            if !command.expects_reply() {
+                return Ok(None);
+            }
+            let started = Instant::now();
+            while started.elapsed() < self.deadline {
+                self.pump()?;
+                if let Some(packet) = self.client.take_reply() {
+                    return Ok(Some(packet));
+                }
+            }
+            bail!("v3 控制回應逾時")
+        }
+
+        fn pump(&mut self) -> Result<()> {
+            let mut report = [0u8; 64];
+            if self.model.read(&mut report) == 0 {
+                return Ok(());
+            }
+            self.client.receive(&report)
+        }
+    }
+
+    #[test]
+    fn short_write_never_completes_a_control_command() {
+        let mut link = Link::open();
+        link.model.short = true;
+        let error = link.exchange(&Command::Barrier).unwrap_err().to_string();
+        assert!(error.contains("短寫入"), "{error}");
+        assert!(link.client.take_reply().is_none());
+        // The requirement is still outstanding, so the host must not keep using
+        // the session as if that command had landed.
+        assert!(link.client.prepare(&Command::Barrier).is_err());
+    }
+
+    #[test]
+    fn an_own_session_fault_ends_the_connection() {
+        let mut link = Link::open();
+        link.exchange(&Command::Barrier).unwrap();
+        link.model.fault(5);
+        let error = link.pump().unwrap_err().to_string();
+        assert!(error.contains("故障"), "{error}");
+        assert!(link.client.take_reply().is_none());
+    }
+
+    #[test]
+    fn other_owners_frames_are_ignored() {
+        let mut link = Link::open();
+        let foreign = link.client.session.wrapping_add(1);
+        for opcode in [v3::EVENT, v3::BARRIER | 128, v3::OPEN | 128] {
+            link.model.reads.push_back(
+                Packet {
+                    opcode,
+                    flags: 0,
+                    session: foreign,
+                    sequence: 2,
+                    payload: vec![5],
+                }
+                .encode(v3::IN_ID)
+                .unwrap(),
+            );
+        }
+        // Somebody else's EVENT must not fault this session, and their replies
+        // must not be taken as ours.
+        link.exchange(&Command::Barrier).unwrap();
+        assert!(link.client.take_reply().is_none());
+    }
+
+    #[test]
+    fn silence_is_a_timeout_not_a_hang() {
+        let mut link = Link::open();
+        link.model.silent = true;
+        let started = Instant::now();
+        let error = link.exchange(&Command::Barrier).unwrap_err().to_string();
+        assert!(error.contains("逾時"), "{error}");
+        assert!(started.elapsed() >= link.deadline);
+        assert!(link.client.take_reply().is_none());
+    }
+
     fn caps() -> Capabilities {
         let mut r = [0; 64];
         r[0] = 14;

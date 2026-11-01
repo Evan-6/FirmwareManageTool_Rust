@@ -143,7 +143,9 @@ pub fn new_session_id() -> u32 {
     .max(1)
 }
 
-#[cfg(feature = "test-support")]
+// The in-memory device is compiled for this crate's own tests as well, so the
+// `Client` contract can be exercised without the consuming tool's test kit.
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
 pub mod pointer;
