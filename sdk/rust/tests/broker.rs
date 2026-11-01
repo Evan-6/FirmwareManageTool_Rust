@@ -7,12 +7,12 @@
 
 use gdb::broker::{self, Client, Event, Server, Source};
 use gdb::event::ConnectionState;
-use gdb::{DeviceOptions, ErrorCode, Manager, MotionOptions};
+use gdb::{DeviceOptions, Error, ErrorCode, Manager, MotionOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn unique(stem: &str) -> String {
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -54,6 +54,21 @@ fn raw(name: &str) -> std::fs::File {
             }
             Err(error) => panic!("cannot open {path}: {error}"),
         }
+    }
+}
+
+/// Blocks until the broker has no client left, and returns what it counted.
+///
+/// A connection leaves the roster on the broker's own thread, so "no clients"
+/// is a state to wait for, not a state to read once.
+fn wait_for_no_clients(server: &Server) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let count = server.clients();
+        if count == 0 || Instant::now() >= deadline {
+            return count;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -334,4 +349,168 @@ fn closing_the_server_ends_clients_with_a_clear_error() {
     );
     assert!(!Client::available(&name));
     assert_eq!(server.clients(), 0);
+}
+
+/// The listener must never leave the pipe without an instance.
+///
+/// `Client::connect` makes one attempt when the pipe has no instance, so a cycle
+/// that lands between "this instance was accepted" and "the next one listens"
+/// fails here instead of being papered over by a retry.
+#[test]
+fn twenty_consecutive_connects_never_find_a_missing_pipe() {
+    let name = unique("cycles");
+    let server = serving(&name);
+
+    for cycle in 0..20 {
+        let client = Client::connect(&name).unwrap_or_else(|error| {
+            panic!(
+                "cycle {cycle}: connect failed with {:?}: {error}",
+                error.code()
+            )
+        });
+        assert_eq!(client.info().unwrap().serial, "MOCK");
+        assert!(client.status().is_ok());
+        drop(client);
+        assert_eq!(
+            wait_for_no_clients(&server),
+            0,
+            "cycle {cycle}: the broker still counts a client after it left"
+        );
+    }
+
+    assert!(Client::available(&name));
+    assert_eq!(server.state(), ConnectionState::Connected);
+}
+
+/// Eight clients asking at the same instant, against a listener that can only
+/// accept one at a time: nobody may be turned away.
+#[test]
+fn eight_clients_connecting_at_once_all_get_through() {
+    let name = unique("burst");
+    let server = serving(&name);
+    let gate = Arc::new(Barrier::new(8));
+
+    let workers: Vec<_> = (0..8usize)
+        .map(|index| {
+            let name = name.clone();
+            let gate = gate.clone();
+            thread::spawn(move || {
+                gate.wait();
+                let client = Client::connect(&name)?;
+                let info = client.info()?;
+                let status = client.status()?;
+                client.key(7, 0x04 + index as u16, true)?;
+                Ok::<_, Error>((client, info.serial, status.lease_ms))
+            })
+        })
+        .collect();
+
+    let mut clients = Vec::new();
+    for (index, worker) in workers.into_iter().enumerate() {
+        let (client, serial, lease_ms) = worker
+            .join()
+            .expect("a client thread must not panic")
+            .unwrap_or_else(|error: Error| {
+                panic!(
+                    "client {index} never got through: {error} ({:?})",
+                    error.code()
+                )
+            });
+        assert_eq!(serial, "MOCK");
+        assert_eq!(lease_ms, 2000);
+        clients.push(client);
+    }
+
+    // Eight live clients, so no connect was refused: the roster only gains an
+    // entry once the listener has accepted the connection.
+    assert_eq!(server.clients(), 8);
+
+    drop(clients);
+    assert_eq!(wait_for_no_clients(&server), 0);
+}
+
+/// What a client saw while the server was going away.
+enum Ending {
+    /// The pipe had nothing to connect to and said so.
+    Refused(ErrorCode, String),
+    /// A connection was made and then the pipe ended under it.
+    Ended(ErrorCode, String),
+}
+
+/// A connect that races the shutdown must resolve one way or the other: a
+/// connection that then ends, or a clean error. Never a wait with no answer.
+#[test]
+fn a_client_connecting_while_the_server_shuts_down_never_hangs() {
+    let name = unique("shutdown-race");
+    let server = serving(&name);
+
+    let connected_once = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) = mpsc::channel();
+    let prober_name = name.clone();
+    let prober_flag = connected_once.clone();
+    let prober = thread::spawn(move || {
+        let begin = Instant::now();
+        let mut connects = 0u32;
+        let ending = loop {
+            if begin.elapsed() > Duration::from_secs(10) {
+                break None;
+            }
+            match Client::connect(&prober_name) {
+                Ok(client) => {
+                    connects += 1;
+                    prober_flag.store(true, Ordering::SeqCst);
+                    // A live connection must answer or end; blocking here is the
+                    // hang this test forbids.
+                    match client.info() {
+                        Ok(_) => thread::sleep(Duration::from_millis(1)),
+                        Err(error) => break Some(Ending::Ended(error.code(), error.message)),
+                    }
+                }
+                Err(error) => break Some(Ending::Refused(error.code(), error.message)),
+            }
+        };
+        let _ = sender.send((ending, connects));
+    });
+
+    // Shut down only once the prober really is connecting, so the race is real.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !connected_once.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the prober never connected");
+        thread::sleep(Duration::from_millis(1));
+    }
+    server.shutdown();
+
+    let (ending, connects) = receiver
+        .recv_timeout(Duration::from_secs(15))
+        .expect("a connect during shutdown must answer, not hang");
+    prober.join().unwrap();
+
+    assert!(connects >= 1, "the prober never connected at all");
+    let (code, message) = match ending.expect("the prober never saw the server go away") {
+        Ending::Refused(code, message) | Ending::Ended(code, message) => (code, message),
+    };
+    assert_eq!(
+        code,
+        ErrorCode::Disconnected,
+        "unexpected ending: {message}"
+    );
+    assert!(
+        message.contains("broker"),
+        "the error must say what it is about: {message}"
+    );
+
+    // Afterwards the pipe is gone, and asking again answers instead of waiting.
+    let started = Instant::now();
+    let error = Client::connect(&name).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Disconnected);
+    assert!(
+        error.message.contains("no broker is listening"),
+        "unexpected message: {}",
+        error.message
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a missing broker must be reported at once"
+    );
+    assert!(!Client::available(&name));
 }

@@ -108,6 +108,10 @@ pub fn pipe_path(name: &str) -> String {
 
 /// How long a call waits for its reply before reporting a timeout.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long `Client::connect` queues behind a pipe whose instances are all taken.
+const BUSY_WAIT: Duration = Duration::from_millis(250);
+/// How long `Client::connect_or_spawn` waits for the broker it just started.
+const SPAWN_WAIT: Duration = Duration::from_secs(3);
 /// A client that never reads must not stall the broker's broadcasts forever.
 const EVENT_WRITE_MS: u32 = 250;
 /// A reply is small; if this much cannot be written, the peer is gone.
@@ -1035,15 +1039,29 @@ pub struct Client {
 
 impl Client {
     /// Connects to `\\.\pipe\gdbox-<name>`.
+    ///
+    /// One attempt: a serving broker always has an instance waiting for it (see
+    /// [`Server`]), so a healthy connect never retries. When nothing serves the
+    /// pipe this fails at once with [`ErrorCode::Disconnected`] and says so; a
+    /// pipe whose instances are all taken is queued on for up to 250 ms.
     pub fn connect(name: impl AsRef<str>) -> Result<Self> {
-        Self::connect_timeout(name, Duration::from_millis(250))
+        let name = name.as_ref();
+        validate_name(name)?;
+        let conn = pipe::connect(&pipe_path(name), BUSY_WAIT)?;
+        Self::attached(name, conn)
     }
 
-    /// Connects, waiting up to `wait` for a busy pipe to free an instance.
+    /// Connects, waiting up to `wait` for the pipe to take a client: a busy pipe
+    /// frees an instance, and a pipe with no instance at all — a broker that is
+    /// starting or restarting — is tried again until `wait` runs out.
     pub fn connect_timeout(name: impl AsRef<str>, wait: Duration) -> Result<Self> {
         let name = name.as_ref();
         validate_name(name)?;
-        let conn = pipe::connect(&pipe_path(name), wait)?;
+        let conn = pipe::connect_waiting(&pipe_path(name), wait)?;
+        Self::attached(name, conn)
+    }
+
+    fn attached(name: &str, conn: pipe::Connection) -> Result<Self> {
         let stop = pipe::Stop::new()?;
         let shared = Arc::new(Shared {
             conn,
@@ -1085,20 +1103,13 @@ impl Client {
             Err(_) => {}
         }
         spawn_broker(exe.as_ref(), name)?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match Self::connect(name) {
-                Ok(client) => return Ok(client),
-                Err(error) => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::timeout(format!(
-                            "no broker answered on {name} within 3 s: {error}"
-                        )));
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-            }
-        }
+        // One bounded wait, in one place: `connect_timeout` retries while the
+        // child is still creating its pipe and says which state it gave up in.
+        Self::connect_timeout(name, SPAWN_WAIT).map_err(|error| {
+            Error::timeout(format!(
+                "no broker answered on {name} within {SPAWN_WAIT:?}: {error}"
+            ))
+        })
     }
 
     pub fn set_timeout(&mut self, timeout: Duration) {
@@ -1735,24 +1746,43 @@ mod pipe {
         Ok(Some(text))
     }
 
-    /// Listens on `path`, one instance at a time, always keeping the next one
-    /// ready so a client never sees a momentary `PIPE_BUSY`.
+    /// One instance with an outstanding `ConnectNamedPipe`.
+    ///
+    /// Each carries its own event and OVERLAPPED, so several waits can be in
+    /// flight at once — which is what lets the listener keep a spare instance
+    /// free instead of owning a single one.
+    struct Pending {
+        handle: isize,
+        io: Io,
+        /// A client was already connected when the wait started, so there is no
+        /// I/O to complete and `io.event` never fires.
+        ready: bool,
+    }
+
+    /// How many instances listen at the same time.
+    ///
+    /// One is not enough. Windows hands a `CreateFile` to a *free* instance, and
+    /// an instance stops being free the instant a client is on it: while the
+    /// accept loop takes an accepted instance away, another one has to be
+    /// waiting already, or the next client is refused with
+    /// `ERROR_FILE_NOT_FOUND` and has to retry.
+    const SPARE_INSTANCES: usize = 2;
+
+    /// Listens on `path`, keeping [`SPARE_INSTANCES`] instances ready so a
+    /// client never finds the pipe without one.
     pub(super) struct Listener {
         name: Vec<u16>,
-        pending: Option<isize>,
-        connect: Io,
+        pending: Vec<Pending>,
     }
 
     impl Listener {
         pub(super) fn new(path: &str) -> Result<Self> {
-            let name = wide(path)?;
-            let connect = Io::new()?;
             let mut listener = Self {
-                name,
-                pending: None,
-                connect,
+                name: wide(path)?,
+                pending: Vec::with_capacity(SPARE_INSTANCES),
             };
-            listener.pending = Some(listener.create()?);
+            // Both instances listen before this returns.
+            listener.refill()?;
             Ok(listener)
         }
 
@@ -1782,68 +1812,142 @@ mod pipe {
             }
         }
 
-        pub(super) fn accept(&mut self, stop: &Stop) -> Result<Connection> {
-            if stop.is_set() {
-                return Err(Error::cancelled());
-            }
-            let handle = match self.pending.take() {
-                Some(handle) => handle,
-                None => self.create()?,
-            };
-            unsafe {
-                ResetEvent(self.connect.event);
-            }
-            if unsafe { ConnectNamedPipe(handle, &mut *self.connect.overlapped) } == 0 {
-                let code = last_error();
-                if code == ERROR_PIPE_CONNECTED {
-                    // Connected between CreateNamedPipeW and here: already done.
-                } else if code == ERROR_IO_PENDING {
-                    let handles = [self.connect.event, stop.event];
-                    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) } {
-                        WAIT_OBJECT_0 => {
-                            let mut got = 0u32;
-                            if unsafe {
-                                GetOverlappedResult(
-                                    handle,
-                                    &mut *self.connect.overlapped,
-                                    &mut got,
-                                    0,
-                                )
-                            } == 0
-                            {
-                                let error = io_error("ConnectNamedPipe", last_error());
-                                self.discard(handle);
-                                return Err(error);
-                            }
-                        }
-                        _ => {
-                            unsafe {
-                                CancelIoEx(handle, &mut *self.connect.overlapped);
-                                let mut got = 0u32;
-                                GetOverlappedResult(
-                                    handle,
-                                    &mut *self.connect.overlapped,
-                                    &mut got,
-                                    1,
-                                );
-                            }
-                            self.discard(handle);
-                            return Err(Error::cancelled());
-                        }
-                    }
-                } else {
-                    let error = io_error("ConnectNamedPipe", code);
+        /// Creates one instance and starts waiting on it. The handle is closed
+        /// again if the wait cannot be started, so a failure leaks nothing.
+        fn start(&mut self) -> Result<()> {
+            let handle = self.create()?;
+            let io = match Io::new() {
+                Ok(io) => io,
+                Err(error) => {
                     self.discard(handle);
                     return Err(error);
                 }
+            };
+            let mut pending = Pending {
+                handle,
+                io,
+                ready: false,
+            };
+            unsafe {
+                ResetEvent(pending.io.event);
             }
-            // This instance is busy now, so a fresh one is the only one a client
-            // can reach: exactly one listening instance at any time.
-            self.pending = self.create().ok();
-            match Connection::new(handle) {
+            if unsafe { ConnectNamedPipe(handle, &mut *pending.io.overlapped) } == 0 {
+                match last_error() {
+                    // A client arrived between the create and the wait: the
+                    // connection is made and there is nothing left to wait for.
+                    ERROR_PIPE_CONNECTED => pending.ready = true,
+                    ERROR_IO_PENDING => {}
+                    code => {
+                        let error = io_error("ConnectNamedPipe", code);
+                        self.discard(handle);
+                        return Err(error);
+                    }
+                }
+            } else {
+                // Connected inside the call, so no completion is coming: waiting
+                // on the event would be waiting for something that never fires.
+                pending.ready = true;
+            }
+            self.pending.push(pending);
+            Ok(())
+        }
+
+        /// Tops the pool back up to [`SPARE_INSTANCES`].
+        fn refill(&mut self) -> Result<()> {
+            while self.pending.len() < SPARE_INSTANCES {
+                self.start()?;
+            }
+            Ok(())
+        }
+
+        /// Ends every outstanding wait and closes every instance: after this the
+        /// pipe has nothing listening, and a client that reaches it is told so
+        /// instead of finding a half-open end.
+        fn close_pending(&mut self) {
+            while let Some(mut pending) = self.pending.pop() {
+                unsafe {
+                    CancelIoEx(pending.handle, &mut *pending.io.overlapped);
+                    let mut got = 0u32;
+                    // Reap before the handle goes away: a client that connected
+                    // in this instant is then disconnected by `discard`, not
+                    // left staring at a handle that no longer exists.
+                    GetOverlappedResult(pending.handle, &mut *pending.io.overlapped, &mut got, 1);
+                }
+                self.discard(pending.handle);
+            }
+        }
+
+        /// Waits for one client. The accepted instance leaves the pool and a
+        /// fresh one takes its place before this returns, so the pool is never
+        /// empty when the next `CreateFile` arrives.
+        pub(super) fn accept(&mut self, stop: &Stop) -> Result<Connection> {
+            loop {
+                if stop.is_set() {
+                    self.close_pending();
+                    return Err(Error::cancelled());
+                }
+                // Top up first: the instance accepted below must not be the last
+                // one the pipe has.
+                self.refill()?;
+                if let Some(index) = self.pending.iter().position(|pending| pending.ready) {
+                    return self.take(index);
+                }
+                let mut wait: Vec<isize> = self
+                    .pending
+                    .iter()
+                    .map(|pending| pending.io.event)
+                    .collect();
+                let stop_index = wait.len() as u32;
+                wait.push(stop.event);
+                let signalled = unsafe {
+                    WaitForMultipleObjects(wait.len() as u32, wait.as_ptr(), 0, INFINITE)
+                };
+                if signalled == WAIT_OBJECT_0 + stop_index {
+                    self.close_pending();
+                    return Err(Error::cancelled());
+                }
+                if signalled > WAIT_OBJECT_0 + stop_index {
+                    let error = Error::io(format!("broker pipe wait failed ({signalled})"));
+                    self.close_pending();
+                    return Err(error);
+                }
+                let index = (signalled - WAIT_OBJECT_0) as usize;
+                let mut got = 0u32;
+                let pending = &mut self.pending[index];
+                let handle = pending.handle;
+                let completed = unsafe {
+                    GetOverlappedResult(handle, &mut *pending.io.overlapped, &mut got, 0)
+                };
+                if completed != 0 {
+                    return self.take(index);
+                }
+                // The wait failed — usually the client left between connecting
+                // and being accepted. Drop that one instance and keep serving.
+                let error = io_error("ConnectNamedPipe", last_error());
+                crate::sdk_log!(
+                    super::Level::Debug,
+                    "broker: dropping a pipe instance: {error}"
+                );
+                let pending = self.pending.remove(index);
+                self.discard(pending.handle);
+            }
+        }
+
+        /// Hands one accepted instance to a connection, refilling the pool first.
+        fn take(&mut self, index: usize) -> Result<Connection> {
+            let pending = self.pending.remove(index);
+            if let Err(error) = self.refill() {
+                // Serving the client already in hand beats refusing it; the next
+                // `accept` tries to refill again.
+                crate::sdk_log!(
+                    super::Level::Warn,
+                    "broker: cannot keep a spare pipe instance: {error}"
+                );
+            }
+            match Connection::new(pending.handle) {
                 Ok(connection) => Ok(connection),
                 Err(error) => {
-                    self.discard(handle);
+                    self.discard(pending.handle);
                     Err(error)
                 }
             }
@@ -1852,15 +1956,35 @@ mod pipe {
 
     impl Drop for Listener {
         fn drop(&mut self) {
-            if let Some(handle) = self.pending.take() {
-                self.discard(handle);
-            }
+            // The process must not keep the pipe open once the server is gone.
+            self.close_pending();
         }
     }
 
+    /// Connects to `path` once a free instance is available.
+    ///
+    /// A broker that is serving always has an instance waiting, so a single
+    /// `CreateFile` is enough and "nothing is listening" is reported at once. A
+    /// *busy* pipe (every instance already has a client) is waited on for up to
+    /// `wait`, because queueing for a free instance is what `WaitNamedPipe` is
+    /// for — that is a queue, not a retry of a failure.
     pub(super) fn connect(path: &str, wait: Duration) -> Result<Connection> {
+        attach(path, wait, false)
+    }
+
+    /// Like [`connect`], but keeps trying for up to `wait` while the pipe has no
+    /// instance at all: a broker that is starting up, or restarting, has a short
+    /// window with nothing to connect to.
+    pub(super) fn connect_waiting(path: &str, wait: Duration) -> Result<Connection> {
+        attach(path, wait, true)
+    }
+
+    fn attach(path: &str, wait: Duration, await_instance: bool) -> Result<Connection> {
         let name = wide(path)?;
         let deadline = Instant::now() + wait;
+        // An instance that was there a moment ago and is gone now belongs to a
+        // broker that is restarting; one that was never there was never started.
+        let mut was_listening = false;
         loop {
             let handle = unsafe {
                 CreateFileW(
@@ -1885,18 +2009,43 @@ mod pipe {
                 };
             }
             let code = last_error();
-            if code != ERROR_PIPE_BUSY {
-                return Err(io_error("CreateFileW", code));
-            }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::timeout(format!("broker pipe {path} is busy")));
-            }
-            let slice = remaining.min(Duration::from_millis(100));
-            unsafe {
-                WaitNamedPipeW(name.as_ptr(), slice.as_millis() as u32);
+            match code {
+                ERROR_PIPE_BUSY => {
+                    was_listening = true;
+                    if remaining.is_zero() {
+                        return Err(Error::timeout(format!(
+                            "broker pipe {path} is busy: every instance has a client"
+                        )));
+                    }
+                    unsafe {
+                        WaitNamedPipeW(
+                            name.as_ptr(),
+                            remaining.min(Duration::from_millis(100)).as_millis() as u32,
+                        );
+                    }
+                }
+                ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND
+                    if await_instance && !remaining.is_zero() =>
+                {
+                    std::thread::sleep(remaining.min(Duration::from_millis(2)));
+                }
+                ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => {
+                    return Err(missing(path, was_listening));
+                }
+                other => return Err(io_error("CreateFileW", other)),
             }
         }
+    }
+
+    /// The one thing a client can be told when the pipe has no instance.
+    fn missing(path: &str, was_listening: bool) -> Error {
+        let message = if was_listening {
+            format!("the broker on {path} is restarting: its pipe had an instance a moment ago")
+        } else {
+            format!("no broker is listening on {path}: nothing serves that pipe")
+        };
+        Error::new(ErrorCode::Disconnected, message)
     }
 
     /// Probes without keeping the connection: is a broker listening on `path`?
@@ -2047,5 +2196,71 @@ mod tests {
             let restored: Command = wire.into();
             assert_eq!(command.wire().unwrap(), restored.wire().unwrap());
         }
+    }
+
+    /// The listener must own a spare instance, not one.
+    ///
+    /// Two connects before anything is accepted: the second can only get in if
+    /// the pipe has a second instance, which is the invariant that keeps a
+    /// `CreateFile` from landing on an empty pipe — stated without a race.
+    #[cfg(windows)]
+    #[test]
+    fn the_listener_keeps_a_spare_instance_waiting() {
+        use super::pipe;
+        use std::time::Duration;
+
+        let path = pipe_path(&format!("unit-spare-startup-{}", std::process::id()));
+        let listener = pipe::Listener::new(&path).unwrap();
+        let first = pipe::connect(&path, Duration::from_millis(200)).unwrap();
+        let second = pipe::connect(&path, Duration::from_millis(200)).unwrap();
+        assert!(
+            pipe::exists(&path),
+            "the pipe is still there while it listens"
+        );
+        drop(second);
+        drop(first);
+        drop(listener);
+        assert!(
+            !pipe::exists(&path),
+            "a dropped listener leaves nothing behind"
+        );
+    }
+
+    /// Taking a connection must not consume the spare: after `accept` returns,
+    /// two more clients must still find an instance without another accept.
+    #[cfg(windows)]
+    #[test]
+    fn an_accepted_connection_leaves_the_spare_listening() {
+        use super::pipe;
+        use std::time::Duration;
+
+        let path = pipe_path(&format!("unit-spare-accept-{}", std::process::id()));
+        let mut listener = pipe::Listener::new(&path).unwrap();
+        let stop = pipe::Stop::new().unwrap();
+        let listener_ref = &mut listener;
+        let stop_ref = &stop;
+        let (accepted, one, two, client) = std::thread::scope(|scope| {
+            let server = scope.spawn(move || listener_ref.accept(stop_ref));
+            let client = pipe::connect(&path, Duration::from_millis(500)).unwrap();
+            let accepted = server.join().unwrap().unwrap();
+            // Nothing is accepted between here and the next accept, so both of
+            // these have to find an instance of their own.
+            let one = pipe::connect(&path, Duration::from_millis(200)).unwrap();
+            let two = pipe::connect(&path, Duration::from_millis(200)).unwrap();
+            (accepted, one, two, client)
+        });
+        drop(two);
+        drop(one);
+        drop(accepted);
+        drop(client);
+        assert!(
+            pipe::exists(&path),
+            "the pipe is still there after an accept"
+        );
+        drop(listener);
+        assert!(
+            !pipe::exists(&path),
+            "a dropped listener leaves nothing behind"
+        );
     }
 }
