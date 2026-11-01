@@ -153,6 +153,8 @@ var (
 
 	procLastError      *syscall.LazyProc
 	procStringFree     *syscall.LazyProc
+	procSetLogLevel    *syscall.LazyProc
+	procSetLogSink     *syscall.LazyProc
 	procDeviceList     *syscall.LazyProc
 	procOpen           *syscall.LazyProc
 	procOpenMock       *syscall.LazyProc
@@ -213,6 +215,8 @@ func library() *syscall.LazyDLL {
 		dll = syscall.NewLazyDLL(path)
 		procLastError = dll.NewProc("gdb_last_error")
 		procStringFree = dll.NewProc("gdb_string_free")
+		procSetLogLevel = dll.NewProc("gdb_set_log_level")
+		procSetLogSink = dll.NewProc("gdb_set_log_sink")
 		procDeviceList = dll.NewProc("gdb_device_list")
 		procOpen = dll.NewProc("gdb_open")
 		procOpenMock = dll.NewProc("gdb_open_mock")
@@ -301,14 +305,54 @@ func take(pointer uintptr) (string, error) {
 		return "", &Error{Code: IO, Message: "no reply"}
 	}
 	defer procStringFree.Call(pointer)
-	length := 0
-	for {
-		if *(*byte)(unsafe.Pointer(pointer + uintptr(length))) == 0 {
-			break
+	return cString(pointer), nil
+}
+
+// Log levels accepted by SetLogLevel; they match the C ABI.
+const (
+	LogOff   = 0
+	LogError = 1
+	LogWarn  = 2
+	LogInfo  = 3
+	LogDebug = 4
+	LogTrace = 5
+)
+
+var (
+	logMu         sync.Mutex
+	logSink       func(level int32, message string)
+	logTrampoline = syscall.NewCallback(func(_, level, message uintptr) uintptr {
+		logMu.Lock()
+		sink := logSink
+		logMu.Unlock()
+		if sink != nil {
+			sink(int32(level), cString(message))
 		}
-		length++
+		return 0
+	})
+)
+
+// SetLogLevel sets the process-wide SDK log level (LogOff … LogTrace).
+func SetLogLevel(level uint8) error {
+	library()
+	code, _, _ := procSetLogLevel.Call(uintptr(level))
+	return check(code)
+}
+
+// SetLogSink installs a callback for SDK log lines; nil turns it off again.
+// Logging stays silent until SetLogLevel raises the level.
+func SetLogSink(sink func(level int32, message string)) error {
+	library()
+	logMu.Lock()
+	logSink = sink
+	logMu.Unlock()
+	var code uintptr
+	if sink == nil {
+		code, _, _ = procSetLogSink.Call(0, 0)
+	} else {
+		code, _, _ = procSetLogSink.Call(logTrampoline, 0)
 	}
-	return string(unsafe.Slice((*byte)(unsafe.Pointer(pointer)), length)), nil
+	return check(code)
 }
 
 // Device is one controller session.
@@ -468,21 +512,17 @@ func (d *Device) Bootloader() error {
 }
 
 var (
-	callbackMu     sync.Mutex
-	nextCallbackID uintptr = 1
-	eventCallbacks         = map[uintptr]func(int32, int32, string){}
-	taskCallbacks          = map[uintptr]func() int32{}
-	eventTrampoline        = syscall.NewCallback(func(user, kind, code, message uintptr) uintptr {
+	callbackMu      sync.Mutex
+	nextCallbackID  uintptr = 1
+	eventCallbacks          = map[uintptr]func(int32, int32, string){}
+	taskCallbacks           = map[uintptr]func() int32{}
+	eventTrampoline         = syscall.NewCallback(func(user, kind, code, message uintptr) uintptr {
 		callbackMu.Lock()
 		callback := eventCallbacks[user]
 		callbackMu.Unlock()
 		text := ""
 		if message != 0 {
-			length := 0
-			for *(*byte)(unsafe.Pointer(message + uintptr(length))) != 0 {
-				length++
-			}
-			text = string(unsafe.Slice((*byte)(unsafe.Pointer(message)), length))
+			text = cString(message)
 		}
 		if callback != nil {
 			callback(int32(kind), int32(code), text)

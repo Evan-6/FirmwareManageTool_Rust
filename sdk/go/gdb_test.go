@@ -5,6 +5,7 @@ package gdb
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,6 +117,39 @@ func TestMouseAndMovement(t *testing.T) {
 		t.Fatalf("expected Cancelled, got %v", err)
 	}
 	movement.Close()
+}
+
+func TestLoggingReachesTheSink(t *testing.T) {
+	var mu sync.Mutex
+	var lines []string
+	if err := SetLogSink(func(level int32, message string) {
+		mu.Lock()
+		lines = append(lines, message)
+		mu.Unlock()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = SetLogSink(nil)
+		_ = SetLogLevel(LogOff)
+	}()
+	if err := SetLogLevel(LogInfo); err != nil {
+		t.Fatal(err)
+	}
+
+	device, err := OpenMock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) == 0 {
+		t.Fatal("expected the close to reach the log sink")
+	}
 }
 
 func TestSchedulerOrderAndErrors(t *testing.T) {
