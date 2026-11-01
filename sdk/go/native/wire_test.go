@@ -394,14 +394,29 @@ func TestExpectedReplySet(t *testing.T) {
 }
 
 func TestLeaseRenewalSet(t *testing.T) {
-	for _, opcode := range []uint8{OpStatus, OpBarrier} {
-		if RenewsLease(opcode) {
-			t.Errorf("opcode %d must not renew the lease", opcode)
-		}
-	}
-	for _, opcode := range []uint8{OpOpen, OpClose, OpHeartbeat, OpStatusExt, OpSessionList, OpKey, OpMouseMove} {
-		if !RenewsLease(opcode) {
-			t.Errorf("opcode %d must renew the lease", opcode)
+	// Mirrors firmware/engine/src/engine.rs: lease_at is written for OPEN,
+	// HEARTBEAT, RELEASE_ALL, BOOTLOADER and valid input only. STATUS, BARRIER,
+	// STATUS_EXT and SESSION_LIST must not renew, or a host whose only traffic
+	// is a query poll would starve its own heartbeat.
+	for opcode, want := range map[uint8]bool{
+		OpOpen:        true,
+		OpHeartbeat:   true,
+		OpReleaseAll:  true,
+		OpBootloader:  true,
+		OpKey:         true,
+		OpSnapshot:    true,
+		OpMouseMove:   true,
+		OpMouseButton: true,
+		OpWheel:       true,
+		OpClose:       false,
+		OpStatus:      false,
+		OpBarrier:     false,
+		OpStatusExt:   false,
+		OpSessionList: false,
+		OpEvent:       false,
+	} {
+		if got := RenewsLease(opcode); got != want {
+			t.Errorf("opcode %d renews the lease = %v, want %v", opcode, got, want)
 		}
 	}
 }

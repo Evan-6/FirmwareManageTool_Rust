@@ -368,8 +368,8 @@ fn start_heartbeat(inner: &Arc<Inner>) {
                 Ok(state) => state,
                 Err(_) => continue,
             };
-            // Ask the session, not the caller: STATUS and BARRIER do not renew
-            // the device-side lease, so a host polling STATUS in a loop would
+            // Ask the session, not the caller: the query and barrier opcodes do
+            // not renew the device-side lease, so a host polling STATUS_EXT would
             // otherwise never heartbeat and lose the session every lease period.
             let due = match state.session.as_ref() {
                 Some(session) => session.renew_age() >= Duration::from_millis(HEARTBEAT_MS),

@@ -45,7 +45,8 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
   `sdk/rust` first, then the C ABI if another language needs it.
 - `Device::command` is the only raw escape hatch; it skips SDK bookkeeping
   (held buttons, mock cursor), so prefer the typed methods.
-- The device renews the lease on every command except STATUS and BARRIER. Never
+- The lease renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER and valid
+  input; CLOSE, STATUS, BARRIER, STATUS_EXT, SESSION_LIST and EVENT do not. Never
   treat "some call succeeded" as a heartbeat.
 - Keep the IPC contract stable: `node scripts/check-ipc.mjs` compares
   `generate_handler![...]` / `enum UiEvent` with `ui/src/lib/ipc.ts` and

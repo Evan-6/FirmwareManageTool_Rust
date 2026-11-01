@@ -274,6 +274,35 @@ func TestStatusPollingDoesNotSuppressTheHeartbeat(t *testing.T) {
 	}
 }
 
+func TestStatusExtPollingDoesNotStarveTheHeartbeat(t *testing.T) {
+	// STATUS_EXT does not renew the lease either (firmware/engine/src/engine.rs).
+	// A host whose only traffic is a 100 ms STATUS_EXT poll must still heartbeat
+	// inside the 2 s lease, or it loses the session to its own diagnostics.
+	device, handle := openTestDevice(t, DefaultOptions())
+	start := handle.Count()
+	polls := 0
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, err := device.StatusExt(); err != nil {
+			t.Fatalf("status_ext poll %d: %v", polls, err)
+		}
+		polls++
+		time.Sleep(100 * time.Millisecond)
+	}
+	heartbeats := 0
+	for _, packet := range handle.Sent(start) {
+		if packet.Opcode == OpHeartbeat {
+			heartbeats++
+		}
+	}
+	if polls < 5 {
+		t.Fatalf("polls = %d over 1.2 s, want at least 5", polls)
+	}
+	if heartbeats < 1 {
+		t.Fatalf("heartbeats = %d while polling STATUS_EXT, want at least 1", heartbeats)
+	}
+}
+
 func TestSilentDeviceTimesOut(t *testing.T) {
 	device, handle := openTestDevice(t, quietOptions())
 	handle.SetSilent(true)

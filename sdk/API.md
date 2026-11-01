@@ -300,9 +300,11 @@ no drive to be tested.
 
 ## Threading rules
 
-* Lease: the device renews on every command except STATUS and BARRIER. The SDK
+* Lease: the device renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER and
+  valid input; STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew. The SDK
   tracks the last renewing command itself and sends HEARTBEAT after 500 ms of
-  silence, against a 2000 ms lease — so polling STATUS is not a heartbeat.
+  silence, against a 2000 ms lease — so a STATUS, STATUS_EXT or SESSION_LIST poll
+  is not a heartbeat.
 * Heartbeat: every 500 ms while connected. The Rust and Python loops take the
   session lock without blocking and skip a tick while a command holds it; the
   C++ heartbeat waits for the same mutex.

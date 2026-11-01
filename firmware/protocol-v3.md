@@ -49,12 +49,12 @@ VID/PID `0x03F0:0x0024`，bcdDevice `0x0310`，USB 序號取自 RP2040 unique id
 | 07 | STATUS_EXT | 空 | 87（固定 23 bytes） |
 | 08 | SESSION_LIST | 空 | 88（固定 48 bytes） |
 | 09 | BOOTLOADER | 空 | 89 |
-| 10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
-| 11 | SNAPSHOT | 31-byte input snapshot | 無 |
-| 12 | MOUSE_MOVE | dx／dy i16，各 ±1024 | 無 |
-| 13 | MOUSE_BUTTONS | buttons u8（bit 0–4） | 無 |
-| 14 | WHEEL | vertical／horizontal i16，各 ±1024 | 無 |
-| 7F | EVENT | result u8（故障碼） | 無 |
+| 0x10 | KEY | page u16、usage u16、down u8（0/1） | 無 |
+| 0x11 | SNAPSHOT | 31-byte input snapshot | 無 |
+| 0x12 | MOUSE_MOVE | dx／dy i16，各 ±1024 | 無 |
+| 0x13 | MOUSE_BUTTONS | buttons u8（bit 0–4） | 無 |
+| 0x14 | WHEEL | vertical／horizontal i16，各 ±1024 | 無 |
+| 0x7F | EVENT | result u8（故障碼） | 無 |
 
 OPEN 使用非零新 session，sequence=1；後續每個命令依序增加，包括心跳與查詢。耗盡 u32 前建立新連線，
 不在同一 session wrap。最多同時八個 session，序號各自計算。未知 session 的輸入丟棄；相同 ID 的 OPEN
@@ -74,7 +74,7 @@ input snapshot[31]。計數為 u16 wrap。snapshot、received、completed、leas
 本 session 故障以匹配自身 ID 的 EVENT／控制 timeout 判定。completed 序號才表示該 session 前面的 USB 輸出
 已完成。
 
-STATUS 不續租；OPEN、有效輸入、HEARTBEAT、STATUS_EXT、SESSION_LIST 會續租。
+STATUS 不續租；只有 OPEN、有效輸入、HEARTBEAT、RELEASE_ALL 與 BOOTLOADER 會續租。
 
 ## STATUS_EXT（07，23 bytes）
 
@@ -96,7 +96,7 @@ STATUS 不續租；OPEN、有效輸入、HEARTBEAT、STATUS_EXT、SESSION_LIST �
 ## 連線擁有者（08，48 bytes）
 
 八個 slot 各 6 bytes，空 slot 全零，順序固定（slot 0–7），所以主機不必解析可變長度清單。
-payload 沒有 result byte，第一筆的 id 就在 byte 0；這命令與其他查詢一樣會續租。
+payload 沒有 result byte，第一筆的 id 就在 byte 0；這命令不續租，和其他查詢一樣。
 
 | 位移 | 型別 | 內容 |
 | --- | --- | --- |
@@ -117,7 +117,8 @@ payload 沒有 result byte，第一筆的 id 就在 byte 0；這命令與其他�
   session 的狀態與排程，USB 完成後才回覆；session 保留。BOOTLOADER 若有其他 session 回 busy。
 - output／RX／TX 佇列各 32 項；最舊待送超過 50 ms 或溢位即失效、清除並釋放。按鍵短按順序保留；相鄰
   待送同類移動可合併，但不跨按鈕、snapshot 或 barrier。相對／滾輪累加每軸上限 ±8192，超限亦失效。
-- 租約 2000 ms；STATUS／BARRIER 不續租，其餘命令續租。主機每 500 ms 送心跳或完整快照。逾時終止
+- 租約 2000 ms；只有 OPEN、有效輸入、HEARTBEAT、RELEASE_ALL、BOOTLOADER 續租，STATUS／STATUS_EXT／
+  SESSION_LIST／BARRIER 不續租。主機每 500 ms 送心跳或完整快照。逾時終止
   session，晚到的心跳不能重播舊狀態。正常結束必須送 CLOSE，否則 owner 要等 2 秒才釋放並計入 failsafe。
 - 同時的 session 各自持有 31-byte 狀態，USB 鍵盤／Consumer／按鈕輸出為位元聯集；相同按鍵須所有持有者
   都放開才放開，snapshot 只替換自己的狀態。位移與滾輪依接收順序作用於同一支游標。

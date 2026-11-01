@@ -1937,8 +1937,9 @@ struct Session {
     Capabilities capabilities;
     std::chrono::milliseconds timeout{1000};
     // When this session last sent something the device counts as a renewal.
-    // STATUS and BARRIER do not renew, so a host polling STATUS still has to
-    // heartbeat (firmware/protocol-v3.md, 完成與租約).
+    // STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew, so a host
+    // polling any of them still has to heartbeat (firmware/protocol-v3.md,
+    // 完成與租約).
     std::chrono::steady_clock::time_point last_renew = std::chrono::steady_clock::now();
 
     static Session open(std::shared_ptr<Transport> transport, std::uint32_t timeout_ms,
@@ -1976,7 +1977,22 @@ struct Session {
     }
 
     // Sequence exhaustion is a new connection, not a wrap (protocol-v3.md).
-    static bool renews_lease(std::uint8_t opcode) { return opcode != STATUS && opcode != BARRIER; }
+    // The firmware writes lease_at only for OPEN, HEARTBEAT, RELEASE_ALL,
+    // BOOTLOADER and valid input (firmware/engine/src/engine.rs).
+    static bool renews_lease(std::uint8_t opcode) {
+        switch (opcode) {
+            case OPEN:
+            case HEARTBEAT:
+            case RELEASE_ALL:
+            case BOOTLOADER:
+            case KEY:
+            case SNAPSHOT:
+            case MOUSE_MOVE:
+            case MOUSE_BUTTONS:
+            case WHEEL: return true;
+            default: return false;
+        }
+    }
 
     std::optional<Packet> command(std::uint8_t opcode, const std::vector<std::uint8_t>& payload,
                                   bool wait_for_reply) {
@@ -2168,8 +2184,9 @@ inline void run_heartbeat(std::weak_ptr<DeviceImpl> weak, std::shared_ptr<Beat> 
         if (impl->closed.load()) {
             return;
         }
-        // Ask the session, not the caller: STATUS and BARRIER do not renew the
-        // device-side lease, so a STATUS polling loop must still heartbeat.
+        // Ask the session, not the caller: STATUS, BARRIER, STATUS_EXT and
+        // SESSION_LIST do not renew the device-side lease, so a STATUS_EXT
+        // polling loop must still heartbeat.
         if (!impl->session || impl->session->renew_age() < std::chrono::milliseconds(HEARTBEAT_MS)) {
             continue;
         }

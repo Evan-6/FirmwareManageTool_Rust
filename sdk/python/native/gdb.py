@@ -161,8 +161,23 @@ KEY_CATALOG = frozenset({(7, usage) for usage in KEYBOARD_USAGES}) | frozenset(
 REPLY_OPCODES = frozenset(
     {OPEN, CLOSE, STATUS, BARRIER, RELEASE_ALL, STATUS_EXT, SESSION_LIST, BOOTLOADER}
 )
-#: STATUS and BARRIER do not renew the device-side lease (protocol-v3.md:120).
-NON_RENEWING = frozenset({STATUS, BARRIER})
+#: The firmware writes ``lease_at`` only for these opcodes: OPEN, HEARTBEAT,
+#: RELEASE_ALL, BOOTLOADER and valid input. STATUS, BARRIER, STATUS_EXT and
+#: SESSION_LIST leave it alone (firmware/engine/src/engine.rs), so a host polling
+#: any of them must still heartbeat.
+RENEWING = frozenset(
+    {
+        OPEN,
+        HEARTBEAT,
+        RELEASE_ALL,
+        BOOTLOADER,
+        KEY,
+        SNAPSHOT,
+        MOUSE_MOVE,
+        MOUSE_BUTTONS,
+        WHEEL,
+    }
+)
 
 HEARTBEAT_MS = 500
 LEASE_MS = 2000
@@ -1723,7 +1738,7 @@ class Session:
         self.sequence += 1
         sequence = self.sequence
         report = encode_packet(opcode, self.id, sequence, payload)
-        if opcode not in NON_RENEWING:
+        if opcode in RENEWING:
             self.last_renew = time.monotonic()
         _trace(
             f"out opcode={opcode} session={self.id} sequence={sequence} "
@@ -2217,9 +2232,9 @@ class Device:
                     session = self._session
                     if session is None:
                         continue
-                    # Ask the session, not the caller: STATUS and BARRIER do not
-                    # renew the device-side lease, so a host polling STATUS in a
-                    # loop must still heartbeat.
+                    # Ask the session, not the caller: STATUS, BARRIER, STATUS_EXT
+                    # and SESSION_LIST do not renew the device-side lease, so a
+                    # host polling STATUS_EXT in a loop must still heartbeat.
                     if session.renew_age_ms() < self._heartbeat_ms:
                         continue
                     try:

@@ -131,10 +131,18 @@ func ExpectsReply(opcode uint8) bool {
 }
 
 // RenewsLease reports whether the device counts the command as a lease renewal.
-// STATUS and BARRIER deliberately do not (firmware/protocol-v3.md:120), so a
-// host polling STATUS still has to heartbeat.
+// It writes lease_at for OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER and valid input
+// only (firmware/engine/src/engine.rs). STATUS, BARRIER, STATUS_EXT and
+// SESSION_LIST do not renew, so a host polling any of them still has to
+// heartbeat.
 func RenewsLease(opcode uint8) bool {
-	return opcode != OpStatus && opcode != OpBarrier
+	switch opcode {
+	case OpOpen, OpHeartbeat, OpReleaseAll, OpBootloader,
+		OpKey, OpSnapshot, OpMouseMove, OpMouseButton, OpWheel:
+		return true
+	default:
+		return false
+	}
 }
 
 // InputState is the 31-byte snapshot: modifiers, 28 key bytes, consumer, buttons.

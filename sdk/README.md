@@ -189,10 +189,11 @@ polls `Cancel` — so the sequence runs headless in tests with no drive attached
 - **Recovery** — `Disconnected`, `Io` and `Lease` failures trigger one reconnect
   and one retry when auto-reconnect is on. A `Timeout` never retries, because
   retrying a half-delivered input command is worse than reporting it.
-- **Lease** — the board renews the session lease on every command except STATUS
-  and BARRIER, so a host that polls STATUS in a loop would still lose the
-  session. The SDK keeps its own clock: every 500 ms without a renewing command
-  it sends HEARTBEAT, against the 2000 ms lease.
+- **Lease** — the board renews the session lease only on OPEN, HEARTBEAT,
+  RELEASE_ALL, BOOTLOADER and valid input; STATUS, BARRIER, STATUS_EXT and
+  SESSION_LIST do not renew, so a host that polls any of them in a loop would
+  still lose the session. The SDK keeps its own clock: every 500 ms without a
+  renewing command it sends HEARTBEAT, against the 2000 ms lease.
 - **Threads** — a heartbeat thread every 500 ms; movement runs on its own thread
   when started asynchronously; each scheduler owns a worker thread. Callbacks
   run on those threads and must not block.

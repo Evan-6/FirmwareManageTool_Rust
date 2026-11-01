@@ -84,7 +84,8 @@ USB OUT (id 12) → Runtime::step → engine → 排程 → USB IN (id 13) / 輸
 ## Session 與租約
 
 - 八個 slot，各自獨立 session 與 sequence；OPEN 用非零 id、sequence=1，之後每個命令遞增。
-- 租約 2000 ms，OPEN／輸入／HEARTBEAT／診斷查詢續租，**STATUS 與 BARRIER 不續租**。
+- 租約 2000 ms，只有 OPEN／輸入／HEARTBEAT／RELEASE_ALL／BOOTLOADER 續租，
+  **STATUS／STATUS_EXT／SESSION_LIST／BARRIER 不續租**。
 - 正常結束送 `CLOSE`：立刻歸還名額、取消自己待送工作、只放開自己按住的鍵、不發 EVENT、不計
   `failsafe`。其他 session 完全不受影響。
 - 重複／缺號只讓該 session 失效（避免重播相對位移）；未知 session 的輸入丟棄。

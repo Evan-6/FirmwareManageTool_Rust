@@ -69,10 +69,9 @@ fn raw_commands_and_the_frame_trace_reach_the_caller() {
 
 #[test]
 fn status_polling_does_not_starve_the_lease_heartbeat() {
-    // The device renews the lease on every command except STATUS and BARRIER
-    // (firmware/protocol-v3.md). A host that polls STATUS every 150 ms used to
-    // look busy to the SDK, so the heartbeat never fired and the session died
-    // every lease period.
+    // STATUS does not renew the lease (firmware/engine/src/engine.rs). A host
+    // that polls STATUS every 150 ms used to look busy to the SDK, so the
+    // heartbeat never fired and the session died every lease period.
     let (device, handle) = open();
     let before = handle.writes().len();
     for _ in 0..12 {
@@ -87,6 +86,28 @@ fn status_polling_does_not_starve_the_lease_heartbeat() {
     assert!(
         heartbeats >= 1,
         "STATUS polls must not stop the heartbeat (saw {heartbeats})"
+    );
+}
+
+#[test]
+fn status_ext_polling_does_not_starve_the_lease_heartbeat() {
+    // STATUS_EXT is not a renewal either, so a host whose only traffic is a
+    // 100 ms diagnostic poll must still beat inside the 2 s lease instead of
+    // losing the session to its own diagnostics.
+    let (device, handle) = open();
+    let before = handle.writes().len();
+    for _ in 0..12 {
+        device.status_ext().expect("status_ext");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let writes = handle.writes();
+    let heartbeats = writes[before..]
+        .iter()
+        .filter(|packet| packet.opcode == input_protocol::v3::HEARTBEAT)
+        .count();
+    assert!(
+        heartbeats >= 1,
+        "STATUS_EXT polls must not stop the heartbeat (saw {heartbeats})"
     );
 }
 

@@ -272,6 +272,59 @@ void test_status_polling_keeps_heartbeat() {
     device.close();
 }
 
+void test_lease_renewal_set() {
+    // Mirrors firmware/engine/src/engine.rs: lease_at is written for OPEN,
+    // HEARTBEAT, RELEASE_ALL, BOOTLOADER and valid input only. The four
+    // query/barrier opcodes must not renew, or a poll-only host would consider
+    // itself freshly renewed and never heartbeat.
+    struct Row {
+        std::uint8_t opcode;
+        bool renews;
+        const char* name;
+    };
+    const Row rows[] = {
+        {OPEN, true, "OPEN"},
+        {HEARTBEAT, true, "HEARTBEAT"},
+        {RELEASE_ALL, true, "RELEASE_ALL"},
+        {BOOTLOADER, true, "BOOTLOADER"},
+        {KEY, true, "KEY"},
+        {SNAPSHOT, true, "SNAPSHOT"},
+        {MOUSE_MOVE, true, "MOUSE_MOVE"},
+        {MOUSE_BUTTONS, true, "MOUSE_BUTTONS"},
+        {WHEEL, true, "WHEEL"},
+        {CLOSE, false, "CLOSE"},
+        {STATUS, false, "STATUS"},
+        {BARRIER, false, "BARRIER"},
+        {STATUS_EXT, false, "STATUS_EXT"},
+        {SESSION_LIST, false, "SESSION_LIST"},
+        {EVENT, false, "EVENT"},
+    };
+    for (const auto& row : rows) {
+        check(gdb::native::detail::Session::renews_lease(row.opcode) == row.renews,
+              std::string(row.name) + (row.renews ? " renews the lease" : " does not renew the lease"));
+    }
+}
+
+void test_status_ext_polling_keeps_heartbeat() {
+    // STATUS_EXT is not a renewal, so a 100 ms diagnostic poll must not keep the
+    // session alive on its own: inside one 2 s lease the heartbeat still fires.
+    auto fake = std::make_shared<FakeTransport>();
+    Device device = Device::open_fake(fake, 500, false, true);
+    const auto start = Clock::now();
+    int polls = 0;
+    while (Clock::now() - start < std::chrono::milliseconds(1200)) {
+        device.status_ext();
+        ++polls;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const int beats = fake->count_opcode(HEARTBEAT);
+    check(polls >= 5, "STATUS_EXT was polled repeatedly (" + std::to_string(polls) + ")");
+    check(beats >= 1, "STATUS_EXT polling does not starve the heartbeat (saw " +
+                          std::to_string(beats) + " beats)");
+    check(fake->count_opcode(STATUS_EXT) == polls, "every STATUS_EXT poll reached the device");
+    device.close();
+}
+
 void test_no_heartbeat_when_disabled() {
     auto fake = std::make_shared<FakeTransport>();
     Device device = Device::open_fake(fake, 500, false, false);
@@ -1105,6 +1158,8 @@ int main() {
     test_event_maps_to_error();
     test_heartbeat_on_idle();
     test_status_polling_keeps_heartbeat();
+    test_lease_renewal_set();
+    test_status_ext_polling_keeps_heartbeat();
     test_no_heartbeat_when_disabled();
     test_status_and_sessions();
     test_close_and_bootloader();

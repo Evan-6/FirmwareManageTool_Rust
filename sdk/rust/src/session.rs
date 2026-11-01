@@ -14,8 +14,9 @@ pub(crate) struct Session {
     capabilities: Capabilities,
     timeout: Duration,
     /// When this session last sent something the device counts as a lease
-    /// renewal. STATUS and BARRIER do not renew (protocol-v3.md:120), so a host
-    /// that polls STATUS in a loop must still heartbeat.
+    /// renewal. STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew
+    /// (protocol-v3.md, 完成與租約), so a host polling any of them must still
+    /// heartbeat.
     last_renew: Instant,
 }
 
@@ -174,9 +175,60 @@ pub(crate) fn new_session_id() -> u32 {
     .max(1)
 }
 
-/// The device renews our lease on every command except STATUS and BARRIER
-/// (`firmware/protocol-v3.md`, 完成與租約). Polling STATUS therefore keeps the
-/// counters fresh without keeping the session alive.
+/// The device writes `lease_at` only for OPEN, HEARTBEAT, RELEASE_ALL,
+/// BOOTLOADER and valid input (`firmware/engine/src/engine.rs`). The four
+/// query/barrier opcodes leave it alone, so polling STATUS, STATUS_EXT or
+/// SESSION_LIST keeps the counters fresh without keeping the session alive.
 fn renews_lease(opcode: u8) -> bool {
-    opcode != v3::STATUS && opcode != v3::BARRIER
+    matches!(
+        opcode,
+        v3::OPEN
+            | v3::HEARTBEAT
+            | v3::RELEASE_ALL
+            | v3::BOOTLOADER
+            | v3::KEY
+            | v3::SNAPSHOT
+            | v3::MOUSE_MOVE
+            | v3::MOUSE_BUTTONS
+            | v3::WHEEL
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::renews_lease;
+    use input_protocol::v3;
+
+    /// The shipped firmware writes `lease_at` only on OPEN, HEARTBEAT,
+    /// RELEASE_ALL, BOOTLOADER and valid input (`firmware/engine/src/engine.rs`).
+    /// Everything else — including the two diagnostics queries — is inert.
+    #[test]
+    fn lease_renewal_set_matches_the_firmware() {
+        for opcode in [
+            v3::OPEN,
+            v3::HEARTBEAT,
+            v3::RELEASE_ALL,
+            v3::BOOTLOADER,
+            v3::KEY,
+            v3::SNAPSHOT,
+            v3::MOUSE_MOVE,
+            v3::MOUSE_BUTTONS,
+            v3::WHEEL,
+        ] {
+            assert!(renews_lease(opcode), "opcode {opcode} must renew the lease");
+        }
+        for opcode in [
+            v3::CLOSE,
+            v3::STATUS,
+            v3::BARRIER,
+            v3::STATUS_EXT,
+            v3::SESSION_LIST,
+            v3::EVENT,
+        ] {
+            assert!(
+                !renews_lease(opcode),
+                "opcode {opcode} must not renew the lease"
+            );
+        }
+    }
 }

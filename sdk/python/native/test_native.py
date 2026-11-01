@@ -364,8 +364,53 @@ class HeartbeatTests(unittest.TestCase):
         self.assertGreaterEqual(polls, 2)
         beats = transport.packets(gdb.HEARTBEAT)
         self.assertGreaterEqual(len(beats), 2)
-        # STATUS is the one query that must not renew, so the beat had to happen.
+        # STATUS is one of the queries that must not renew, so the beat had to happen.
         self.assertGreater(len(transport.packets(gdb.STATUS)), len(beats))
+
+    def test_status_ext_polls_do_not_starve_the_heartbeat(self):
+        # STATUS_EXT does not renew the lease (firmware/engine/src/engine.rs), so
+        # a host whose only traffic is a 100 ms diagnostic poll must still beat
+        # inside the 2 s lease instead of losing the session to its own polling.
+        # The beat interval is longer than the poll spacing on purpose: that is
+        # exactly the case where a query that wrongly counted as a renewal would
+        # keep pushing the tick out forever.
+        transport = gdb.MockTransport()
+        device = gdb.Device.open_mock(transport=transport, heartbeat=True, heartbeat_ms=200)
+        polls = 0
+        try:
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                device.status_ext()
+                polls += 1
+                time.sleep(0.1)
+        finally:
+            device.close()
+        self.assertGreaterEqual(polls, 5)
+        beats = transport.count(gdb.HEARTBEAT)
+        self.assertGreaterEqual(beats, 1, "STATUS_EXT polling must not stop the heartbeat")
+
+    def test_renewal_set_matches_the_firmware(self):
+        # The firmware writes lease_at only on these opcodes. The four
+        # query/barrier opcodes must not appear, or a poll-only host would look
+        # freshly renewed to itself and never heartbeat.
+        self.assertEqual(
+            gdb.RENEWING,
+            frozenset(
+                {
+                    gdb.OPEN,
+                    gdb.HEARTBEAT,
+                    gdb.RELEASE_ALL,
+                    gdb.BOOTLOADER,
+                    gdb.KEY,
+                    gdb.SNAPSHOT,
+                    gdb.MOUSE_MOVE,
+                    gdb.MOUSE_BUTTONS,
+                    gdb.WHEEL,
+                }
+            ),
+        )
+        for opcode in (gdb.CLOSE, gdb.STATUS, gdb.BARRIER, gdb.STATUS_EXT, gdb.SESSION_LIST, gdb.EVENT):
+            self.assertNotIn(opcode, gdb.RENEWING, f"opcode {opcode:#04x} must not renew the lease")
 
 
 class KeyboardTests(unittest.TestCase):
