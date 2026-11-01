@@ -4,7 +4,7 @@ Windows 桌面程式＋裝置韌體。程式透過 USB 對 Seeed XIAO RP2040 下
 HID 鍵盤／滑鼠身分送出輸入（1 ms poll）。沒有 COM 埠、沒有序列埠回退、沒有背景服務。
 
 - **圖形介面**：Tauri 2 + React 19 + TypeScript，單一 exe，不連網路。
-- **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，32.7 KiB flash／30.0 KiB RAM。
+- **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，32.0 KiB flash／30.0 KiB RAM。
 - **同時多程式**：最多八個控制程式（本工具、MSCV、EvanRemote 等）共用同一支裝置，各自獨立 session。
 - **輸入**：NKRO 鍵盤、Consumer 多媒體鍵、五鍵相對滑鼠（含雙軸滾輪）、擬人化移動、文字輸入、組合鍵、巨集。
 
@@ -90,12 +90,14 @@ bash scripts/build-rust-firmware.sh
 
 ## GDBOX SDK
 
-`sdk/` 是給其他程式用的 Host SDK：Rust 原生實作，加上 C++／Python／Go 三種綁定，
-四者共用同一份 C ABI，行為一致。
+`sdk/` 是 Host SDK。權威實作是 Rust 的 crate `gdb`；C ABI（`gdb.dll`）加 C++／Python／Go 三個薄綁定是
+相容層，三個語言另外各有原生實作（`sdk/*/native/`），直接講 Vendor HID 協議、不載入 DLL。四份實作都以
+`shared/input-protocol` 的 vectors 對齊。本工具自己也走 SDK：裝置列舉與實體 HID 通道呼叫
+`gdb::Manager::list()`／`gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
 
 ```powershell
 cargo build -p gdb-ffi --release       # target/release/gdb.dll
-cargo test  -p gdb -p gdb-motion       # 21 個測試，免硬體
+cargo test  -p gdb -p gdb-motion       # 23 個測試，免硬體
 bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑）Go
 ```
 
@@ -104,7 +106,8 @@ bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑�
   中途取消與改目標、五鍵、滾輪、拖曳、全部放開。
 - 鍵盤：按下／放開／單擊／長按、組合鍵、按鍵序列、文字輸入、全部放開。
 - 自動化：任務佇列、延遲、週期排程、優先級、暫停／恢復／取消、錯誤收集。
-- 開發者：統一錯誤碼、日誌等級與 sink、事件回呼、免硬體的模擬裝置、四語言範例與測試。
+- 開發者：統一錯誤碼、日誌等級與 sink（`Trace` 會記下每個送出／收到的封包與被跳過的他 session 封包）、
+  事件回呼、免硬體的模擬裝置、四語言範例與測試。
 
 細節與 API 對照表：[sdk/README.md](sdk/README.md)、[sdk/API.md](sdk/API.md)。
 
@@ -123,7 +126,7 @@ bash scripts/check-sdk.sh              # Rust＋Python＋C++＋（有 Go 才跑�
 ## 專案結構
 
 ```
-src/                主機 library：HID 列舉與 v3 client、滑鼠軌跡、文字／組合鍵、量測、設定、背景 worker
+src/                主機 library：v3 client（列舉與 HID 通道來自 SDK）、滑鼠軌跡、文字／組合鍵、量測、設定、背景 worker
 src-tauri/          Tauri 2 外殼：20 個命令、事件、視窗與熱鍵
 ui/                 React 19 + TypeScript + Vite（五頁）
 shared/input-protocol/  跨語言的命令、能力、回應驗證與 wire 測試向量

@@ -12,7 +12,7 @@ src-tauri/           Tauri 2 外殼：視窗、全域熱鍵、20 個命令、UiE
   │  AppCommand / AppEvent
 src/backend.rs       背景 worker：獨占 HID handle，一次只做一件事
   │
-src/                 library：hid（列舉／v3 client）、mouse、typing、latency、firmware、settings
+src/                 library：hid（v3 client；列舉與實體通道轉呼叫 SDK）、mouse、typing、latency、firmware、settings
 ```
 
 - **worker 獨占裝置**：GUI 只保存顯示狀態，所有裝置操作排進同一條命令通道，任何時刻只有一項
@@ -26,7 +26,8 @@ src/                 library：hid（列舉／v3 client）、mouse、typing、la
 
 ## GDBOX SDK：主機端的第二個入口
 
-`sdk/` 把同一套主機能力包成給外部程式用的 SDK，與 GUI 平行、互不依賴：
+`sdk/` 把同一套主機能力包成給外部程式用的 SDK。GUI 透過它取得列舉與 HID 傳輸
+（`gdb::Manager`／`gdb::transport`），SDK 本身不依賴 GUI：
 
 ```
 sdk/motion/     gdb-motion：純移動數學（整數友善、固定 PRNG、無 I/O）
@@ -38,6 +39,10 @@ sdk/cpp|python|go   薄綁定，只做名稱轉換，全部呼叫同一份 C ABI
 - **一份實作、四種語言**：行為只在 Rust 寫一次，綁定不得自行補邏輯，否則四份會漂移。
 - **韌體沒有為了 SDK 改動**：SDK 只送既有 opcode；絕對座標、移動演算法、任務與排程都在主機。
 - **模擬裝置有虛擬游標**：免硬體的測試可以完整跑 `move_to`／`move_path`／`retarget`。
+- **Rust 多一個原樣轉送的入口**：`Device::command(&Command)` 走同一條 session／序號／重連路徑，
+  但不更新 SDK 自己的按鍵簿記與 mock 游標；C ABI 沒有對應符號，所以只有 Rust 拿得到。
+- **封包日誌在 `Session` 裡**：`Level::Trace` 記錄每個 `out`／`in` 封包與被跳過的
+  `skip … (not ours)`，四個綁定共用同一份輸出；主機要封包視窗就接 sink，不要再開第二個讀者。
 - **驗證**：`bash scripts/check-sdk.sh`（已納入 `preflight.sh`）。
 
 ## 除錯模式與遊戲模式

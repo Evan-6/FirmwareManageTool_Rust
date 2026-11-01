@@ -22,6 +22,9 @@ fi
 echo "== python =="
 GDBOX_LIBRARY="$lib_env" python sdk/python/test_gdb.py
 
+echo "== python native (no gdb.dll) =="
+python sdk/python/native/test_native.py
+
 echo "== c++ =="
 if command -v g++ >/dev/null 2>&1; then
     out="target/sdk-check/cpp_mock.exe"
@@ -30,6 +33,11 @@ if command -v g++ >/dev/null 2>&1; then
         -I sdk/ffi/include -I sdk/cpp \
         sdk/cpp/examples/mock.cpp -o "$out"
     GDBOX_LIBRARY="$lib_env" "$out"
+
+    echo "== c++ native (no gdb.dll) =="
+    native="target/sdk-check/cpp_native_test.exe"
+    g++ -std=c++17 -Wall -Wextra -I sdk/cpp/native         sdk/cpp/native/gdb_native_test.cpp -o "$native"
+    "$native"
 else
     echo "skip: g++ not found"
 fi
@@ -45,7 +53,9 @@ if ! command -v go >/dev/null 2>&1; then
     done
 fi
 if command -v go >/dev/null 2>&1; then
-    (cd sdk/go && GDBOX_LIBRARY="$lib_env" go test ./... )
+    # vet first: consumers vendor the binding into their own module, where
+    # `go vet ./...` is part of the gate and flags every uintptr -> pointer cast.
+    (cd sdk/go && go vet ./... && GDBOX_LIBRARY="$lib_env" go test ./... )
 else
     echo "skip: go not found"
 fi

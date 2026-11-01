@@ -21,7 +21,7 @@ ABI, so they cannot drift in behaviour — only in naming style.
 
 ```bash
 cargo build -p gdb-ffi --release      # target/release/gdb.dll (or libgdb.so)
-cargo test  -p gdb -p gdb-motion      # 21 tests, mock device, no hardware
+cargo test  -p gdb -p gdb-motion      # 23 tests, mock device, no hardware
 cargo run   -p gdb --example mock     # end-to-end walkthrough
 ```
 
@@ -92,10 +92,11 @@ err = device.Keyboard().TypeText("hello", 45, 18, 30)
 | Task queue, delay, sync/async, pause/resume/cancel, priorities | done | one worker thread per scheduler |
 | Periodic scheduling | done | `every(interval)` until cancelled |
 | Unified error codes | done | C ABI enum shared by all four bindings |
-| Logging / debug mode | done | level + sink (`log::set_level`, `gdb_set_log_sink`) |
+| Logging / debug mode | done | level + sink (`log::set_level`, `gdb_set_log_sink`); `Trace` logs every frame in both directions |
 | Mock device | done | full protocol mock with a virtual 1920×1080 cursor |
+| Raw command passthrough | Rust only | `Device::command`; no C ABI symbol, so the other bindings keep the typed calls |
 | Event callbacks | done | state changes and errors |
-| Custom HID commands | out of scope for v1 | firmware rejects unknown opcodes |
+| Custom HID commands | out of scope for v1 | `Device::command` passes existing opcodes only; the firmware rejects unknown ones |
 | API docs / examples / unit tests | done | this file, `API.md`, one example per language |
 
 ## Behaviour contract
@@ -130,9 +131,9 @@ binding currently uses the Windows loader directly and is Windows-only.
 ## Verification
 
 ```
-cargo test -p gdb-motion -p gdb                  # 21 tests
+cargo test -p gdb-motion -p gdb                  # 23 tests
 python sdk/python/test_gdb.py                    # 12 tests through ctypes
-cd sdk/go && go test ./...                       # 4 tests (Windows)
+cd sdk/go && go test ./...                       # 5 tests (Windows)
 g++ -std=c++17 -I sdk/ffi/include -I sdk/cpp sdk/cpp/examples/mock.cpp
 bash scripts/check-sdk.sh                        # all of the above, run end to end
 ```

@@ -92,16 +92,23 @@ for path,content in outputs.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding='utf-8')
 if a.peer:
-    target=a.peer/'crates/input-protocol'
+    # EvanRemote no longer vendors the protocol crate: it consumes the canonical
+    # `shared/input-protocol` through the GDBOX SDK's path dependencies, so there
+    # is nothing to copy — only the reference itself is checked.
+    vendored=a.peer/'crates/input-protocol'
+    if vendored.exists():raise SystemExit('Peer still vendors crates/input-protocol: '+str(vendored))
+    for crate in ('evan-core','evan-hardware-input'):
+        manifest=a.peer/'crates'/crate/'Cargo.toml'
+        if not manifest.exists() or 'shared/input-protocol' not in manifest.read_text():
+            raise SystemExit('Peer does not use the canonical input-protocol: '+str(manifest))
+    hardware=a.peer/'crates/evan-hardware-input/Cargo.toml'
+    if 'sdk/rust' not in hardware.read_text():
+        raise SystemExit('Peer hardware input does not use the GDBOX SDK: '+str(hardware))
+    key_table=a.peer/'web/key-usages.js'
     if a.check:
-        for path in shared.rglob('*'):
-            if path.is_file() and 'target' not in path.relative_to(shared).parts:
-                other=target/path.relative_to(shared)
-                if not other.exists() or other.read_bytes()!=path.read_bytes():raise SystemExit('Peer drift: '+str(other))
-        if (a.peer/'web/key-usages.js').read_text()!=js:raise SystemExit('Browser key table drift')
+        if key_table.read_text()!=js:raise SystemExit('Browser key table drift')
     else:
-        shutil.copytree(shared,target,dirs_exist_ok=True,ignore=shutil.ignore_patterns('target','Cargo.lock'))
-        (a.peer/'web/key-usages.js').write_text(js)
+        key_table.write_text(js)
 
 if a.mscv_rust:
     target=a.mscv_rust/'crates/input-protocol'

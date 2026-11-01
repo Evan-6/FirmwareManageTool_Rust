@@ -19,7 +19,11 @@ Go is package `gdb`. Every failure raises/returns the same `ErrorCode`.
 | barrier | `device.barrier()` | `barrier()` | `.barrier()` | `Barrier()` |
 | bootloader | `device.bootloader()` | `bootloader()` | `.bootloader()` | `Bootloader()` |
 | events | `set_event_handler(Arc<dyn EventHandler>)` | `set_event_handler(fn)` | `.set_event_handler(fn)` | `SetEventHandler(fn)` |
+| log level | `log::set_level(Level)` | `set_log_level(int)` | `set_log_level(int)` | `SetLogLevel(uint8)` |
+| log sink | `log::set_sink(fn)` | `set_log_sink(fn)` | `set_log_sink(fn)` | `SetLogSink(fn)` |
 | relative move | `move_by(dx, dy, opts)` | `move_by(dx, dy, ms)` | `.move_by(dx, dy, ms)` | `MoveBy(dx, dy, ms, p)` |
+| raw relative move (no barrier) | `move_raw(dx, dy)` | — | — | — |
+| raw command passthrough | `command(&Command)` | — | — | — |
 | absolute move | `move_to(x, y, opts)` | `move_to(x, y, ms)` | `.move_to(x, y, ms)` | `MoveTo(x, y, ms, p)` |
 | path | `move_path(&[(x,y)], opts)` | `move_path({{{…}}}, ms)` | `.move_path([(x,y)], ms)` | `MovePath([][2]int32, ms, p)` |
 | async move | `start_move_to/by/path` | `start_move_to/by/path` | `.start_move_to/by/path` | `StartMoveTo/By` |
@@ -48,6 +52,25 @@ DeviceInfo { serial, product, board, firmware, lease_ms, poll_ms,
 ```
 
 `DeviceEntry` (device list): `{ path, serial, product, manufacturer, vid, pid }`.
+
+### Raw command passthrough
+
+`device.command(&Command) -> Result<Option<Packet>>` sends one protocol command
+exactly as given. It uses the same session, sequence counter, timeout and
+reconnect path as `status()` or `barrier()`, but none of the SDK's own
+bookkeeping: held buttons are not recorded and a mock device's virtual cursor is
+not advanced. A `Command::MouseMove` sent this way therefore leaves the mock
+cursor where it was, and `device`'s opinion of what is held no longer matches
+what was actually sent. Control opcodes (OPEN, CLOSE, STATUS, BARRIER,
+RELEASE_ALL, STATUS_EXT, SESSION_LIST, BOOTLOADER) return `Some(Packet)`; input
+opcodes return `None` without waiting for a reply. `Command` and `Packet` are
+`input_protocol::v3` types, so the caller needs `input-protocol` as a dependency.
+
+Reach for it when the caller already speaks the wire protocol and needs one
+opcode that the SDK does not wrap — a debug pane, a packet log, or a host porting
+an existing motion loop. Prefer the typed methods for anything the SDK covers;
+they keep the held state and the mock honest. There is no C ABI symbol, so C++,
+Python and Go have only the typed calls.
 
 JSON returned by the bindings:
 
@@ -155,6 +178,29 @@ void (*gdb_log_fn)(void *user, int32_t level, const char *msg);
 ```
 
 Event kinds: `0` state (code = `ConnectionState`), `2` error (code = ErrorCode).
+
+## Logging
+
+Logging is process-wide and silent until both a level and a sink are set:
+`log::set_level(Level)` + `log::set_sink(fn)`, `gdb_set_log_level(uint8_t)` +
+`gdb_set_log_sink(gdb_log_fn, void *)`, `SetLogLevel` + `SetLogSink`,
+`set_log_level(int)` + `set_log_sink(fn)`. Levels are `0 Off, 1 Error, 2 Warn,
+3 Info, 4 Debug, 5 Trace`; the SDK currently writes at `Info` (connect, close,
+reconnect), `Warn` (a command failed, with its error code) and `Trace`.
+
+`Trace` is the packet log. Frames are logged in `Session`, underneath the C ABI,
+so all four bindings get identical lines:
+
+```
+out opcode=6 session=1234 sequence=2 payload=[…]
+in opcode=134 session=1234 sequence=2 payload=[…]
+skip opcode=134 session=4321 sequence=7 (not ours)
+```
+
+`skip` is an IN frame that belonged to another session and was dropped while
+waiting for a reply. A host that wants a packet window or a log pane subscribes
+to the sink instead of opening a second reader on the IN endpoint — two readers
+steal each other's replies and break the sequence numbers of both sessions.
 
 ## Threading rules
 
