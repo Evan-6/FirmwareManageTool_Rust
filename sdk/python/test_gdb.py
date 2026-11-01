@@ -105,12 +105,18 @@ class DeviceTests(unittest.TestCase):
             movement.close()
 
     def test_scheduler_orders_by_priority_and_cancels(self):
+        # Priority orders jobs that share a due, and `pause` acknowledges: it
+        # returns only once the worker has read the flag, so both submits below
+        # are in the heap before `resume`. The due is explicit for the same
+        # reason — `submit` stamps it from the clock, so two calls a millisecond
+        # apart would not tie and the low job would legitimately run first.
         with gdb.Device.open_mock() as device:
             scheduler = device.scheduler()
             order: list[str] = []
             scheduler.pause()
-            scheduler.submit(0, 0, lambda: order.append("low") or 0)
-            scheduler.submit(0, 10, lambda: order.append("high") or 0)
+            due = scheduler.elapsed_ms() + 50
+            scheduler.submit_at(due, 0, lambda: order.append("low") or 0)
+            scheduler.submit_at(due, 10, lambda: order.append("high") or 0)
             scheduler.resume()
             scheduler.wait_idle(2000)
             self.assertEqual(order, ["high", "low"])
@@ -129,6 +135,16 @@ class DeviceTests(unittest.TestCase):
             scheduler = device.scheduler()
             ticks = []
             task = scheduler.every(10, 0, lambda: ticks.append(1) or 0)
+            # The worker is a thread of its own and its first tick is not
+            # synchronised with this one: a freshly spawned thread was measured
+            # more than a second late on Windows. Wait for the tick, then time the
+            # repeats from a tick that is known to have happened — a task that
+            # never repeats still fails, and the 80 ms window still has to hold
+            # one more 10 ms tick on top of the first.
+            deadline = time.monotonic() + 5
+            while not ticks and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(ticks, "the repeating task never ran")
             time.sleep(0.08)
             scheduler.cancel(task)
             self.assertGreaterEqual(len(ticks), 2)
@@ -291,7 +307,7 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 3u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 4u", header)
         for name in self.SYMBOLS:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 

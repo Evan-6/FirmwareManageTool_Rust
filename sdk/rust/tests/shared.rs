@@ -321,9 +321,14 @@ fn a_stolen_heartbeat_retries_and_never_closes() {
     let opened = board.lock().unwrap().opcodes(v3::OPEN);
     board.lock().unwrap().thief = Some(THIEF);
 
-    // One lease period is 2 s and a beat is due every 500 ms, so two beats fit
-    // in this window: the first is taken, the second proves the retry.
-    let deadline = Instant::now() + Duration::from_millis(2000);
+    // One lease is 2 s and a beat is due every 500 ms, so two beats fit in the
+    // lease with room to spare — but the beat comes from a thread the SDK starts
+    // when the device opens, and a freshly spawned thread's first tick is not
+    // synchronised with this one (measured more than 1.2 s late on Windows). The
+    // loop polls the board for the two frames instead of sleeping for a fixed
+    // number of periods, so it waits for the retry rather than for the machine to
+    // be fast; a heartbeat that is never retried still fails it.
+    let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline && board.lock().unwrap().opcodes(v3::HEARTBEAT) < 2 {
         std::thread::sleep(Duration::from_millis(20));
     }
