@@ -8,6 +8,7 @@
 pub mod device;
 pub mod error;
 pub mod event;
+pub mod flash;
 pub mod keyboard;
 pub mod log;
 pub mod manager;

@@ -193,7 +193,11 @@ pub(crate) fn run_move_to(
     {
         return Err(Error::new(
             crate::error::ErrorCode::Unsupported,
-            "put the cursor on the primary monitor before an absolute move",
+            format!(
+                "absolute coordinates are relative to the primary monitor ({}x{} at 0,0) and \
+                 the cursor is at ({}, {}), so the move would start off that screen",
+                screen.width, screen.height, position.0, position.1
+            ),
         ));
     }
     let mut target = clamp_target(x, y, screen);
@@ -223,7 +227,10 @@ pub(crate) fn run_move_to(
             if current_screen.width != screen.width || current_screen.height != screen.height {
                 return Err(Error::new(
                     crate::error::ErrorCode::Unsupported,
-                    "monitor layout changed during the movement",
+                    format!(
+                        "monitor layout changed during the movement ({}x{} -> {}x{})",
+                        screen.width, screen.height, current_screen.width, current_screen.height
+                    ),
                 ));
             }
             nodes = trajectory_with(

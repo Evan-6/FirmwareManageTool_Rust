@@ -2,6 +2,7 @@
 
 use gdb::manager::Manager;
 use gdb::{Button, ConnectionState, DeviceOptions, MotionOptions, TypeTextConfig};
+use std::sync::{Arc, Mutex};
 
 fn open() -> (gdb::Device, gdb::mock::MockHandle) {
     Manager::open_mock_with_handle(DeviceOptions::default()).expect("mock device")
@@ -30,6 +31,63 @@ fn connects_reports_info_and_closes() {
     device.close().expect("close");
     assert!(handle.is_closed());
     assert_eq!(device.state(), ConnectionState::Disconnected);
+}
+
+#[test]
+fn raw_commands_and_the_frame_trace_reach_the_caller() {
+    let (device, handle) = open();
+    let before = handle.writes().len();
+    let reply = device
+        .command(&input_protocol::v3::Command::Status)
+        .expect("status command")
+        .expect("status reply");
+    assert_eq!(reply.opcode, input_protocol::v3::STATUS | 0x80);
+    assert_eq!(handle.writes().len(), before + 1);
+
+    // Trace level forwards both directions through the log sink, which is how a
+    // host that wants the raw frames (debug pane, packet log) gets them.
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    gdb::log::set_level(gdb::Level::Trace);
+    gdb::log::set_sink(Some(Box::new(move |_, message| {
+        sink.lock().unwrap().push(message.to_string());
+    })));
+    device.barrier().expect("barrier");
+    gdb::log::set_sink(None);
+    gdb::log::set_level(gdb::Level::Off);
+
+    let lines = lines.lock().unwrap();
+    assert!(
+        lines.iter().any(|line| line.starts_with("out opcode=")),
+        "no outgoing frame in {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("in opcode=")),
+        "no incoming frame in {lines:?}"
+    );
+}
+
+#[test]
+fn status_polling_does_not_starve_the_lease_heartbeat() {
+    // The device renews the lease on every command except STATUS and BARRIER
+    // (firmware/protocol-v3.md). A host that polls STATUS every 150 ms used to
+    // look busy to the SDK, so the heartbeat never fired and the session died
+    // every lease period.
+    let (device, handle) = open();
+    let before = handle.writes().len();
+    for _ in 0..12 {
+        device.status().expect("status");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let writes = handle.writes();
+    let heartbeats = writes[before..]
+        .iter()
+        .filter(|packet| packet.opcode == input_protocol::v3::HEARTBEAT)
+        .count();
+    assert!(
+        heartbeats >= 1,
+        "STATUS polls must not stop the heartbeat (saw {heartbeats})"
+    );
 }
 
 #[test]
@@ -88,6 +146,32 @@ fn relative_moves_are_split_into_hid_sized_reports() {
         })
         .collect();
     assert_eq!(moves, vec![(1024, -1024), (476, -76)]);
+}
+
+#[test]
+fn raw_moves_go_out_without_a_barrier() {
+    let (device, handle) = open();
+    let before = handle.writes().len();
+    device.mouse().move_raw(1500, -1100).unwrap();
+    let writes: Vec<_> = handle.writes()[before..].to_vec();
+    let moves: Vec<_> = writes
+        .iter()
+        .filter(|packet| packet.opcode == input_protocol::v3::MOUSE_MOVE)
+        .map(|packet| {
+            (
+                i16::from_le_bytes([packet.payload[0], packet.payload[1]]),
+                i16::from_le_bytes([packet.payload[2], packet.payload[3]]),
+            )
+        })
+        .collect();
+    // Same splitting as move_by, minus the per-chunk completion wait.
+    assert_eq!(moves, vec![(1024, -1024), (476, -76)]);
+    assert!(
+        writes
+            .iter()
+            .all(|packet| packet.opcode != input_protocol::v3::BARRIER),
+        "move_raw must not flush"
+    );
 }
 
 #[test]

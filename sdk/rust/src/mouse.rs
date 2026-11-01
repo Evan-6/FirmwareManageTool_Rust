@@ -50,6 +50,17 @@ impl Mouse {
         run_move_by(&self.device, dx, dy, &options, &shared)
     }
 
+    /// One relative move with no barrier and no interpolation: the deltas go out
+    /// as they are, split only at the ±1024 HID limit. This is the hot path for
+    /// remote control, where the caller batches frames and flushes with
+    /// `Device::barrier` only at points that need a completion guarantee.
+    pub fn move_raw(&self, dx: i32, dy: i32) -> Result<()> {
+        for (x, y) in gdb_motion::split_delta(dx, dy) {
+            self.device.send_mouse_move(x as i16, y as i16)?;
+        }
+        Ok(())
+    }
+
     pub fn move_to(&self, x: i32, y: i32, options: MotionOptions) -> Result<()> {
         let shared = crate::motion::MovementShared::default();
         run_move_to(&self.device, x, y, &options, &shared)

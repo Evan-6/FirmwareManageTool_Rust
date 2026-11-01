@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(crate) const HEARTBEAT_MS: u64 = 500;
 
@@ -54,7 +54,6 @@ pub struct DeviceInfo {
 
 struct State {
     session: Option<Session>,
-    last_heartbeat: Instant,
 }
 
 pub(crate) struct Inner {
@@ -99,7 +98,6 @@ impl Device {
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 session: Some(session),
-                last_heartbeat: Instant::now(),
             }),
             target,
             auto_reconnect: AtomicBool::new(options.auto_reconnect),
@@ -193,6 +191,17 @@ impl Device {
         self.with_session(|session| session.command(&Command::Barrier).map(|_| ()))
     }
 
+    /// Sends one command as it is and hands back the raw reply.
+    ///
+    /// An escape hatch for callers that already speak the wire protocol — the
+    /// desktop tool sends chords, keystrokes and raw moves through it. It still
+    /// goes through the same session, sequence numbers and reconnect path, but
+    /// the SDK's own bookkeeping — held buttons, the mock cursor — is not
+    /// updated.
+    pub fn command(&self, command: &Command) -> Result<Option<v3::Packet>> {
+        self.with_session(|session| session.command(command))
+    }
+
     pub fn release_all(&self) -> Result<()> {
         self.inner.buttons.store(0, Ordering::Relaxed);
         self.with_session(|session| session.command(&Command::ReleaseAll).map(|_| ()))
@@ -276,10 +285,7 @@ impl Device {
         let mut state = self.lock();
         if let Some(session) = state.session.as_mut() {
             match operation(session) {
-                Ok(value) => {
-                    state.last_heartbeat = Instant::now();
-                    return Ok(value);
-                }
+                Ok(value) => return Ok(value),
                 Err(error) => {
                     crate::sdk_log!(
                         Level::Warn,
@@ -306,7 +312,6 @@ impl Device {
             .as_mut()
             .ok_or_else(|| Error::disconnected("no session after reconnect"))?;
         let value = operation(result);
-        state.last_heartbeat = Instant::now();
         if let Err(error) = &value {
             notify(&self.handler(), |handler| handler.error(error));
         }
@@ -322,7 +327,6 @@ impl Device {
         let transport = crate::manager::open_transport(&self.inner.target)?;
         let session = Session::open(transport, self.inner.options.timeout_ms, new_session_id())?;
         state.session = Some(session);
-        state.last_heartbeat = Instant::now();
         crate::sdk_log!(Level::Info, "reconnected serial={}", self.inner.info.serial);
         notify(&self.handler(), |handler| {
             handler.state(ConnectionState::Connected)
@@ -364,9 +368,14 @@ fn start_heartbeat(inner: &Arc<Inner>) {
                 Ok(state) => state,
                 Err(_) => continue,
             };
-            if state.session.is_none()
-                || state.last_heartbeat.elapsed() < Duration::from_millis(HEARTBEAT_MS)
-            {
+            // Ask the session, not the caller: STATUS and BARRIER do not renew
+            // the device-side lease, so a host polling STATUS in a loop would
+            // otherwise never heartbeat and lose the session every lease period.
+            let due = match state.session.as_ref() {
+                Some(session) => session.renew_age() >= Duration::from_millis(HEARTBEAT_MS),
+                None => false,
+            };
+            if !due {
                 continue;
             }
             let outcome = {
@@ -374,7 +383,7 @@ fn start_heartbeat(inner: &Arc<Inner>) {
                 session.heartbeat()
             };
             match outcome {
-                Ok(()) => state.last_heartbeat = Instant::now(),
+                Ok(()) => {}
                 Err(error) => {
                     drop(state);
                     let device = Device {
