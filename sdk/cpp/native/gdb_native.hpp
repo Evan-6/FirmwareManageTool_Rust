@@ -33,10 +33,11 @@
 // of inline functions, so include it from a single .cpp when possible.
 //
 // Threading: one `Device` owns one session and one heartbeat thread. Commands
-// are serialised by a mutex; the heartbeat takes the same mutex, so a caller
-// that blocks inside a command delays (never breaks) the heartbeat. Event
-// handlers run on whichever thread noticed the change and may run while the
-// device lock is held, so they must not call back into the same Device.
+// are serialised by a mutex; the heartbeat try-locks that same mutex, so a
+// caller blocked inside a command skips a heartbeat tick instead of delaying it
+// (never breaks the lease). Event handlers run on whichever thread noticed the
+// change and may run while the device lock is held, so they must not call back
+// into the same Device.
 
 #pragma once
 
@@ -1419,8 +1420,15 @@ inline std::uint32_t new_session_id() {
     const auto now = std::chrono::steady_clock::now().time_since_epoch();
     const std::uint64_t nanos =
         static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+    // The pid separates two processes that started in the same nanosecond; the
+    // counter separates two sessions inside one process.
+#if defined(_WIN32)
+    const std::uint32_t pid = static_cast<std::uint32_t>(::GetCurrentProcessId());
+#else
+    const std::uint32_t pid = 0;
+#endif
     const std::uint32_t mixed = static_cast<std::uint32_t>(nanos) ^
-                                static_cast<std::uint32_t>(nanos >> 32) ^
+                                static_cast<std::uint32_t>(nanos >> 32) ^ pid ^
                                 next.fetch_add(0x9E3779B9u);
     return mixed == 0 ? 1u : mixed;
 }
@@ -2180,7 +2188,12 @@ inline void run_heartbeat(std::weak_ptr<DeviceImpl> weak, std::shared_ptr<Beat> 
         if (!impl) {
             return;
         }
-        std::unique_lock<std::mutex> lock(impl->mutex);
+        // TryLock, not Lock: a STATUS poll in flight must not stall the
+        // heartbeat, and the next tick is 50 ms away anyway.
+        std::unique_lock<std::mutex> lock(impl->mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            continue;
+        }
         if (impl->closed.load()) {
             return;
         }

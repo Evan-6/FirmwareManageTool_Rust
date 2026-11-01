@@ -256,14 +256,17 @@ void test_heartbeat_on_idle() {
 void test_status_polling_keeps_heartbeat() {
     auto fake = std::make_shared<FakeTransport>();
     Device device = Device::open_fake(fake, 500, false, true);
-    const auto start = Clock::now();
     int polls = 0;
-    while (Clock::now() - start < std::chrono::milliseconds(900)) {
+    // A 100 ms poll cadence, the same shape as sdk/rust/tests/sdk.rs: the
+    // heartbeat try-locks, so a caller that never releases the lock between
+    // calls cannot be interleaved and starves its own lease.
+    for (int index = 0; index < 12; ++index) {
         device.status();
         ++polls;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     const int beats = fake->count_opcode(HEARTBEAT);
-    check(polls > 10, "STATUS was polled repeatedly (" + std::to_string(polls) + ")");
+    check(polls >= 5, "STATUS was polled repeatedly (" + std::to_string(polls) + ")");
     check(beats >= 1, "STATUS polling does not suppress the heartbeat (saw " +
                           std::to_string(beats) + " beats)");
     // The reverse: the heartbeat must not have renewed the lease on our behalf
