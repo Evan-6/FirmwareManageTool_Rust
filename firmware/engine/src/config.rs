@@ -1,7 +1,7 @@
 //! Fixed capacities. The XIAO build has 264 KiB of RAM.
 
-/// Eight concurrent owners, because the GUI, MSCV and EvanRemote are expected to
-/// run at the same time. Held state is the union of all of them; see
+/// Eight concurrent owners, because several hosts are expected to be connected
+/// at the same time. Held state is the union of all of them; see
 /// `protocol-v3.md` for how per-session releases and leases interact.
 pub const SESSIONS: usize = 8;
 pub const OUTPUT_DEPTH: usize = 32;

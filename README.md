@@ -5,7 +5,7 @@ HID 鍵盤／滑鼠身分送出輸入（1 ms poll）。沒有 COM 埠、沒有�
 
 - **圖形介面**：Tauri 2 + React 19 + TypeScript，單一 exe，不連網路。
 - **韌體**：純 Rust（embassy-rp + embassy-usb），`no_std`、無 heap，32.0 KiB flash／30.0 KiB RAM。
-- **同時多程式**：最多八個控制程式（本工具、MSCV、EvanRemote 等）共用同一支裝置，各自獨立 session。
+- **同時多程式**：最多八個控制程式共用同一支裝置，各自獨立 session。
 - **輸入**：NKRO 鍵盤、Consumer 多媒體鍵、五鍵相對滑鼠（含雙軸滾輪）、擬人化移動、文字輸入、組合鍵、巨集。
 
 ## 需求
@@ -91,7 +91,7 @@ bash scripts/build-rust-firmware.sh
 
 `sdk/` 是給外部程式用的 Host SDK，只有兩層：權威實作是 Rust 的 crate `gdb`；其他語言
 一律走 C ABI（`gdb.dll` ＋ `sdk/ffi/include/gdb.h`），C++／Python／Go 三個薄綁定只把
-名字翻譯過去。本工具自己也走 SDK：裝置列舉與實體 HID 通道來自 `gdb::Manager::list()`
+名字翻譯過去。介面層自己也走 SDK：裝置列舉與實體 HID 通道來自 `gdb::Manager::list()`
 與 `gdb::transport::HidTransport`，hidapi 由 SDK 擁有。
 
 ```powershell

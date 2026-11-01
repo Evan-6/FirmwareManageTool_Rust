@@ -41,7 +41,7 @@ cp firmware/app/target/thumbv6m-none-eabi/release/xiao-firmware.uf2 /e/   # E: =
 
 ## 行為
 
-- **八個 session**：GUI／MSCV／EvanRemote 可同時連。正常結束送 `CLOSE` 立刻歸還名額，
+- **八個 session**：多個主機程式可同時連。正常結束送 `CLOSE` 立刻歸還名額，
   不留給租約回收、也不計 `failsafe`。
 - **租約 2000 ms**：只有 OPEN、輸入、HEARTBEAT、RELEASE_ALL 與 BOOTLOADER 續租；STATUS／
   STATUS_EXT／SESSION_LIST／BARRIER 不續租。
