@@ -239,6 +239,8 @@ struct Api {
     decltype(&gdb_scheduler_new) scheduler_new = nullptr;
     decltype(&gdb_scheduler_free) scheduler_free = nullptr;
     decltype(&gdb_scheduler_submit) scheduler_submit = nullptr;
+        decltype(&gdb_scheduler_submit_at) scheduler_submit_at = nullptr;
+        decltype(&gdb_scheduler_elapsed_ms) scheduler_elapsed_ms = nullptr;
     decltype(&gdb_scheduler_every) scheduler_every = nullptr;
     decltype(&gdb_scheduler_cancel) scheduler_cancel = nullptr;
     decltype(&gdb_scheduler_pause) scheduler_pause = nullptr;

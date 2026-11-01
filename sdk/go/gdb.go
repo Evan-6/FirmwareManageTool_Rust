@@ -225,6 +225,8 @@ var (
 	procSchedNew       *syscall.LazyProc
 	procSchedFree      *syscall.LazyProc
 	procSchedSubmit    *syscall.LazyProc
+	procSchedSubmitAt  *syscall.LazyProc
+	procSchedElapsed   *syscall.LazyProc
 	procSchedEvery     *syscall.LazyProc
 	procSchedCancel    *syscall.LazyProc
 	procSchedPause     *syscall.LazyProc
@@ -323,6 +325,8 @@ func library() *syscall.LazyDLL {
 		procSchedNew = dll.NewProc("gdb_scheduler_new")
 		procSchedFree = dll.NewProc("gdb_scheduler_free")
 		procSchedSubmit = dll.NewProc("gdb_scheduler_submit")
+		procSchedSubmitAt = dll.NewProc("gdb_scheduler_submit_at")
+		procSchedElapsed = dll.NewProc("gdb_scheduler_elapsed_ms")
 		procSchedEvery = dll.NewProc("gdb_scheduler_every")
 		procSchedCancel = dll.NewProc("gdb_scheduler_cancel")
 		procSchedPause = dll.NewProc("gdb_scheduler_pause")
@@ -1327,6 +1331,27 @@ func (s *Scheduler) register(callback func() int32) uintptr {
 }
 
 // Submit runs a callback once after delayMs.
+// ElapsedMs is milliseconds since the scheduler started; the unit SubmitAt takes.
+func (s *Scheduler) ElapsedMs() uint64 {
+	value, _, _ := procSchedElapsed.Call(s.handle)
+	return uint64(value)
+}
+
+// SubmitAt queues at an absolute due. Jobs sharing a due are ordered by
+// priority; Submit stamps its due from the clock, so two calls a millisecond
+// apart never tie.
+func (s *Scheduler) SubmitAt(dueMs uint64, priority int32, callback func() int32) (uint64, error) {
+	id := s.register(callback)
+	value, _, _ := procSchedSubmitAt.Call(s.handle, uintptr(dueMs), uintptr(intArg(priority)), taskTrampoline, id)
+	if value == 0 {
+		if failure := lastError(); failure != nil {
+			return 0, failure
+		}
+		return 0, &Error{Code: IO, Message: "submit failed"}
+	}
+	return uint64(value), nil
+}
+
 func (s *Scheduler) Submit(delayMs uint32, priority int32, callback func() int32) (uint64, error) {
 	id := s.register(callback)
 	value, _, _ := procSchedSubmit.Call(s.handle, uintptr(delayMs), uintptr(intArg(priority)), taskTrampoline, id)
