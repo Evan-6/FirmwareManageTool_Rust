@@ -1628,6 +1628,154 @@ pub extern "C" fn gdb_remote_close(raw: *mut GdbRemote) -> i32 {
     }))
 }
 
+/// Counters a host can display without a copy of the SDK.
+#[repr(C)]
+pub struct GdbMetrics {
+    pub frames_sent: u64,
+    pub frames_received: u64,
+    pub retries: u64,
+    pub stolen_frames: u64,
+    pub reconnects: u64,
+    pub lease_faults: u64,
+    pub timeouts: u64,
+    pub latency_count: u64,
+    pub latency_min_us: u64,
+    pub latency_p50_us: u64,
+    pub latency_p95_us: u64,
+    pub latency_max_us: u64,
+}
+
+impl From<MetricsSnapshot> for GdbMetrics {
+    fn from(m: MetricsSnapshot) -> Self {
+        Self {
+            frames_sent: m.frames_sent,
+            frames_received: m.frames_received,
+            retries: m.retries,
+            stolen_frames: m.stolen_frames,
+            reconnects: m.reconnects,
+            lease_faults: m.lease_faults,
+            timeouts: m.timeouts,
+            latency_count: m.latency.count,
+            latency_min_us: m.latency.min_us,
+            latency_p50_us: m.latency.p50_us,
+            latency_p95_us: m.latency.p95_us,
+            latency_max_us: m.latency.max_us,
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_metrics_get(raw: *const GdbDevice, out: *mut GdbMetrics) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let target = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        *target = GdbMetrics::from(handle.device.metrics());
+        Ok(())
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_metrics_reset(raw: *mut GdbDevice) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        handle.device.reset_metrics();
+        Ok(())
+    }))
+}
+
+/// Screen target, laid out as gdb.h's gdb_screen.
+#[repr(C)]
+pub struct GdbScreen {
+    pub kind: i32,
+    pub arg: i64,
+}
+
+/// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND).
+fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
+    match kind {
+        0 => Ok(Screen::Primary),
+        1 => Ok(Screen::Monitor(arg as usize)),
+        2 => Ok(Screen::Window(arg as isize)),
+        other => Err(Error::invalid(format!(
+            "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window"
+        ))),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_move_to_on(
+    raw: *mut GdbDevice,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let options = unsafe { motion_options(duration_ms, profile) };
+        let options = MotionOptions {
+            screen: screen_from(screen.kind, screen.arg)?,
+            ..options
+        };
+        handle.device.mouse().move_to(x, y, options)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_move_path_on(
+    raw: *mut GdbDevice,
+    points: *const GdbPoint,
+    count: usize,
+    screen: GdbScreen,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        if points.is_null() || count == 0 {
+            return Err(Error::invalid("path needs at least one point"));
+        }
+        let slice = unsafe { std::slice::from_raw_parts(points, count) };
+        let list: Vec<(i32, i32)> = slice.iter().map(|point| (point.x, point.y)).collect();
+        let options = unsafe { motion_options(duration_ms, profile) };
+        let options = MotionOptions {
+            screen: screen_from(screen.kind, screen.arg)?,
+            ..options
+        };
+        handle.device.mouse().move_path(&list, options)
+    }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_start_move_to_on(
+    raw: *mut GdbDevice,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> *mut GdbMovement {
+    let outcome = guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let options = unsafe { motion_options(duration_ms, profile) };
+        let options = MotionOptions {
+            screen: screen_from(screen.kind, screen.arg)?,
+            ..options
+        };
+        Ok(Box::into_raw(Box::new(GdbMovement {
+            movement: Some(handle.device.mouse().start_move_to(x, y, options)),
+        })))
+    });
+    match outcome {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            set_last(&error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2112,153 +2260,5 @@ mod tests {
             i32::from(ErrorCode::Invalid.as_u8())
         );
         gdb_remote_free(ptr::null_mut());
-    }
-}
-
-/// Counters a host can display without a copy of the SDK.
-#[repr(C)]
-pub struct GdbMetrics {
-    pub frames_sent: u64,
-    pub frames_received: u64,
-    pub retries: u64,
-    pub stolen_frames: u64,
-    pub reconnects: u64,
-    pub lease_faults: u64,
-    pub timeouts: u64,
-    pub latency_count: u64,
-    pub latency_min_us: u64,
-    pub latency_p50_us: u64,
-    pub latency_p95_us: u64,
-    pub latency_max_us: u64,
-}
-
-impl From<MetricsSnapshot> for GdbMetrics {
-    fn from(m: MetricsSnapshot) -> Self {
-        Self {
-            frames_sent: m.frames_sent,
-            frames_received: m.frames_received,
-            retries: m.retries,
-            stolen_frames: m.stolen_frames,
-            reconnects: m.reconnects,
-            lease_faults: m.lease_faults,
-            timeouts: m.timeouts,
-            latency_count: m.latency.count,
-            latency_min_us: m.latency.min_us,
-            latency_p50_us: m.latency.p50_us,
-            latency_p95_us: m.latency.p95_us,
-            latency_max_us: m.latency.max_us,
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gdb_metrics_get(raw: *const GdbDevice, out: *mut GdbMetrics) -> i32 {
-    code(guard(|| {
-        let handle = unsafe { device(raw) }?;
-        let target = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
-        *target = GdbMetrics::from(handle.device.metrics());
-        Ok(())
-    }))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gdb_metrics_reset(raw: *mut GdbDevice) -> i32 {
-    code(guard(|| {
-        let handle = unsafe { device(raw) }?;
-        handle.device.reset_metrics();
-        Ok(())
-    }))
-}
-
-/// Screen target, laid out as gdb.h's gdb_screen.
-#[repr(C)]
-pub struct GdbScreen {
-    pub kind: i32,
-    pub arg: i64,
-}
-
-/// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND).
-fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
-    match kind {
-        0 => Ok(Screen::Primary),
-        1 => Ok(Screen::Monitor(arg as usize)),
-        2 => Ok(Screen::Window(arg as isize)),
-        other => Err(Error::invalid(format!(
-            "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window"
-        ))),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gdb_mouse_move_to_on(
-    raw: *mut GdbDevice,
-    x: i32,
-    y: i32,
-    screen: GdbScreen,
-    duration_ms: u32,
-    profile: *const GdbProfile,
-) -> i32 {
-    code(guard(|| {
-        let handle = unsafe { device(raw) }?;
-        let options = unsafe { motion_options(duration_ms, profile) };
-        let options = MotionOptions {
-            screen: screen_from(screen.kind, screen.arg)?,
-            ..options
-        };
-        handle.device.mouse().move_to(x, y, options)
-    }))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gdb_mouse_move_path_on(
-    raw: *mut GdbDevice,
-    points: *const GdbPoint,
-    count: usize,
-    screen: GdbScreen,
-    duration_ms: u32,
-    profile: *const GdbProfile,
-) -> i32 {
-    code(guard(|| {
-        let handle = unsafe { device(raw) }?;
-        if points.is_null() || count == 0 {
-            return Err(Error::invalid("path needs at least one point"));
-        }
-        let slice = unsafe { std::slice::from_raw_parts(points, count) };
-        let list: Vec<(i32, i32)> = slice.iter().map(|point| (point.x, point.y)).collect();
-        let options = unsafe { motion_options(duration_ms, profile) };
-        let options = MotionOptions {
-            screen: screen_from(screen.kind, screen.arg)?,
-            ..options
-        };
-        handle.device.mouse().move_path(&list, options)
-    }))
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn gdb_mouse_start_move_to_on(
-    raw: *mut GdbDevice,
-    x: i32,
-    y: i32,
-    screen: GdbScreen,
-    duration_ms: u32,
-    profile: *const GdbProfile,
-) -> *mut GdbMovement {
-    let outcome = guard(|| {
-        let handle = unsafe { device(raw) }?;
-        let options = unsafe { motion_options(duration_ms, profile) };
-        let options = MotionOptions {
-            screen: screen_from(screen.kind, screen.arg)?,
-            ..options
-        };
-        Ok(Box::into_raw(Box::new(GdbMovement {
-            movement: Some(handle.device.mouse().start_move_to(x, y, options)),
-        })))
-    });
-    match outcome {
-        Ok(pointer) => pointer,
-        Err(error) => {
-            set_last(&error);
-            std::ptr::null_mut()
-        }
     }
 }
