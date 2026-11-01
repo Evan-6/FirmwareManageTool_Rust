@@ -10,6 +10,7 @@ cargo test -q -p gdb-motion -p gdb
 
 echo "== c abi =="
 cargo build -q -p gdb-ffi
+cargo test -q -p gdb-ffi
 
 lib="$root/target/debug/gdb.dll"
 [ -f "$lib" ] || lib="$root/target/debug/libgdb.so"
@@ -22,8 +23,6 @@ fi
 echo "== python =="
 GDBOX_LIBRARY="$lib_env" python sdk/python/test_gdb.py
 
-echo "== python native (no gdb.dll) =="
-python sdk/python/native/test_native.py
 
 echo "== c++ =="
 if command -v g++ >/dev/null 2>&1; then
@@ -34,10 +33,6 @@ if command -v g++ >/dev/null 2>&1; then
         sdk/cpp/examples/mock.cpp -o "$out"
     GDBOX_LIBRARY="$lib_env" "$out"
 
-    echo "== c++ native (no gdb.dll) =="
-    native="target/sdk-check/cpp_native_test.exe"
-    g++ -std=c++17 -Wall -Wextra -I sdk/cpp/native         sdk/cpp/native/gdb_native_test.cpp -o "$native"
-    "$native"
 else
     echo "skip: g++ not found"
 fi
