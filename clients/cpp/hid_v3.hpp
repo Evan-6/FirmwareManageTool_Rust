@@ -26,7 +26,7 @@ constexpr std::uint8_t IN_ID = 13;
 constexpr std::uint8_t FEATURE_ID = 14;
 constexpr std::uint8_t VERSION = 3;
 constexpr std::size_t MAX_PAYLOAD = 51;
-constexpr std::size_t HEADER = 12;
+constexpr std::size_t HEADER = 13;
 
 constexpr std::uint8_t OPEN = 0x01;
 constexpr std::uint8_t CLOSE = 0x02;
