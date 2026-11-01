@@ -1132,6 +1132,44 @@ pub extern "C" fn gdb_scheduler_submit(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn gdb_scheduler_submit_at(
+    raw: *mut GdbScheduler,
+    due_ms: u64,
+    priority: i32,
+    func: Option<TaskFn>,
+    user: *mut c_void,
+) -> u64 {
+    match guard(|| {
+        let scheduler = unsafe { scheduler(raw) }?;
+        let func = func.ok_or_else(|| Error::invalid("task callback is NULL"))?;
+        let user = user as usize;
+        scheduler.submit_at(due_ms, Priority(priority), move |_device: &Device| {
+            task_code(func, user)
+        })
+    }) {
+        Ok(id) => id,
+        Err(error) => {
+            set_last(&error);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_scheduler_elapsed_ms(raw: *mut GdbScheduler) -> u64 {
+    match guard(|| {
+        let scheduler = unsafe { scheduler(raw) }?;
+        Ok(scheduler.elapsed_ms())
+    }) {
+        Ok(ms) => ms,
+        Err(error) => {
+            set_last(&error);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn gdb_scheduler_every(
     raw: *mut GdbScheduler,
     interval_ms: u32,

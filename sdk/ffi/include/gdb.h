@@ -209,6 +209,10 @@ void gdb_packet_free(gdb_packet *packet);
 gdb_scheduler *gdb_scheduler_new(gdb_device *device);
 void gdb_scheduler_free(gdb_scheduler *scheduler);
 uint64_t gdb_scheduler_submit(gdb_scheduler *scheduler, uint32_t delay_ms, int32_t priority, gdb_task_fn func, void *user);
+/* Absolute due, in ms since the scheduler started: two jobs given the same due
+   are ordered by priority, which a queue-and-pause batch needs. */
+uint64_t gdb_scheduler_submit_at(gdb_scheduler *scheduler, uint64_t due_ms, int32_t priority, gdb_task_fn func, void *user);
+uint64_t gdb_scheduler_elapsed_ms(gdb_scheduler *scheduler);
 uint64_t gdb_scheduler_every(gdb_scheduler *scheduler, uint32_t interval_ms, int32_t priority, gdb_task_fn func, void *user);
 int32_t gdb_scheduler_cancel(gdb_scheduler *scheduler, uint64_t task_id);
 int32_t gdb_scheduler_pause(gdb_scheduler *scheduler);
@@ -299,8 +303,8 @@ int32_t gdb_observer_command(const gdb_observer *observer, uint8_t opcode, const
 
 /* Minor additions, each one additive: 1 added the attached surface, 2 the
    presence probe and the observer handle, 3 the shared-ownership opens and
-   gdb_stolen_frames. Major stays 1: no existing symbol changed shape. */
-#define GDB_ABI_VERSION_MINOR 3u
+   gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms. Major stays 1: no existing symbol changed shape. */
+#define GDB_ABI_VERSION_MINOR 4u
 
 typedef struct gdb_remote gdb_remote;
 

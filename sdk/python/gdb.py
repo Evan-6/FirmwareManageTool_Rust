@@ -274,6 +274,10 @@ _D.gdb_scheduler_new.restype = c_void_p
 _D.gdb_scheduler_free.argtypes = [c_void_p]
 _D.gdb_scheduler_submit.argtypes = [c_void_p, c_uint32, c_int32, c_void_p, c_void_p]
 _D.gdb_scheduler_submit.restype = c_uint64
+_D.gdb_scheduler_submit_at.argtypes = [c_void_p, c_uint64, c_int32, c_void_p, c_void_p]
+_D.gdb_scheduler_submit_at.restype = c_uint64
+_D.gdb_scheduler_elapsed_ms.argtypes = [c_void_p]
+_D.gdb_scheduler_elapsed_ms.restype = c_uint64
 _D.gdb_scheduler_every.argtypes = [c_void_p, c_uint32, c_int32, c_void_p, c_void_p]
 _D.gdb_scheduler_every.restype = c_uint64
 _D.gdb_scheduler_cancel.argtypes = [c_void_p, c_uint64]
@@ -593,6 +597,24 @@ class Scheduler:
         wrapped = _TASK_CALLBACK(lambda _user: int(callback()))
         task_id = _D.gdb_scheduler_submit(
             self._pointer, delay_ms, priority, ctypes.cast(wrapped, c_void_p), None
+        )
+        if task_id == 0:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "submit failed")
+        self._callbacks[task_id] = wrapped
+        return task_id
+
+    def elapsed_ms(self) -> int:
+        """Milliseconds since the scheduler started; the unit `submit_at` takes."""
+        return int(_D.gdb_scheduler_elapsed_ms(self._pointer))
+
+    def submit_at(self, due_ms: int, priority: int, callback: TaskCallback) -> int:
+        """Queues at an absolute due. Jobs sharing a due are ordered by priority,
+        which `submit` cannot guarantee: it stamps the due from the clock, so two
+        calls a millisecond apart never tie."""
+        wrapped = _TASK_CALLBACK(lambda _user: int(callback()))
+        task_id = _D.gdb_scheduler_submit_at(
+            self._pointer, due_ms, priority, ctypes.cast(wrapped, c_void_p), None
         )
         if task_id == 0:
             code, message = _last_error()

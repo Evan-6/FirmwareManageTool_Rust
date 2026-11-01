@@ -64,7 +64,7 @@ impl Ord for Job {
 enum Msg {
     Submit(Job),
     Cancel(TaskId),
-    Pause(bool),
+    Pause(bool, Option<Sender<()>>),
     Wait(Sender<()>),
     Shutdown,
 }
@@ -114,11 +114,22 @@ impl Scheduler {
     where
         F: FnOnce(&Device) -> Result<()> + Send + 'static,
     {
+        self.submit_at(self.due_ms(delay), priority, action)
+    }
+
+    /// Queues a one-off job at an absolute due time, in milliseconds since the
+    /// scheduler started. Two jobs queued with the same due are ordered by
+    /// priority, which is what a batch wants: `submit` stamps the due from the
+    /// wall clock, so two calls a millisecond apart never tie.
+    pub fn submit_at<F>(&self, due_ms: u64, priority: Priority, action: F) -> Result<TaskId>
+    where
+        F: FnOnce(&Device) -> Result<()> + Send + 'static,
+    {
         let id = self.shared.next_id.fetch_add(1, AtomicOrdering::Relaxed);
         let seq = self.shared.next_seq.fetch_add(1, AtomicOrdering::Relaxed);
         let job = Job {
             id,
-            due_ms: self.due_ms(delay),
+            due_ms,
             priority,
             seq,
             every: None,
@@ -129,6 +140,11 @@ impl Scheduler {
             .send(Msg::Submit(job))
             .map_err(|_| Error::io("scheduler is shut down"))?;
         Ok(id)
+    }
+
+    /// Milliseconds since the scheduler started; the unit `submit_at` takes.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.shared.started.elapsed().as_millis() as u64
     }
 
     /// Repeats until cancelled. The first run happens after `interval`.
@@ -164,13 +180,25 @@ impl Scheduler {
     }
 
     pub fn pause(&self) {
-        self.shared.paused.store(true, AtomicOrdering::Relaxed);
-        let _ = self.shared.tx.send(Msg::Pause(true));
+        self.set_paused(true);
     }
 
     pub fn resume(&self) {
-        self.shared.paused.store(false, AtomicOrdering::Relaxed);
-        let _ = self.shared.tx.send(Msg::Pause(false));
+        self.set_paused(false);
+    }
+
+    /// Blocks until the worker has read the pause message, so every submit sent
+    /// before it is already in the heap. Without the ack `resume` can overtake
+    /// those submits and a queued job runs before its higher-priority sibling
+    /// was ever queued.
+    fn set_paused(&self, value: bool) {
+        let (ack, wait) = channel();
+        if self.shared.tx.send(Msg::Pause(value, Some(ack))).is_err() {
+            self.shared.paused.store(value, AtomicOrdering::Relaxed);
+            return;
+        }
+        let _ = wait.recv_timeout(Duration::from_secs(2));
+        self.shared.paused.store(value, AtomicOrdering::Relaxed);
     }
 
     /// Blocks until the queue is empty and no job is running.
@@ -237,7 +265,12 @@ fn worker(
             Ok(Msg::Cancel(id)) => {
                 cancelled.lock().unwrap().insert(id);
             }
-            Ok(Msg::Pause(value)) => paused.store(value, AtomicOrdering::Relaxed),
+            Ok(Msg::Pause(value, ack)) => {
+                paused.store(value, AtomicOrdering::Relaxed);
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
+                }
+            }
             Ok(Msg::Wait(reply)) => waiters.push(reply),
             Ok(Msg::Shutdown) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
