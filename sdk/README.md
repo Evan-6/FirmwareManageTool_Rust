@@ -151,7 +151,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | queries: device info, STATUS, STATUS_EXT, SESSION_LIST | yes | yes |
 | shared ownership and its `stolen_frames` counter | yes | yes |
 | presence: probe, probe-all, observer on a timer | yes | yes |
-| pointer: relative, raw, absolute, path, screen-targeted, containing anchor, async with retarget and cancel | yes | yes |
+| pointer: relative, raw, absolute, pursuit, path, screen-targeted, containing anchor, async with retarget and cancel | yes | yes |
 | monitor layout and per-monitor DPI | yes | yes |
 | buttons, wheel, drag, keys, long press, chords, sequences, text | yes | yes |
 | scheduler: submit, absolute due, every, pause, resume, cancel, wait_idle, taken errors | yes | yes (C++ has no `submit_at` or `elapsed_ms`) |

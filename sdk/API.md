@@ -209,13 +209,21 @@ int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y,
 at ±1024 per axis and ends with a barrier; `move_raw` splits the same way with no
 barrier, so flush with `gdb_barrier` where a completion guarantee matters.
 
+`MotionOptions::pursuit()` drives an absolute move as a direct chase: the pointer
+is read, whatever is left is sent, and no barrier waits for each step, so a
+pointer that reports quickly is followed at the device's rate. `duration_ms` and
+the human profile are ignored. A movement that has finished cannot be retargeted,
+so a caller following a stream of targets starts the next movement when
+`Movement::is_finished()` turns true.
+
 Rust shapes:
 
 ```rust
 pub struct MotionOptions { pub duration_ms: u32, pub profile: HumanProfile,
-                           pub screen: platform::Screen }   // Primary by default
+                           pub screen: platform::Screen, pub pursuit: bool }
 impl MotionOptions {
     pub fn linear(duration_ms: u32) -> Self;
+    pub fn pursuit() -> Self;
     pub fn with_screen(self, screen: platform::Screen) -> Self;
 }
 pub struct HumanProfile { curve, jitter_px, overshoot_pct, settle_ms, ease, min_step_px }

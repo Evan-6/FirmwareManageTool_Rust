@@ -20,6 +20,11 @@ pub struct MotionOptions {
     /// it; the default is the primary monitor, so nothing changes for callers
     /// that do not ask for another screen.
     pub screen: platform::Screen,
+    /// Skip the planned trajectory and chase the target directly: each step is
+    /// the remaining error (clamped by the tracker), sent without waiting for a
+    /// barrier. This is the mode for a caller that retargets every frame, such
+    /// as a remote-control cursor; `duration_ms` is ignored.
+    pub pursuit: bool,
 }
 
 impl MotionOptions {
@@ -28,6 +33,16 @@ impl MotionOptions {
             duration_ms,
             profile: HumanProfile::linear(),
             screen: platform::Screen::Primary,
+            pursuit: false,
+        }
+    }
+
+    /// A direct chase: no trajectory, no per-step barrier, retargeted as often
+    /// as the caller likes.
+    pub fn pursuit() -> Self {
+        Self {
+            pursuit: true,
+            ..Self::default()
         }
     }
 
@@ -263,6 +278,9 @@ pub(crate) fn run_move_to_with(
     if aim != (x, y) {
         device.record_clamp((x, y), aim);
     }
+    if options.pursuit {
+        return pursue(device, probe, target, aim, screen, shared);
+    }
     let mut plan = Plan::around(&target);
     let mut rng = SplitMix64::from_entropy();
     let mut nodes = plan_nodes(&plan, target.cursor, aim, options, &mut rng)?;
@@ -351,6 +369,72 @@ pub(crate) fn run_move_to_with(
                 }
                 index += 1;
             }
+        }
+        if Instant::now() > deadline {
+            return Err(Error::timeout(format!(
+                "pointer did not reach ({}, {}) targeting {screen}: off by {remaining} px after {} ms",
+                aim.0,
+                aim.1,
+                started.elapsed().as_millis()
+            )));
+        }
+    }
+}
+
+/// Direct pursuit: read the pointer, send what is left, repeat. No trajectory
+/// and no barrier per step, so a pointer that reports its position quickly is
+/// followed at the rate of the device. Retargeting replaces the aim and the
+/// deadline; only a pointer that stops closing the gap fails.
+fn pursue(
+    device: &Device,
+    probe: TargetProbe,
+    target: platform::Target,
+    mut aim: (i32, i32),
+    screen: platform::Screen,
+    shared: &MovementShared,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut tracker = RelativeTracker::with_tick(Duration::from_millis(1));
+    let mut best = gap(target.cursor, aim);
+    let mut deadline = started + STALL;
+    loop {
+        if shared.cancelled() {
+            return Err(Error::cancelled());
+        }
+        if let Some(next) = shared.take_target() {
+            let moved = probe(device, screen)?;
+            if moved.rect.width() != target.rect.width()
+                || moved.rect.height() != target.rect.height()
+            {
+                return Err(Error::invalid_screen(format!(
+                    "monitor layout changed during the movement ({}x{} -> {}x{})",
+                    target.rect.width(),
+                    target.rect.height(),
+                    moved.rect.width(),
+                    moved.rect.height()
+                )));
+            }
+            aim = aim_at(&moved, next, screen)?;
+            if aim != next {
+                device.record_clamp(next, aim);
+            }
+            best = gap(moved.cursor, aim);
+            deadline = Instant::now() + STALL;
+            tracker = RelativeTracker::with_tick(Duration::from_millis(1));
+        }
+        let cursor = probe(device, screen)?.cursor;
+        let remaining = gap(cursor, aim);
+        if remaining < best {
+            best = remaining;
+            let extended = Instant::now() + STALL;
+            if extended > deadline {
+                deadline = extended;
+            }
+        }
+        match tracker.step(cursor, aim, Instant::now()) {
+            Step::Arrived => return Ok(()),
+            Step::Wait => thread::sleep(Duration::from_millis(1)),
+            Step::Move(dx, dy) => device.send_mouse_move(dx as i16, dy as i16)?,
         }
         if Instant::now() > deadline {
             return Err(Error::timeout(format!(
@@ -637,5 +721,96 @@ mod tests {
             (landed.0 - 200).abs() <= 1 && (landed.1 - 150).abs() <= 1,
             "the default target is still the primary monitor, not {landed:?}"
         );
+    }
+
+    fn mock_with_writes() -> (Device, crate::mock::MockHandle) {
+        crate::manager::Manager::open_mock_with_handle(DeviceOptions::default())
+            .expect("mock device")
+    }
+
+    /// A pointer that answers with the mock's own position, slowly enough that a
+    /// retarget or a cancel lands while the movement is still running.
+    fn slow_pointer(device: &Device, _screen: platform::Screen) -> Result<platform::Target> {
+        thread::sleep(Duration::from_millis(15));
+        let rect = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        Ok(platform::Target::new(rect, device.cursor(), vec![rect]))
+    }
+
+    #[test]
+    fn pursuit_reaches_the_target_without_a_barrier_per_step() {
+        let (device, handle) = mock_with_writes();
+        let options = MotionOptions::pursuit();
+        let shared = MovementShared::default();
+        run_move_to_with(&device, single_screen, 1400, 300, &options, &shared).expect("pursuit");
+        let landed = device.cursor();
+        assert!((landed.0 - 1400).abs() <= 1, "landed at {landed:?}");
+        let opcodes: Vec<u8> = handle.writes().iter().map(|packet| packet.opcode).collect();
+        assert!(
+            !opcodes.contains(&input_protocol::v3::BARRIER),
+            "pursuit must not wait for a barrier per step: {opcodes:?}"
+        );
+        assert!(
+            opcodes.len() <= 8,
+            "a 1400 px jump is a few steps, not one per node: {} packets",
+            opcodes.len()
+        );
+    }
+
+    #[test]
+    fn pursuit_takes_a_new_target_while_it_is_running() {
+        let (device, _handle) = mock_with_writes();
+        let options = MotionOptions::pursuit();
+        let shared = MovementShared::default();
+        let mover = device.clone();
+        thread::scope(|scope| {
+            let running = scope
+                .spawn(|| run_move_to_with(&mover, slow_pointer, 1800, 900, &options, &shared));
+            thread::sleep(Duration::from_millis(80));
+            shared.retarget(100, 100);
+            running
+                .join()
+                .expect("movement thread")
+                .expect("pursuit to the new target");
+        });
+        let landed = device.cursor();
+        assert!(
+            (landed.0 - 100).abs() <= 1 && (landed.1 - 100).abs() <= 1,
+            "the last target wins, not {landed:?}"
+        );
+    }
+
+    #[test]
+    fn pursuit_cancels_mid_flight() {
+        let device = mock();
+        let options = MotionOptions::pursuit();
+        let shared = MovementShared::default();
+        let mover = device.clone();
+        let outcome = thread::scope(|scope| {
+            let running = scope
+                .spawn(|| run_move_to_with(&mover, slow_pointer, 1800, 900, &options, &shared));
+            thread::sleep(Duration::from_millis(40));
+            shared.stop();
+            running.join().expect("movement thread")
+        });
+        assert_eq!(
+            outcome.expect_err("cancelled movement").code(),
+            ErrorCode::Cancelled
+        );
+    }
+
+    #[test]
+    fn pursuit_reports_a_pointer_that_never_moves() {
+        let device = mock();
+        let options = MotionOptions::pursuit();
+        let shared = MovementShared::default();
+        let failure = run_move_to_with(&device, stuck_pointer, 1400, 300, &options, &shared)
+            .expect_err("a pointer that never moves");
+        assert_eq!(failure.code(), ErrorCode::Timeout);
+        assert!(failure.message.contains("off by"), "{}", failure.message);
     }
 }

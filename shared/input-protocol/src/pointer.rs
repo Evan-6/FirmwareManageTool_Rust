@@ -19,6 +19,7 @@ struct PendingMotion {
 pub struct RelativeTracker {
     gain: [f64; 2],
     pending: Option<PendingMotion>,
+    tick: Duration,
 }
 
 impl Default for RelativeTracker {
@@ -26,11 +27,22 @@ impl Default for RelativeTracker {
         Self {
             gain: [1.0; 2],
             pending: None,
+            tick: TICK,
         }
     }
 }
 
 impl RelativeTracker {
+    /// The same tracker paced at another feedback interval. A caller that reads
+    /// the pointer itself between steps can shorten it; `TICK` stays the default
+    /// so a device-paced loop is unchanged.
+    pub fn with_tick(tick: Duration) -> Self {
+        Self {
+            tick,
+            ..Self::default()
+        }
+    }
+
     pub fn step(&mut self, position: (i32, i32), target: (i32, i32), now: Instant) -> Step {
         if let Some(PendingMotion {
             sent_at,
@@ -40,7 +52,7 @@ impl RelativeTracker {
         {
             // Do not integrate the same stale feedback on every tick. Allow USB
             // delivery to become visible before issuing the next correction.
-            if now.duration_since(sent_at) < TICK {
+            if now.duration_since(sent_at) < self.tick {
                 return Step::Wait;
             }
             if position == previous && now.duration_since(sent_at) < Duration::from_millis(32) {
@@ -202,6 +214,23 @@ mod tests {
         assert!(matches!(
             tracker.step((102, 98), (102, 98), now + TICK),
             Step::Arrived
+        ));
+    }
+
+    #[test]
+    fn a_short_tick_issues_the_next_step_sooner() {
+        let now = Instant::now();
+        let mut fast = RelativeTracker::with_tick(Duration::from_millis(1));
+        assert!(matches!(fast.step((0, 0), (100, 0), now), Step::Move(..)));
+        assert!(matches!(
+            fast.step((40, 0), (100, 0), now + Duration::from_millis(1)),
+            Step::Move(_dx, 0)
+        ));
+        let mut paced = RelativeTracker::default();
+        assert!(matches!(paced.step((0, 0), (100, 0), now), Step::Move(..)));
+        assert!(matches!(
+            paced.step((40, 0), (100, 0), now + Duration::from_millis(1)),
+            Step::Wait
         ));
     }
 
