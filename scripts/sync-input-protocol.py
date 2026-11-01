@@ -8,12 +8,9 @@ Sources of truth:
   scripts/clients/*.in                 minimal Rust / C++ / Python clients
 """
 from pathlib import Path
-import argparse, json, re, shutil, subprocess
+import argparse, json, re, subprocess
 parser=argparse.ArgumentParser()
 parser.add_argument('--check',action='store_true')
-parser.add_argument('--peer',type=Path)
-parser.add_argument('--mscv-rust',type=Path)
-parser.add_argument('--mscv-cpp',type=Path)
 a=parser.parse_args()
 root=Path(__file__).resolve().parents[1]; shared=root/'shared/input-protocol'
 s=json.loads((shared/'keys.json').read_text()); rows=s['keys']
@@ -91,39 +88,3 @@ for path,content in outputs.items():
     else:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding='utf-8')
-if a.peer:
-    # EvanRemote no longer vendors the protocol crate: it consumes the canonical
-    # `shared/input-protocol` through the GDBOX SDK's path dependencies, so there
-    # is nothing to copy — only the reference itself is checked.
-    vendored=a.peer/'crates/input-protocol'
-    if vendored.exists():raise SystemExit('Peer still vendors crates/input-protocol: '+str(vendored))
-    for crate in ('evan-core','evan-hardware-input'):
-        manifest=a.peer/'crates'/crate/'Cargo.toml'
-        if not manifest.exists() or 'shared/input-protocol' not in manifest.read_text():
-            raise SystemExit('Peer does not use the canonical input-protocol: '+str(manifest))
-    hardware=a.peer/'crates/evan-hardware-input/Cargo.toml'
-    if 'sdk/rust' not in hardware.read_text():
-        raise SystemExit('Peer hardware input does not use the GDBOX SDK: '+str(hardware))
-    key_table=a.peer/'web/key-usages.js'
-    if a.check:
-        if key_table.read_text()!=js:raise SystemExit('Browser key table drift')
-    else:
-        key_table.write_text(js)
-
-if a.mscv_rust:
-    target=a.mscv_rust/'crates/input-protocol'
-    if a.check:
-        for path in shared.rglob('*'):
-            if path.is_file() and 'target' not in path.relative_to(shared).parts and path.name != 'Cargo.lock':
-                other=target/path.relative_to(shared)
-                if not other.exists() or other.read_bytes()!=path.read_bytes():raise SystemExit('MSCV Rust drift: '+str(other))
-    else:
-        shutil.copytree(shared,target,dirs_exist_ok=True,ignore=shutil.ignore_patterns('target','Cargo.lock'))
-if a.mscv_cpp:
-    tokens='// Generated from FirmwareManageTool_Rust/shared/input-protocol/keys.json.\n#pragma once\n#include <cstdint>\nnamespace hardware::v3 {\nstruct KeyToken { const char* token; std::uint16_t page, usage; };\ninline constexpr KeyToken KeyTokens[] = {\n'
-    tokens+=''.join('    {'+json.dumps(token)+', '+str(row['page'])+', '+str(row['usage'])+'},\n' for row in rows for token in [row['token']]+row['aliases'])
-    tokens+='};\n}\n'
-    for path,content in {a.mscv_cpp/'include/hardware/input_protocol/key_tokens_generated.h':tokens,a.mscv_cpp/'include/hardware/input_protocol/vectors_generated.h':cpp_vectors.replace('#pragma once', '#pragma once\n#include <stdint.h>')}.items():
-        if a.check:
-            if not path.exists() or path.read_text()!=content:raise SystemExit('MSCV C++ drift: '+str(path))
-        else:path.parent.mkdir(parents=True,exist_ok=True);path.write_text(content)

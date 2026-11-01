@@ -15,10 +15,10 @@ opcode 數字只在 `src/v3.rs` 定義一次，韌體與 Rust／C++／Python 最
 從 FirmwareManageTool_Rust 執行：
 
 ```sh
-python scripts/sync-input-protocol.py --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV
-python scripts/sync-input-protocol.py --check --peer ../EvanRemote --mscv-rust ../MSCV_RUST --mscv-cpp ../MSCV
+python scripts/sync-input-protocol.py
+python scripts/sync-input-protocol.py --check
 cargo test --locked -p input-protocol
 ```
 
-修改 keys.json 後重新生成；修改 crate 或測試向量後同步 peer。`--check` 不修改檔案，CI 檢查本地產物，
-共同工作目錄另檢查 peer；勿手動修改生成表。相關 repo 同步改版時，先跑 peer drift 檢查再交付。
+修改 `keys.json` 後重新生成；修改 `src/v3.rs` 或測試向量後同樣跑一次。`--check` 不修改檔案，只回報
+哪一份產物過期；勿手動修改生成表。
