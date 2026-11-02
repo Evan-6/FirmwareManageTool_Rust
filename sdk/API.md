@@ -226,9 +226,18 @@ impl MotionOptions {
     pub fn pursuit() -> Self;
     pub fn with_screen(self, screen: platform::Screen) -> Self;
 }
-pub struct HumanProfile { curve, jitter_px, overshoot_pct, settle_ms, ease, min_step_px }
+pub struct HumanProfile { curve, jitter_px, overshoot_pct, settle_ms, ease, min_step_px,
+                          organic }
 pub enum Ease { Jerk, EaseInOut, Linear, EaseIn, EaseOut, CubicBezier { x1, y1, x2, y2 } }
 ```
+
+`organic` (0..=1) decides how much of the profile is re-sampled per move. At 0
+the fields are used literally and two identical moves produce the same path; the
+default 0.6 varies the curvature, adds the occasional overshoot on moves longer
+than 350 px and jitters the settle time. `click()` and `type_text()` draw their
+holds and gaps from log-normal distributions for the same reason, and
+`gdb::timing::sleep` waits on a high-resolution timer so a 25 ms hold lasts
+25 ms instead of rounding up to the 15.6 ms system tick.
 
 ### Screen targets
 
@@ -334,9 +343,37 @@ typedef struct gdb_key_step { uint16_t page; uint16_t usage;
 `page`/`usage` are HID usage ids: page 7 for the keyboard, page 12 for consumer
 keys. A usage outside the firmware catalog is `Invalid` before anything is sent.
 
-`TypeTextConfig { text, interval_ms, hold_ms, jitter_ms }` (defaults 45/18/30;
-jitter is uniform per character). `\n` and `\t` map to Enter and Tab; unsupported
-characters are dropped, so the stroke count is not the character count.
+`TypeTextConfig { text, interval_ms, hold_ms, jitter_ms, typo_rate }` (defaults
+45/18/30/0.02). `interval_ms` and `hold_ms` are **medians**: each gap and hold is
+drawn log-normally around them, `jitter_ms` sets the spread as a fraction of the
+interval (0 = metronome), and `typo_rate` is the chance a key lands on its
+neighbour and is corrected with a backspace. `\n` and `\t` map to Enter and Tab;
+unsupported characters are dropped, so the stroke count is not the character
+count.
+
+### Who owns the clock
+
+Every call has a version that does not sleep, so the caller decides the timing:
+
+| you want | use |
+|---|---|
+| full manual control | `key_down` / `key_up`, `button(button, down)` — they send and return |
+| a hold of your own length | `long_press(…, hold_ms)`, `chord(…, hold_ms)`, `sequence(&[KeyStep { hold_ms, gap_ms }])` |
+| nothing human at all | `HumanProfile { organic: 0, .. }` / `HumanProfile::linear()`, `TypeTextConfig { jitter_ms: 0, typo_rate: 0, .. }` |
+| sub-millisecond waits | `gdb::timing::sleep` / `sleep_ms` (Rust; C callers use their own sleep) |
+
+`click()` draws its hold and gap from log-normal distributions and takes no
+parameters: a constant press length is the easiest thing to detect. When an exact
+value matters, send `button(true)`, wait, `button(false)`.
+
+`MotionOptions.duration_ms` is the caller's number whenever it is non-zero; only
+`0` asks the SDK to pick a natural (Fitts-shaped) duration. `gdb_profile` has no
+`organic` field: `jitterPx == 0` maps to `organic == 0`, which keeps a path
+repeatable.
+
+The C surface has no `typo_rate` parameter either: `gdb_type_text` maps
+`jitter_ms == 0` to no slips (a caller that asked for a metronome) and any other
+value to the default 2%, so every binding agrees with `TypeTextConfig::paced`.
 
 ## Scheduler
 
@@ -841,9 +878,12 @@ the bytes are on the flash but the board never answered. `Host`, `Waits`, `Runne
 - **Lease** — the device renews only on OPEN, HEARTBEAT, RELEASE_ALL, BOOTLOADER
   and valid input; STATUS, BARRIER, STATUS_EXT and SESSION_LIST do not renew, so
   polling any of them is not a heartbeat. The SDK tracks the last renewing command
-  and sends HEARTBEAT after 500 ms of silence, against the 2000 ms lease.
-- **Threads** — a heartbeat thread every 500 ms (it skips a tick rather than block
-  on the session lock); one thread per async movement, where `retarget` is
+  and sends HEARTBEAT once 600–900 ms have passed since that renewal, against the
+  2000 ms lease. The delay is drawn per beat: a beat that lands on one exact
+  interval is visible to anything watching the bus.
+- **Threads** — one heartbeat thread that wakes every 100 ms and beats only when
+  the renewal age passes the sampled delay (it skips a tick rather than block on
+  the session lock); one thread per async movement, where `retarget` is
   thread-safe; one worker per scheduler, whose callbacks never overlap. Event
   callbacks may run on the heartbeat, worker or caller thread: they must return
   quickly and must not call back into the same device synchronously.

@@ -2,20 +2,25 @@
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use gdb_motion::{Rng, SplitMix64};
+use gdb_motion::{Rng, SplitMix64, lognormal};
 use input_protocol::{KeyId, v3::Command};
 use serde::{Deserialize, Serialize};
-use std::thread;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TypeTextConfig {
     pub text: String,
+    /// Median gap between keys. The actual gap is drawn log-normally around it,
+    /// because human typing is right-skewed: mostly quick, occasionally a pause.
     pub interval_ms: u32,
+    /// Median time the key stays down; sampled the same way as `interval_ms`.
     pub hold_ms: u32,
-    /// Random extra delay added to every interval (0 = metronome).
+    /// Spread of the gap distribution. 0 types at a metronome pace, which no
+    /// hand does; the value is read as a fraction of `interval_ms`.
     pub jitter_ms: u32,
+    /// Chance that a key lands on its neighbour and is corrected with a
+    /// backspace, 0..=1. Real typing is not perfect.
+    pub typo_rate: f64,
 }
 
 impl Default for TypeTextConfig {
@@ -25,6 +30,22 @@ impl Default for TypeTextConfig {
             interval_ms: 45,
             hold_ms: 18,
             jitter_ms: 30,
+            typo_rate: 0.02,
+        }
+    }
+}
+
+impl TypeTextConfig {
+    /// The three-knob form the C ABI exposes. A caller that asked for zero
+    /// jitter asked for machine timing, so it gets no slips either; the policy
+    /// lives here so every binding agrees.
+    pub fn paced(text: String, interval_ms: u32, hold_ms: u32, jitter_ms: u32) -> Self {
+        Self {
+            text,
+            interval_ms,
+            hold_ms,
+            jitter_ms,
+            typo_rate: if jitter_ms == 0 { 0.0 } else { 0.02 },
         }
     }
 }
@@ -111,6 +132,35 @@ fn usage(c: char) -> Option<(u16, bool)> {
     Some(mapped)
 }
 
+/// Backspace usage on page 7, used to correct a slip.
+const BACKSPACE: u16 = 0x2A;
+
+/// A neighbouring key on the same row, or the same key when there is none.
+fn slip(usage: u16, rng: &mut SplitMix64) -> u16 {
+    if !(0x04..=0x27).contains(&usage) {
+        return usage;
+    }
+    let step = if rng.unit() < 0.5 { -1 } else { 1 };
+    let candidate = i32::from(usage) + step;
+    if (0x04..=0x27).contains(&candidate) {
+        candidate as u16
+    } else {
+        usage
+    }
+}
+
+/// Median gap between keys, drawn log-normally around `interval_ms`; the spread
+/// comes from `jitter_ms` as a fraction of the interval.
+fn gap_ms(config: &TypeTextConfig, rng: &mut SplitMix64) -> f64 {
+    let base = f64::from(config.interval_ms.max(1));
+    let spread = (f64::from(config.jitter_ms) / base).clamp(0.0, 0.6);
+    if spread > 0.0 {
+        lognormal(rng, base, spread).clamp(base * 0.35, base * 4.0)
+    } else {
+        base
+    }
+}
+
 /// Converts text into keystrokes on a US layout. Characters the firmware has no
 /// usage for are dropped, so the stroke count is not the character count.
 pub fn strokes(text: &str) -> Vec<KeyStroke> {
@@ -159,7 +209,7 @@ impl Keyboard {
 
     pub fn long_press(&self, page: u16, usage: u16, hold_ms: u32) -> Result<()> {
         self.key_down(page, usage)?;
-        thread::sleep(Duration::from_millis(u64::from(hold_ms.max(1))));
+        crate::timing::sleep_ms(f64::from(hold_ms.max(1)));
         self.key_up(page, usage)
     }
 
@@ -171,7 +221,7 @@ impl Keyboard {
         for usage in usages {
             self.key_down(7, *usage)?;
         }
-        thread::sleep(Duration::from_millis(u64::from(hold_ms.max(1))));
+        crate::timing::sleep_ms(f64::from(hold_ms.max(1)));
         for usage in usages.iter().rev() {
             self.key_up(7, *usage)?;
         }
@@ -182,32 +232,60 @@ impl Keyboard {
         for step in steps {
             self.long_press(step.page, step.usage, step.hold_ms)?;
             if step.gap_ms > 0 {
-                thread::sleep(Duration::from_millis(u64::from(step.gap_ms)));
+                crate::timing::sleep_ms(f64::from(step.gap_ms));
             }
         }
         Ok(())
     }
 
+    /// Types `text` with human timing.
+    ///
+    /// Gaps and holds are drawn log-normally around the configured medians,
+    /// whitespace and punctuation get an extra pause, and roughly one key in
+    /// `typo_rate` lands on its neighbour and is corrected with a backspace. A
+    /// metronome at exactly `interval_ms` is the easiest thing to detect.
     pub fn type_text(&self, config: &TypeTextConfig) -> Result<()> {
         let mut rng = SplitMix64::from_entropy();
         for stroke in strokes(&config.text) {
-            if stroke.shift {
-                self.key_down(LEFT_SHIFT.usage_page, LEFT_SHIFT.usage)?;
+            if config.typo_rate > 0.0 && rng.unit() < config.typo_rate.clamp(0.0, 1.0) {
+                let wrong = slip(stroke.key.usage, &mut rng);
+                if wrong != stroke.key.usage {
+                    self.tap(wrong, stroke.shift, config, &mut rng)?;
+                    crate::timing::sleep_ms(lognormal(&mut rng, 130.0, 0.35).clamp(50.0, 520.0));
+                    self.tap(BACKSPACE, false, config, &mut rng)?;
+                }
             }
-            self.key_down(stroke.key.usage_page, stroke.key.usage)?;
-            thread::sleep(Duration::from_millis(u64::from(config.hold_ms.max(1))));
-            self.key_up(stroke.key.usage_page, stroke.key.usage)?;
-            if stroke.shift {
-                self.key_up(LEFT_SHIFT.usage_page, LEFT_SHIFT.usage)?;
+            self.tap(stroke.key.usage, stroke.shift, config, &mut rng)?;
+            let mut gap = gap_ms(config, &mut rng);
+            if matches!(
+                stroke.key.usage,
+                0x2C | 0x28 | 0x2B | 0x33 | 0x36 | 0x37 | 0x38
+            ) {
+                gap += lognormal(&mut rng, 180.0, 0.4).clamp(60.0, 600.0);
             }
-            let jitter = if config.jitter_ms == 0 {
-                0
-            } else {
-                (rng.unit() * f64::from(config.jitter_ms)) as u32
-            };
-            thread::sleep(Duration::from_millis(u64::from(
-                config.interval_ms + jitter,
-            )));
+            crate::timing::sleep_ms(gap);
+        }
+        Ok(())
+    }
+
+    /// One key down, a sampled hold, key up. Shift is handled per stroke so the
+    /// hold covers the shifted character rather than the modifier alone.
+    fn tap(
+        &self,
+        usage: u16,
+        shift: bool,
+        config: &TypeTextConfig,
+        rng: &mut SplitMix64,
+    ) -> Result<()> {
+        if shift {
+            self.key_down(LEFT_SHIFT.usage_page, LEFT_SHIFT.usage)?;
+        }
+        self.key_down(7, usage)?;
+        let hold = lognormal(rng, f64::from(config.hold_ms.max(8)), 0.22).clamp(25.0, 130.0);
+        crate::timing::sleep_ms(hold);
+        self.key_up(7, usage)?;
+        if shift {
+            self.key_up(LEFT_SHIFT.usage_page, LEFT_SHIFT.usage)?;
         }
         Ok(())
     }

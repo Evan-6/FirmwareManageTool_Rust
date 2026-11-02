@@ -154,7 +154,7 @@ if (script === "p1") {
   const csv = await evaluate(`(async () => {
     const report = {
       config: { rounds: 1, mode: "Normal" },
-      device: { path: "test", product: "HP Keyboard", serial: "TEST", vid: 1008, pid: 36 },
+      device: { path: "test", product: "GDBOX KB8", serial: "TEST", vid: 4609, pid: 2827 },
       unix_ms: Date.now(),
       rounds: [{ round: 1, latency_ms: 1.5, outcome: "Success", error: "" }],
       cancelled: false,

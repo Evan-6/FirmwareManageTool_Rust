@@ -3,6 +3,7 @@
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::motion::{MotionOptions, Movement, run_move_by, run_move_to};
+use gdb_motion::{SplitMix64, lognormal};
 use input_protocol::v3::Command;
 
 /// HID button bits: left=bit0, right=bit1, middle=bit2, back=bit3, forward=bit4.
@@ -98,15 +99,23 @@ impl Mouse {
         self.device.send_input(&Command::MouseButtons(next))
     }
 
+    /// Presses and releases `count` times.
+    ///
+    /// The hold and the gap are drawn per click. A constant 25 ms press with a
+    /// constant 35 ms gap is the clearest timing signature there is: every
+    /// program that records input sees identical numbers forever.
     pub fn click(&self, button: Button, count: u8) -> Result<()> {
         if count == 0 {
             return Err(Error::invalid("click count must be at least 1"));
         }
+        let mut rng = SplitMix64::from_entropy();
         for _ in 0..count {
             self.button(button, true)?;
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            let hold = lognormal(&mut rng, 70.0, 0.25).clamp(38.0, 150.0);
+            crate::timing::sleep_ms(hold);
             self.button(button, false)?;
-            std::thread::sleep(std::time::Duration::from_millis(35));
+            let gap = lognormal(&mut rng, 130.0, 0.30).clamp(60.0, 340.0);
+            crate::timing::sleep_ms(gap);
         }
         Ok(())
     }

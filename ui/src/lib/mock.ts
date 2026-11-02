@@ -18,11 +18,11 @@ import type {
 const devices: Device[] = [
   {
     index: 0,
-    product: "HP Keyboard",
+    product: "GDBOX KB8",
     serial: "4250304B38353817",
-    vid: 0x03f0,
-    pid: 0x0024,
-    label: "HP Keyboard 03F0:0024 4250304B38353817",
+    vid: 0x1209,
+    pid: 0x0b0b,
+    label: "GDBOX KB8 1209:0B0B 4250304B38353817",
   },
 ];
 
@@ -51,6 +51,7 @@ const settings: Settings = {
     settleMs: 0,
     ease: "Jerk",
     minStepPx: 1,
+    organic: 0.6,
   },
 };
 
@@ -224,7 +225,7 @@ export async function mockCall(name: string, args: Record<string, unknown>): Pro
     case "macro_load":
       return [
         { kind: "chord", at: 0, config: { usages: [0xe0, 0x06], holdMs: 60 } },
-        { kind: "text", at: 400, config: { text: "mock", intervalMs: 45, holdMs: 18, jitterMs: 30 } },
+        { kind: "text", at: 400, config: { text: "mock", intervalMs: 45, holdMs: 18, jitterMs: 30, typoRate: 0.02 } },
       ];
     case "set_debug":
       emit({ kind: "log", line: `mock: 除錯模式 ${args.enabled ? "開" : "關"}` });

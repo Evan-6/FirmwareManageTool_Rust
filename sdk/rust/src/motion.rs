@@ -31,6 +31,8 @@ impl MotionOptions {
     pub fn linear(duration_ms: u32) -> Self {
         Self {
             duration_ms,
+            // The name is a promise: a straight, repeatable line. Human-shaped
+            // moves come from `MotionOptions::default()`, which is organic.
             profile: HumanProfile::linear(),
             screen: platform::Screen::Primary,
             pursuit: false,
@@ -497,6 +499,19 @@ mod tests {
     use super::*;
     use crate::DeviceOptions;
     use crate::platform::Rect;
+
+    /// `linear` is the escape hatch for callers that want a repeatable path, so
+    /// it must not drift back to the humanised profile: an organic path ends
+    /// with an overshoot-then-settle pair that a slow pointer can miss the
+    /// arrival edge on.
+    #[test]
+    fn linear_options_stay_linear_and_the_default_is_organic() {
+        let linear = MotionOptions::linear(80);
+        assert_eq!(linear.profile, HumanProfile::linear());
+        assert_eq!(linear.profile.organic, 0.0);
+        let default = MotionOptions::default();
+        assert!(default.profile.organic > 0.0, "{default:?}");
+    }
 
     /// Two 960x540 monitors side by side. The pointer is the mock's own, so the
     /// loop really converges; only the rectangles are pretend.

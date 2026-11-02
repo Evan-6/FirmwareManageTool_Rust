@@ -6,6 +6,7 @@ use crate::log::Level;
 use crate::metrics::{Metrics, MetricsSnapshot};
 use crate::session::{Session, Sharing, new_session_id};
 use crate::transport::Transport;
+use gdb_motion::{Rng, SplitMix64};
 use input_protocol::v3::{self, Command, SessionInfo, Status, StatusExt};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -13,7 +14,16 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-pub(crate) const HEARTBEAT_MS: u64 = 500;
+/// A lease renewal is due between these two ages. The lease itself is 2000 ms,
+/// so anywhere in this window is safe; the point is that the beat does not land
+/// on one exact interval, which is visible to anything watching the bus.
+pub(crate) const HEARTBEAT_MIN_MS: u64 = 600;
+pub(crate) const HEARTBEAT_MAX_MS: u64 = 900;
+
+fn beat_due(rng: &mut SplitMix64) -> Duration {
+    let span = HEARTBEAT_MAX_MS - HEARTBEAT_MIN_MS;
+    Duration::from_millis(HEARTBEAT_MIN_MS + (rng.unit() * span as f64) as u64)
+}
 
 #[derive(Clone, Debug)]
 pub enum Target {
@@ -540,6 +550,8 @@ fn recoverable(code: ErrorCode) -> bool {
 fn start_heartbeat(inner: &Arc<Inner>) {
     let weak: Weak<Inner> = Arc::downgrade(inner);
     let handle = thread::spawn(move || {
+        let mut rng = SplitMix64::from_entropy();
+        let mut due_after = beat_due(&mut rng);
         loop {
             thread::sleep(Duration::from_millis(100));
             let Some(inner) = weak.upgrade() else {
@@ -556,7 +568,7 @@ fn start_heartbeat(inner: &Arc<Inner>) {
             // not renew the device-side lease, so a host polling STATUS_EXT would
             // otherwise never heartbeat and lose the session every lease period.
             let due = match state.session.as_ref() {
-                Some(session) => session.renew_age() >= Duration::from_millis(HEARTBEAT_MS),
+                Some(session) => session.renew_age() >= due_after,
                 None => false,
             };
             if !due {
@@ -567,7 +579,7 @@ fn start_heartbeat(inner: &Arc<Inner>) {
                 session.heartbeat()
             };
             match outcome {
-                Ok(()) => {}
+                Ok(()) => due_after = beat_due(&mut rng),
                 Err(error) => {
                     drop(state);
                     let device = Device {

@@ -39,13 +39,13 @@ fn main() -> anyhow::Result<()> {
 
     let devices = hid::enumerate()?;
     if devices.is_empty() {
-        anyhow::bail!(
-            "找不到 Vendor HID（VID:PID 0x03F0:0x0024，usage page 0xFF60 / usage 0x61）。\n\
-             依序檢查：\n\
-             1. 板子是否已燒錄並重新插拔（BOOTSEL 狀態會出現 RPI-RP2 磁碟，不會有 HID）；\n\
-             2. 裝置管理員是否出現「HP Keyboard」（含兩個 HID 介面）；\n\
-             3. 是否有其他程式佔用（GUI 或舊的 latency worker）。"
-        );
+        anyhow::bail!(concat!(
+            "找不到 Vendor HID（VID:PID 0x1209:0x0B0B，usage page 0xFF60 / usage 0x61）。\n",
+            "依序檢查：\n",
+            "1. 板子是否已燒錄並重新插拔（BOOTSEL 狀態會出現 RPI-RP2 磁碟，不會有 HID）；\n",
+            "2. 裝置管理員是否出現「GDBOX KB8」（複合裝置下含輸入與自訂 HID 兩個介面）；\n",
+            "3. 是否有其他程式佔用（GUI 或舊的 latency worker）。"
+        ));
     }
     for device in &devices {
         println!("found: {}", device.label());

@@ -94,7 +94,7 @@ export function DevicePage() {
       >
         {state.devices.length === 0 ? (
           <p className="muted">
-            找不到 Vendor HID（03F0:0024，usage FF60:0061）。每 2 秒自動重新掃描，插上板子就會自動連線；
+            找不到 Vendor HID（1209:0B0B，usage FF60:0061）。每 2 秒自動重新掃描，插上板子就會自動連線；
             只有一個裝置時不用選，直接連上。
           </p>
         ) : (

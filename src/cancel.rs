@@ -24,7 +24,7 @@ impl Cancellation {
         let end = Instant::now() + duration;
         while Instant::now() < end {
             self.check()?;
-            std::thread::sleep(
+            gdb::timing::sleep(
                 end.saturating_duration_since(Instant::now())
                     .min(Duration::from_millis(10)),
             );

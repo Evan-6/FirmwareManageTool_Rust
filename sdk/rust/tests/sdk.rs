@@ -195,6 +195,7 @@ fn keys_chords_and_text_reach_the_device() {
             interval_ms: 1,
             hold_ms: 1,
             jitter_ms: 0,
+            typo_rate: 0.0,
         })
         .unwrap();
     assert_eq!(

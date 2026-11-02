@@ -184,6 +184,8 @@ export interface HumanProfile {
   settleMs: number;
   ease: Ease;
   minStepPx: number;
+  /** 0 = repeat one path exactly, 1 = re-sample curve/overshoot/settle per move. */
+  organic: number;
 }
 
 export const DEFAULT_PROFILE: HumanProfile = {
@@ -193,6 +195,7 @@ export const DEFAULT_PROFILE: HumanProfile = {
   settleMs: 0,
   ease: "Jerk",
   minStepPx: 1,
+  organic: 0.6,
 };
 
 /** Mirrors `Settings::default()` in `src/settings.rs`. */
@@ -214,6 +217,8 @@ export interface TypeTextConfig {
   intervalMs: number;
   holdMs: number;
   jitterMs: number;
+  /** Chance a key lands on its neighbour and is corrected, 0..1. */
+  typoRate: number;
 }
 
 export interface ChordConfig {

@@ -13,7 +13,7 @@ HID 鍵盤／滑鼠身分送出輸入（1 ms poll）。沒有 COM 埠、沒有�
 - Windows 10／11 x64（GUI、燒錄、打包都只在 Windows 驗證）。
 - Rust stable（以 1.98.1 驗證）＋ Visual Studio Build Tools 的「Desktop development with C++」與 Windows SDK。
 - Node.js 20+（只有從原始碼建置 GUI 時需要）。
-- 硬體：Seeed XIAO RP2040，USB 身分 `03F0:0024`、Vendor HID usage `FF60:0061`。
+- 硬體：Seeed XIAO RP2040，USB 身分 `1209:0B0B`、Vendor HID usage `FF60:0061`。
 
 ## 快速開始
 
@@ -52,7 +52,7 @@ cargo run --release -p firmware-manage-tool-app
 | **即時狀態** | 150 ms 取樣的 STATUS 指標（received／completed／pending／剩餘租約／rx／tx／hid／failsafe）＋30 秒走勢、健康判定、`STATUS_EXT` 診斷（uptime、tick 遲到、佇列深度、上次故障、reset 原因、開機次數）、連線擁有者表格（`SESSION_LIST`：誰按著幾個鍵、剩餘租約、是否要求 BOOTSEL） |
 | **韌體** | 韌體目錄與 `cargo` 路徑、建置進度、BOOTSEL 與複製進度、燒錄後驗證 |
 | **延遲** | 1–10000 輪、模式（一般／高精度／極限 REALTIME）、逐輪結果與統計 |
-| **滑鼠** | 擬人化參數（曲率、抖動、過衝、收尾停頓、最小步距、時間曲線）＋**實際軌跡預覽**、相對移動、點擊／拖曳／滾輪、文字輸入、組合鍵、巨集錄製與重播 |
+| **滑鼠** | 擬人化參數（曲率、抖動、過衝、收尾停頓、最小步距、時間曲線、有機度）＋**實際軌跡預覽**、相對移動、點擊／拖曳／滾輪、文字輸入、組合鍵、巨集錄製與重播 |
 
 **除錯模式／遊戲模式**（右上角切換，設定會保存）：
 
@@ -61,7 +61,7 @@ cargo run --release -p firmware-manage-tool-app
 | STATUS 輪詢 | 每 150 ms | 不送 |
 | 診斷／擁有者清單 | 每 1 s | 不送 |
 | HID 每行回覆轉到介面 | 是 | 否 |
-| 心跳（維持租約） | 每 500 ms | 每 500 ms |
+| 心跳（維持租約） | 600–900 ms 隨機 | 600–900 ms 隨機 |
 | 鍵盤／滑鼠／輸入 | 照常 | 照常 |
 
 要不要輪詢只在「看數字」時有意義；遊玩或實機操作時切遊戲模式，裝置就不必回覆多餘查詢。
@@ -105,7 +105,7 @@ cargo build -p gdb-ffi --release       # target/release/gdb.dll
 
 | 現象 | 原因與處理 |
 | --- | --- |
-| 掃不到裝置 | 只認 `03F0:0024`＋usage `FF60:0061`。檢查線材是否只有充電、換 USB 埠、確認韌體已燒錄 |
+| 掃不到裝置 | 只認 `1209:0B0B`＋usage `FF60:0061`。檢查線材是否只有充電、換 USB 埠、確認韌體已燒錄 |
 | 「裝置忙碌」 | 同名 session 已存在，或八個名額已滿。關掉沒在用控制程式（正常結束會送 `CLOSE` 立刻歸還） |
 | 連線後數字不動 | 你切在遊戲模式。切回除錯模式即恢復輪詢 |
 | `failsafe` 一直增加 | 有程式沒有送 `CLOSE` 就結束（崩潰、強制結束、拔線），owner 要等 2 秒租約；或兩個程式同時輪詢同一端點 |

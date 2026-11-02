@@ -86,7 +86,7 @@ export function MousePage() {
   const [preview, setPreview] = useState<TrajectoryPreview | null>(null);
   const [previewError, setPreviewError] = useState<UiError | null>(null);
   const [text, setText] = useState("hello world");
-  const [typing, setTyping] = useState<TypeTextConfig>({ text: "hello world", intervalMs: 45, holdMs: 18, jitterMs: 30 });
+  const [typing, setTyping] = useState<TypeTextConfig>({ text: "hello world", intervalMs: 45, holdMs: 18, jitterMs: 30, typoRate: 0.02 });
   const [chordKeys, setChordKeys] = useState("E0,E1,06");
   const [chordHold, setChordHold] = useState(60);
   const [history, setHistory] = useState<string[]>([]);
@@ -330,6 +330,7 @@ export function MousePage() {
             <Slider label="字間隔" value={typing.intervalMs} min={0} max={300} step={5} suffix=" ms" onChange={(intervalMs) => setTyping({ ...typing, intervalMs })} />
             <Slider label="按鍵持續" value={typing.holdMs} min={8} max={80} step={2} suffix=" ms" onChange={(holdMs) => setTyping({ ...typing, holdMs })} />
             <Slider label="抖動" value={typing.jitterMs} min={0} max={200} step={5} suffix=" ms" onChange={(jitterMs) => setTyping({ ...typing, jitterMs })} />
+            <Slider label="失誤率" value={Math.round(typing.typoRate * 100)} min={0} max={10} step={1} suffix="%" onChange={(percent) => setTyping({ ...typing, typoRate: percent / 100 })} />
             <div className="field">
               <span>&nbsp;</span>
               <button disabled={!state.connected} onClick={typeText}>

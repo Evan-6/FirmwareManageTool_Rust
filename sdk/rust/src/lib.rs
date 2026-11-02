@@ -21,6 +21,7 @@ pub mod platform;
 pub mod probe;
 pub mod replay;
 pub mod task;
+pub mod timing;
 pub mod transport;
 pub mod watch;
 
@@ -42,8 +43,12 @@ pub use task::{Priority, Scheduler, TaskId};
 pub use transport::Transport;
 pub use watch::{Watch, WatchEvent};
 
-/// Vendor HID identity. The firmware answers only this pair.
-pub const VENDOR_ID: u16 = 0x03F0;
-pub const PRODUCT_ID: u16 = 0x0024;
+/// Vendor HID identity. This is the project's own id — an unassigned pid.codes
+/// PID under the open-source `0x1209` vendor id — so the device presents itself
+/// as the keyboard it is instead of borrowing another vendor's model number.
+/// `firmware/app/src/main.rs` must carry the same pair; `gdb_probe` answers only
+/// this one.
+pub const VENDOR_ID: u16 = 0x1209;
+pub const PRODUCT_ID: u16 = 0x0B0B;
 pub const USAGE_PAGE: u16 = 0xFF60;
 pub const USAGE: u16 = 0x61;

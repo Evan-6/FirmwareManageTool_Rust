@@ -11,6 +11,21 @@ pub trait Rng {
     fn unit(&mut self) -> f64;
 }
 
+/// Standard normal sample (Box–Muller, two uniforms, no state kept between
+/// calls so a seed still replays exactly).
+pub fn normal(rng: &mut impl Rng) -> f64 {
+    let u1 = rng.unit().max(1e-12);
+    let u2 = rng.unit();
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+/// Log-normal sample with the given median and log-space sigma. Human timing is
+/// right-skewed (long pauses, few short ones), which a uniform spread cannot
+/// reproduce; `sigma` 0.2–0.4 matches keystroke and click distributions.
+pub fn lognormal(rng: &mut impl Rng, median: f64, sigma: f64) -> f64 {
+    (median.max(1e-9).ln() + sigma.max(0.0) * normal(rng)).exp()
+}
+
 /// SplitMix64: tiny, seedable, identical on every platform.
 #[derive(Clone, Debug)]
 pub struct SplitMix64(u64);
@@ -144,6 +159,11 @@ pub struct HumanProfile {
     pub ease: Ease,
     /// Ignore steps smaller than this, which looks like a coarser sensor.
     pub min_step_px: i32,
+    /// How much of every field is re-sampled per move, 0..=1. At 0 the fields
+    /// are used literally, so two identical moves produce identical paths (that
+    /// is what makes them look scripted); at 1 the curve, the overshoot and the
+    /// settle time are drawn fresh each time.
+    pub organic: f64,
 }
 
 impl Default for HumanProfile {
@@ -155,6 +175,7 @@ impl Default for HumanProfile {
             settle_ms: 0,
             ease: Ease::Jerk,
             min_step_px: 1,
+            organic: 0.6,
         }
     }
 }
@@ -169,7 +190,14 @@ impl HumanProfile {
             settle_ms: 0,
             ease: Ease::Linear,
             min_step_px: 1,
+            organic: 0.0,
         }
+    }
+
+    /// The defaults, spelled out: a curved, lightly jittered path that
+    /// occasionally overshoots a long move and settles before a click.
+    pub fn organic() -> Self {
+        Self::default()
     }
 }
 
@@ -187,8 +215,13 @@ pub fn split_delta(mut x: i32, mut y: i32) -> Vec<(i32, i32)> {
 }
 
 /// Distance-adaptive duration used when the caller passes `duration_ms = 0`.
+///
+/// Fitts' law shape (`a + b·log2(1 + D/W)`, W ≈ a key-sized target) so a short
+/// correction stays quick and a long traverse takes longer, times a log-normal
+/// factor: human move times are right-skewed, not uniform.
 pub fn natural_duration(distance: f64, rng: &mut impl Rng) -> u32 {
-    (150.0 + distance * 0.42 + rng.unit() * 70.0 - 25.0).clamp(170.0, 900.0) as u32
+    let base = 120.0 + 140.0 * (1.0 + distance.max(0.0) / 120.0).log2();
+    (base * lognormal(rng, 1.0, 0.18)).clamp(170.0, 900.0) as u32
 }
 
 /// Samples a human-ish path from `start` to `target` on `screen`.
@@ -227,7 +260,27 @@ pub fn trajectory_with(
     }
     let nx = -dy / distance;
     let ny = dx / distance;
-    let over = (distance * profile.overshoot_pct / 100.0).clamp(0.0, 160.0);
+    // Everything below is drawn per move. A fixed curvature, a fixed overshoot
+    // and a fixed settle are repeated identically on every move, which is the
+    // clearest sign of a scripted pointer; `organic` decides how much of each
+    // value is re-sampled (0 keeps the literal values, for tests and for
+    // callers that want a straight line).
+    let organic = profile.organic.clamp(0.0, 1.0);
+    let curve = profile.curve.clamp(0.0, 2.0) * (1.0 + (rng.unit() * 2.0 - 1.0) * 0.35 * organic);
+    let overshoot_pct = if profile.overshoot_pct > 0.0 {
+        profile.overshoot_pct
+    } else if distance > 350.0 && rng.unit() < 0.35 * organic {
+        1.0 + rng.unit() * 2.0 * organic
+    } else {
+        0.0
+    };
+    let settle_ms = if profile.settle_ms > 0 {
+        (f64::from(profile.settle_ms) * (1.0 + (rng.unit() * 2.0 - 1.0) * 0.3 * organic))
+            .clamp(1.0, 400.0) as u32
+    } else {
+        0
+    };
+    let over = (distance * overshoot_pct / 100.0).clamp(0.0, 160.0);
     let aim = if over > 0.5 {
         (
             (f64::from(target.0) + dx / distance * over).clamp(0.0, f64::from(screen.width - 1)),
@@ -236,7 +289,7 @@ pub fn trajectory_with(
     } else {
         (f64::from(target.0), f64::from(target.1))
     };
-    let limit = (distance * 0.13).clamp(4.0, 110.0) * profile.curve.clamp(0.0, 2.0);
+    let limit = (distance * 0.13).clamp(4.0, 110.0) * curve;
     let bend = (rng.unit() * 2.0 - 1.0) * limit;
     let a1 = 0.20 + rng.unit() * 0.18;
     let a2 = 0.62 + rng.unit() * 0.22;
@@ -294,7 +347,7 @@ pub fn trajectory_with(
     if profile.settle_ms > 0 {
         let last_at = nodes.last().map(|node| node.at_ms).unwrap_or(0);
         nodes.push(Node {
-            at_ms: last_at + u64::from(profile.settle_ms),
+            at_ms: last_at + u64::from(settle_ms),
             x: target.0,
             y: target.1,
         });
@@ -429,5 +482,111 @@ mod tests {
     fn split_delta_covers_large_moves_in_hid_sized_chunks() {
         assert_eq!(split_delta(0, 0), Vec::<(i32, i32)>::new());
         assert_eq!(split_delta(1025, -1), vec![(1024, -1), (1, 0)]);
+    }
+
+    #[test]
+    fn lognormal_is_right_skewed_around_its_median() {
+        let mut rng = SplitMix64::new(11);
+        let samples: Vec<f64> = (0..4000).map(|_| lognormal(&mut rng, 100.0, 0.3)).collect();
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2];
+        assert!(
+            mean > median * 1.02,
+            "a log-normal has a mean above its median, mean={mean} median={median}"
+        );
+        assert!(sorted[0] >= 0.0);
+    }
+
+    #[test]
+    fn natural_duration_grows_with_distance_and_stays_in_bounds() {
+        let mut near = SplitMix64::new(3);
+        let mut far = SplitMix64::new(3);
+        let near_times: Vec<u32> = (0..60)
+            .map(|_| natural_duration(120.0, &mut near))
+            .collect();
+        let far_times: Vec<u32> = (0..60)
+            .map(|_| natural_duration(1800.0, &mut far))
+            .collect();
+        let average = |values: &[u32]| values.iter().sum::<u32>() as f64 / values.len() as f64;
+        assert!(
+            average(&far_times) > average(&near_times) * 1.3,
+            "Fitts' law: far moves take longer (near {}, far {})",
+            average(&near_times),
+            average(&far_times)
+        );
+        assert!(near_times.iter().all(|ms| (170..=900).contains(ms)));
+        assert!(far_times.iter().all(|ms| (170..=900).contains(ms)));
+    }
+
+    #[test]
+    fn organic_moves_do_not_repeat_one_path() {
+        let profile = HumanProfile::organic();
+        let a = trajectory_with(
+            (10, 20),
+            (900, 500),
+            Screen::default(),
+            260,
+            &profile,
+            &mut SplitMix64::new(1),
+        )
+        .unwrap();
+        let b = trajectory_with(
+            (10, 20),
+            (900, 500),
+            Screen::default(),
+            260,
+            &profile,
+            &mut SplitMix64::new(2),
+        )
+        .unwrap();
+        assert_ne!(a, b, "two seeds must not produce the identical path");
+        // The endpoint still lands on the target, overshoot or not.
+        let last = b.last().unwrap();
+        assert_eq!((last.x, last.y), (900, 500));
+    }
+
+    #[test]
+    fn organic_curvature_varies_between_moves() {
+        let profile = HumanProfile::organic();
+        // Sagitta of the path: how far the middle of the path sits off the
+        // straight line. A fixed curve repeats the same value every time.
+        let mut sagittas = Vec::new();
+        for seed in 0..8u64 {
+            let nodes = trajectory_with(
+                (0, 0),
+                (800, 0),
+                Screen::default(),
+                300,
+                &profile,
+                &mut SplitMix64::new(seed),
+            )
+            .unwrap();
+            let middle = &nodes[nodes.len() / 2];
+            sagittas.push(middle.y.abs());
+        }
+        let first = sagittas[0];
+        assert!(
+            sagittas.iter().any(|value| *value != first),
+            "organic curvature must differ between moves: {sagittas:?}"
+        );
+    }
+
+    #[test]
+    fn linear_profiles_never_overshoot_or_jitter() {
+        let mut rng = SplitMix64::new(9);
+        for _ in 0..20 {
+            let nodes = trajectory_with(
+                (0, 0),
+                (1200, 0),
+                Screen::default(),
+                200,
+                &HumanProfile::linear(),
+                &mut rng,
+            )
+            .unwrap();
+            assert!(nodes.iter().all(|node| node.x <= 1200 && node.y == 0));
+        }
     }
 }

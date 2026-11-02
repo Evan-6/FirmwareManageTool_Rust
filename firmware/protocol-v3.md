@@ -1,7 +1,7 @@
 # Vendor HID protocol 3
 
 本檔、`shared/input-protocol/keys.json` 與 `vectors.json` 是唯一規範。韌體 3.2.0 只講 Vendor HID v3：
-VID/PID `0x03F0:0x0024`，bcdDevice `0x0310`，USB 序號取自 RP2040 unique id（不能當密碼學身分）。
+VID/PID `0x1209:0x0B0B`，bcdDevice `0x0100`，USB 序號取自 RP2040 unique id（不能當密碼學身分）。
 `shared/input-protocol/src/v3.rs` 的常數是 opcode 數字的唯一來源，三個最小客戶端由它產生。
 
 ## 能力與 framing

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Windows desktop tool + host SDK for one vendor-HID device: a Seeed XIAO RP2040
-running Rust firmware (`03F0:0024`, usage `FF60:0061`, protocol 3.2.0).
+running Rust firmware (`1209:0B0B`, usage `FF60:0061`, protocol 3.2.0).
 
 ## Layout
 

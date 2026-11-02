@@ -14,6 +14,7 @@ fn main() -> gdb::Result<()> {
         interval_ms: 1,
         hold_ms: 1,
         jitter_ms: 0,
+        typo_rate: 0.0,
     })?;
     device.keyboard().chord(&[0xE0, 0x06], 20)?;
 

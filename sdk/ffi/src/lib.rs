@@ -187,6 +187,10 @@ impl GdbProfile {
             settle_ms: self.settle_ms,
             ease,
             min_step_px: self.min_step_px,
+            // The C struct has no knob for it: a caller that asked for jitter
+            // gets per-move variation, one that asked for none gets a repeatable
+            // straight path.
+            organic: if self.jitter_px > 0.0 { 0.6 } else { 0.0 },
         }
     }
 }
@@ -1092,12 +1096,12 @@ pub extern "C" fn gdb_type_text(
             .to_str()
             .map_err(|_| Error::invalid("text is not valid UTF-8"))?
             .to_string();
-        handle.device.keyboard().type_text(&TypeTextConfig {
+        handle.device.keyboard().type_text(&TypeTextConfig::paced(
             text,
             interval_ms,
             hold_ms,
             jitter_ms,
-        })
+        ))
     }))
 }
 

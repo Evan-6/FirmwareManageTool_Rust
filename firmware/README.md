@@ -8,7 +8,7 @@
 燒錄工具或 C 編譯器。
 
 - 線路協定：[protocol-v3.md](protocol-v3.md)
-- USB：`03F0:0024`、產品字串 `HP Keyboard`、bcdDevice `0x0310`、序號取自 flash unique id
+- USB：`1209:0B0B`、產品字串 `GDBOX KB8`、bcdDevice `0x0100`、序號取自 flash unique id
 - 容量：Flash 32,724 B（32.0 KiB／2 MiB）、RAM 30,684 B（30.0 KiB／264 KiB）
 - UF2：65,536 B、128 blocks、每塊 256-byte 對齊、首塊 `0x10000000`
 

@@ -36,6 +36,9 @@ pub struct HumanProfile {
     pub ease: Ease,
     /// Ignore steps smaller than this, which looks like a coarser sensor.
     pub min_step_px: i32,
+    /// How much of the profile is re-sampled per move, 0..=1. 0 repeats one
+    /// path exactly; the default lets curvature, overshoot and settle vary.
+    pub organic: f64,
 }
 
 impl Default for HumanProfile {
@@ -47,6 +50,7 @@ impl Default for HumanProfile {
             settle_ms: 0,
             ease: Ease::Jerk,
             min_step_px: 1,
+            organic: 0.6,
         }
     }
 }
@@ -62,6 +66,7 @@ impl HumanProfile {
             settle_ms: self.settle_ms,
             ease: self.ease.motion(),
             min_step_px: self.min_step_px,
+            organic: self.organic,
         }
     }
 }

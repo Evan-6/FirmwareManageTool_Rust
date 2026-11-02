@@ -36,7 +36,7 @@ use embassy_usb::class::hid::{
     ReportId, RequestHandler, State,
 };
 use embassy_usb::control::OutResponse;
-use embassy_usb::{Builder, Config, Handler};
+use embassy_usb::{Builder, Config, Handler, UsbVersion};
 use firmware_engine::{InputReport, PlatformInfo, Report, wire};
 use smart_leds::RGB8;
 use panic_halt as _;
@@ -57,7 +57,7 @@ const VENDOR_REPORT_ID: u8 = 13;
 const DATA_REPORT_ID: u8 = 12;
 const POLL_MS: u8 = 1;
 const MAX_POWER_MA: u16 = 100;
-const DEVICE_RELEASE: u16 = 0x0310;
+const DEVICE_RELEASE: u16 = 0x0100;
 const RX_DEPTH: usize = 32;
 /// First four bytes of the commit this image was built from (0 when unknown).
 const BUILD_HASH: u32 = parse_build_hash(env!("BUILD_HASH"));
@@ -474,11 +474,15 @@ async fn main(_spawner: Spawner) {
     let mut vendor_requests = VendorRequests;
 
     let driver = Driver::new(p.USB, Irqs);
-    let mut config = Config::new(0x03f0, 0x0024);
-    config.manufacturer = Some("HP");
-    config.product = Some("HP Keyboard");
+    // The project's own identity: an unassigned pid.codes PID under the
+    // open-source `0x1209` vendor id. The strings name a keyboard, because that
+    // is what this is; `sdk/rust/src/lib.rs` carries the same pair.
+    let mut config = Config::new(0x1209, 0x0B0B);
+    config.manufacturer = Some("GDBOX");
+    config.product = Some("GDBOX KB8");
     config.serial_number = Some(serial);
     config.device_release = DEVICE_RELEASE;
+    config.bcd_usb = UsbVersion::Two;
     config.max_power = MAX_POWER_MA;
     config.max_packet_size_0 = 64;
 

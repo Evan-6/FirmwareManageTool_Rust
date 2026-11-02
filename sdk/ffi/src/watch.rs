@@ -163,12 +163,12 @@ mod tests {
     #[test]
     fn each_event_is_one_json_object() {
         let entry = DeviceEntry {
-            path: r"\\?\HID#VID_03F0&PID_0024".to_string(),
+            path: r"\\?\HID#VID_1209&PID_0B0B".to_string(),
             serial: "4250304B38353817".to_string(),
-            product: "HP Keyboard".to_string(),
-            manufacturer: "HP".to_string(),
-            vid: 0x03F0,
-            pid: 0x0024,
+            product: "GDBOX KB8".to_string(),
+            manufacturer: "GDBOX".to_string(),
+            vid: 0x1209,
+            pid: 0x0B0B,
         };
         for (event, kind) in [
             (WatchEvent::Arrived(entry.clone()), WATCH_ARRIVED),
@@ -179,8 +179,9 @@ mod tests {
             let value: serde_json::Value =
                 serde_json::from_str(&json).expect("a device entry is an object");
             assert_eq!(value["serial"], "4250304B38353817");
-            assert_eq!(value["vid"], 0x03F0);
-            assert_eq!(value["path"], r"\\?\HID#VID_03F0&PID_0024");
+            assert_eq!(value["vid"], 0x1209);
+            assert_eq!(value["pid"], 0x0B0B);
+            assert_eq!(value["path"], r"\\?\HID#VID_1209&PID_0B0B");
         }
 
         let (kind, json) = event_json(&WatchEvent::BootloaderArrived(std::path::PathBuf::from(
