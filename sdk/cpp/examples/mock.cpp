@@ -150,10 +150,22 @@ int main() {
         device.mouse().move_to(100, 200, anchor, 20);
     }
     try {
-        device.mouse().move_to(10, 10, gdb::Screen{4, 0}, 0);
-        assert(false && "screen kind 4 is not defined");
+        device.mouse().move_to(10, 10, gdb::Screen{5, 0}, 0);
+        assert(false && "screen kind 5 is not defined");
     } catch (const gdb::Error& error) {
         assert(error.code() == gdb::ErrorCode::Invalid);
+    }
+    // kind 4 is the client area, which a mock has no window for.
+    {
+        const gdb::Screen client = gdb::Screen::window_client(0x1234);
+        assert(client.kind == 4 && "the client anchor is screen kind 4");
+        try {
+            device.mouse().move_to(10, 10, client, 0);
+            assert(false && "the mock has no windows");
+        } catch (const gdb::Error& error) {
+            assert(error.code() == gdb::ErrorCode::StaleWindow);
+            assert(std::string(error.what()).find("client area") != std::string::npos);
+        }
     }
     // The mock pretends to have one 1920x1080 screen, so index 1 names a monitor
     // the system does not report.
@@ -210,6 +222,75 @@ int main() {
     assert(lines.load() > 0 && "the log sink saw nothing");
     gdb::set_log_sink(nullptr);
     gdb::set_log_level(0);
+
+    // The runtime revision and the capability list: what a host reads before it
+    // trusts a symbol its binding assumes.
+    {
+        const auto [major, minor] = gdb::abi_versions();
+        std::cout << "runtime abi " << major << "." << minor << "\n";
+        assert(major == gdb::abi_version());
+        assert(minor == gdb::abi_minor_version());
+        const std::string listed = gdb::capabilities();
+        std::cout << "capabilities " << listed << "\n";
+        assert(listed.find("\"click_timed\":true") != std::string::npos);
+        assert(listed.find("\"replay\":false") != std::string::npos);
+        assert(listed.find("\"event_json\":true") != std::string::npos);
+    }
+
+    // The caller-timed click, the aim-and-click pair and the pursuit move.
+    device.mouse().click_timed(gdb::Button::Left, 1, 5, 5, 0);
+    device.mouse().click_at(150, 150, gdb::Screen::primary(), gdb::Button::Left, 1, 2, 0, 0);
+    device.mouse().move_to_on_pursuit(1000, 400, gdb::Screen::primary());
+
+    // Where the pointer ended: applied is a measurement, so the error is what the
+    // move left, not an assumption.
+    {
+        const gdb::MoveReport report =
+            device.mouse().move_to_report(300, 200, gdb::Screen::primary(), 20);
+        std::cout << "move error=" << report.error_px()
+                  << "px elapsed=" << report.elapsed_us << "us\n";
+        assert(report.requested_x == 300 && report.requested_y == 200);
+        assert(report.error_px() <= 1);
+        assert(!report.clamped);
+        assert(report.elapsed_us > 0);
+    }
+
+    // The two platform reads: the DPI mode, and a window handle the system does
+    // not know (a typed refusal, never a zeroed answer).
+    {
+        const std::string prepared = gdb::prepare_platform();
+        std::cout << "platform " << prepared << "\n";
+        assert(prepared.find("\"perMonitor\"") != std::string::npos);
+        try {
+            (void)gdb::window_metrics_json(0);
+            assert(false && "handle 0 is not a window");
+        } catch (const gdb::Error& error) {
+            assert(error.code() == gdb::ErrorCode::StaleWindow);
+        }
+    }
+
+    // The device's own error record, which a success does not clear.
+    {
+        const auto none = device.last_error();
+        assert(!none.has_value() || none->code != gdb::ErrorCode::Ok);
+    }
+
+    // Events as JSON: closing the device reports the new state.
+    {
+        auto watched = gdb::Device::open_mock(200, false, false);
+        std::atomic<int> seen{0};
+        watched.set_event_handler_json([&seen](int32_t kind, const std::string& body) {
+            if (kind == 0) {
+                assert(body.find("\"state\"") != std::string::npos);
+                ++seen;
+            }
+        });
+        watched.close();
+        for (int waited = 0; waited < 200 && seen.load() == 0; ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        assert(seen.load() > 0 && "closing the device produced no JSON event");
+    }
 
     device.close();
     std::cout << "cpp mock ok\n";
