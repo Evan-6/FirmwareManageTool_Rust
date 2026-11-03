@@ -110,9 +110,20 @@ typedef void (*gdb_log_fn)(void *user, int32_t level, const char *message);
 uint32_t gdb_abi_version(void);
 const char *gdb_version(void);
 
-/* Fills buffer with the last error message and returns its code (0 = none). */
+/* Fills buffer with the last error message and returns its code (0 = none).
+   This one answers for the calling thread: two threads that fail at the same
+   time each read their own. */
 int32_t gdb_last_error(char *buffer, size_t capacity);
 void gdb_string_free(char *text);
+
+/* The latest failure the device recorded, whoever called it, as the message
+   gdb_last_error would have carried on that thread plus the structure: the
+   failing opcode, the session, and the last STATUS the device answered when one
+   has been read. Returns the code and fills buffer; 0 means the device has not
+   failed yet, and a NULL handle is GDB_INVALID. Unlike gdb_last_error a success
+   does not clear it, so a command that failed on the heartbeat or a scheduler
+   worker is still readable here from another thread. */
+int32_t gdb_device_last_error(const gdb_device *device, char *buffer, size_t capacity);
 
 /* Logging: 0 off, 1 error, 2 warn, 3 info, 4 debug, 5 trace. */
 int32_t gdb_set_log_level(uint8_t level);
@@ -487,7 +498,7 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// absolute moves, 7 the arrival watch, 8 the monitor listing, the containing
     /// anchor, the clamp counters and the separate anchor error codes, 9 the
     /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
-    /// gdb_window_metrics and gdb_platform_prepare.
+    /// gdb_window_metrics, gdb_platform_prepare and gdb_device_last_error.
 #define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;

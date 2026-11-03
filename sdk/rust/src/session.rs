@@ -6,6 +6,7 @@
 //! that is one relaxed atomic add — the session never locks to report.
 
 use crate::device::StrayHook;
+use crate::diagnostics::Diagnostics;
 use crate::error::{Error, ErrorCode, Result};
 use crate::log::Level;
 use crate::metrics::Metrics;
@@ -68,6 +69,9 @@ pub(crate) struct Session {
     timeout: Duration,
     /// Shared with the device, so the counters survive a reconnect.
     metrics: Metrics,
+    /// Shared with the device, so the latest failure survives a reconnect and a
+    /// caller on another thread can read it.
+    diagnostics: Arc<Diagnostics>,
     /// Shared with the device: whether this process is one of several owners,
     /// and where a frame that belongs to somebody else goes.
     sharing: Arc<Sharing>,
@@ -85,6 +89,7 @@ impl Session {
         timeout_ms: u32,
         id: u32,
         metrics: Metrics,
+        diagnostics: Arc<Diagnostics>,
         sharing: Arc<Sharing>,
     ) -> Result<Self> {
         let report = transport
@@ -98,6 +103,7 @@ impl Session {
             capabilities,
             timeout: Duration::from_millis(u64::from(timeout_ms.max(100))),
             metrics,
+            diagnostics,
             sharing,
             last_renew: Instant::now(),
         };
@@ -131,16 +137,26 @@ impl Session {
         match self.exchange(command) {
             Ok(reply) => Ok(reply),
             Err(error) => {
-                match error.code() {
-                    ErrorCode::Lease => self.metrics.record_lease_fault(),
+                let error = match error.code() {
+                    ErrorCode::Lease => {
+                        self.metrics.record_lease_fault();
+                        error
+                    }
                     ErrorCode::Timeout => {
                         self.metrics.record_timeout();
                         if self.sharing.is_shared() {
-                            return Err(stolen_reply(command, &error));
+                            stolen_reply(command, &error)
+                        } else {
+                            error
                         }
                     }
-                    _ => {}
-                }
+                    _ => error,
+                };
+                // The device remembers this one, whoever called: a failure on a
+                // background thread is the case a thread-local read misses, and
+                // this is the only layer that knows which opcode it was.
+                self.diagnostics
+                    .record(&error, Some(command_name(command)), self.id);
                 Err(error)
             }
         }
@@ -183,8 +199,10 @@ impl Session {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(Error::timeout(format!(
-                    "no reply to opcode {opcode} within {} ms",
-                    self.timeout.as_millis()
+                    "no reply to opcode {opcode} ({}) within {} ms (session {})",
+                    command_name(command),
+                    self.timeout.as_millis(),
+                    self.id
                 )));
             }
             let Some(report) = self.transport.read(remaining.as_millis() as i32)? else {

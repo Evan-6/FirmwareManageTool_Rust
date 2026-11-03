@@ -7,6 +7,7 @@
 
 pub mod broker;
 pub mod device;
+pub mod diagnostics;
 pub mod error;
 pub mod event;
 pub mod flash;
@@ -29,6 +30,7 @@ mod session;
 
 pub use broker::{Client as BrokerClient, Server as BrokerServer};
 pub use device::{Device, DeviceInfo, DeviceOptions, Ownership, StrayHook};
+pub use diagnostics::{DeviceError, StatusSummary};
 pub use error::{Error, ErrorCode, Result};
 pub use event::{ConnectionState, EventHandler};
 pub use keyboard::{ChordConfig, KeyStroke, TypeTextConfig};

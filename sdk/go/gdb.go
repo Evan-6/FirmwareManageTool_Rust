@@ -302,6 +302,7 @@ var (
 	dll     *syscall.LazyDLL
 
 	procLastError      *syscall.LazyProc
+	procDeviceLastError *syscall.LazyProc
 	procVersion        *syscall.LazyProc
 	procABIVersion     *syscall.LazyProc
 	procStringFree     *syscall.LazyProc
@@ -420,6 +421,7 @@ func library() *syscall.LazyDLL {
 		}
 		dll = syscall.NewLazyDLL(path)
 		procLastError = dll.NewProc("gdb_last_error")
+		procDeviceLastError = dll.NewProc("gdb_device_last_error")
 		procVersion = dll.NewProc("gdb_version")
 		procABIVersion = dll.NewProc("gdb_abi_version")
 		procStringFree = dll.NewProc("gdb_string_free")
@@ -747,6 +749,32 @@ func (d *Device) StolenFrames() uint64 {
 	library()
 	count, _, _ := procStolenFrames.Call(d.handle)
 	return uint64(count)
+}
+
+// LastError is the latest failure the device recorded, whoever called it: the
+// same message LastError would have carried on that thread, plus the failing
+// opcode, the session and the last STATUS the device answered.
+//
+// Unlike the thread-local error the bindings read after a failed call, this one
+// is not cleared by a success and is not tied to an OS thread, so a command that
+// failed on the heartbeat or a scheduler worker is readable from here.
+// Code OK means the device has not failed yet.
+func (d *Device) LastError() (Code, string) {
+	library()
+	buffer := make([]byte, 512)
+	code, _, _ := procDeviceLastError.Call(
+		d.handle,
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(len(buffer)),
+	)
+	message := ""
+	for index, value := range buffer {
+		if value == 0 {
+			message = string(buffer[:index])
+			break
+		}
+	}
+	return Code(code), message
 }
 
 // Metrics reads the session's counters once: frames, retries, lease faults and

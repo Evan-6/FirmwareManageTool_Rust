@@ -84,6 +84,13 @@ private:
     ErrorCode code_;
 };
 
+// One recorded device failure: the code and the message with its structure (the
+// failing opcode, the session, the last STATUS the device answered).
+struct Failure {
+    ErrorCode code = ErrorCode::Ok;
+    std::string message;
+};
+
 struct Point {
     int32_t x = 0;
     int32_t y = 0;
@@ -273,6 +280,7 @@ struct Api {
     decltype(&gdb_abi_version) abi_version = nullptr;
     decltype(&gdb_version) version = nullptr;
     decltype(&gdb_last_error) last_error = nullptr;
+    decltype(&gdb_device_last_error) device_last_error = nullptr;
     decltype(&gdb_string_free) string_free = nullptr;
     decltype(&gdb_set_log_level) set_log_level = nullptr;
     decltype(&gdb_set_log_sink) set_log_sink = nullptr;
@@ -503,6 +511,7 @@ inline Api& api() {
         GDB_OPTIONAL(monitors_json, "gdb_monitors_json")
         GDB_OPTIONAL(window_metrics, "gdb_window_metrics")
         GDB_OPTIONAL(platform_prepare, "gdb_platform_prepare")
+        GDB_OPTIONAL(device_last_error, "gdb_device_last_error")
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
@@ -1189,6 +1198,26 @@ public:
     /// Replies the reader looked past because they answered another session or
     /// sequence: the counter that tells a collision from a slow board.
     uint64_t stolen_frames() const { return api().stolen_frames(raw()); }
+
+    /// The latest failure the device recorded, whoever called it: the message
+    /// last_error() would have carried on the failing thread, plus the failing
+    /// opcode, the session and the last STATUS the device answered. Unlike the
+    /// thread-local error a success does not clear it, so a command that failed
+    /// on the heartbeat or a scheduler worker is still readable here.
+    /// std::nullopt means the device has not failed yet.
+    std::optional<Failure> last_error() const {
+        if (api().device_last_error == nullptr) {
+            throw Error(ErrorCode::Unsupported,
+                        "this gdb.dll predates the device error record; use a "
+                        "library that exports gdb_device_last_error");
+        }
+        char buffer[512] = {};
+        const int32_t code = api().device_last_error(raw(), buffer, sizeof(buffer));
+        if (code == GDB_OK) {
+            return std::nullopt;
+        }
+        return Failure{static_cast<ErrorCode>(code), std::string(buffer)};
+    }
 
     /// The session's counters and latency percentiles. Every atomic is read
     /// once, so two fields may be one report apart.

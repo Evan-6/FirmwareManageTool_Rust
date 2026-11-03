@@ -1,5 +1,6 @@
 //! One controller: connection state, heartbeat, typed operations and recovery.
 
+use crate::diagnostics::{DeviceError, Diagnostics};
 use crate::error::{Error, ErrorCode, Result};
 use crate::event::{ConnectionState, EventHandler, notify};
 use crate::log::Level;
@@ -9,7 +10,7 @@ use crate::transport::Transport;
 use gdb_motion::{Rng, SplitMix64};
 use input_protocol::v3::{self, Command, SessionInfo, Status, StatusExt};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -119,6 +120,12 @@ pub(crate) struct Inner {
     /// Shared with every session this device opens: the ownership the host
     /// picked and the hook for frames that belong to somebody else.
     sharing: Arc<Sharing>,
+    /// Shared with every session this device opens: the latest failure, so a
+    /// caller on another thread can read what happened.
+    diagnostics: Arc<Diagnostics>,
+    /// The id of the session in flight, readable without the session lock so a
+    /// failure above the session can still name it.
+    session_id: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -210,11 +217,14 @@ impl Device {
     ) -> Result<Self> {
         let metrics = Metrics::new();
         let sharing = Arc::new(Sharing::new(ownership.is_shared()));
+        let diagnostics = Arc::new(Diagnostics::new());
+        let session_id = new_session_id();
         let session = Session::open(
             transport,
             options.timeout_ms,
-            new_session_id(),
+            session_id,
             metrics.clone(),
+            diagnostics.clone(),
             sharing.clone(),
         )?;
         let capabilities = session.capabilities().clone();
@@ -244,6 +254,8 @@ impl Device {
             heartbeat: Mutex::new(None),
             metrics,
             sharing,
+            diagnostics,
+            session_id: AtomicU32::new(session_id),
         });
         if inner.options.heartbeat {
             start_heartbeat(&inner);
@@ -274,6 +286,35 @@ impl Device {
     /// Zeroes the counters, for instance when a host starts a new measurement.
     pub fn reset_metrics(&self) {
         self.inner.metrics.reset();
+    }
+
+    /// The latest failure this device recorded, from any thread.
+    ///
+    /// Unlike the C ABI's `gdb_last_error`, which answers for the calling
+    /// thread, this is the device's own record: a command that failed on the
+    /// heartbeat, a scheduler worker or a movement thread is still readable
+    /// here. A later failure replaces it and a success never clears it, so a
+    /// host that polls a status bar sees what went wrong instead of an empty
+    /// slot the next good call wiped.
+    pub fn last_error(&self) -> Option<DeviceError> {
+        self.inner.diagnostics.last()
+    }
+
+    /// Records `error` as this device's latest failure and hands it back, for
+    /// the layers that can fail before a command reaches the session — an
+    /// anchor that does not resolve, a click count of zero, a usage the
+    /// firmware does not have.
+    pub(crate) fn track<T>(&self, result: Result<T>) -> Result<T> {
+        if let Err(error) = &result {
+            self.inner
+                .diagnostics
+                .record(error, None, self.session_id());
+        }
+        result
+    }
+
+    fn session_id(&self) -> u32 {
+        self.inner.session_id.load(Ordering::Relaxed)
     }
 
     /// Frames the reply loop had to look past because they answered another
@@ -345,6 +386,9 @@ impl Device {
                 .ok_or_else(|| Error::new(ErrorCode::Framing, "STATUS had no reply"))?;
             let status = Status::parse(&reply.payload)
                 .map_err(|error| Error::new(ErrorCode::Framing, error.to_string()))?;
+            // A failure later on reports what the device last said about itself,
+            // so the summary is kept beside the failure rather than re-asked.
+            self.inner.diagnostics.record_status(&status);
             Ok(status)
         })
     }
@@ -461,9 +505,17 @@ impl Device {
         mut operation: impl FnMut(&mut Session) -> Result<T>,
     ) -> Result<T> {
         if self.inner.closed.load(Ordering::Relaxed) {
-            return Err(Error::disconnected("device is closed"));
+            let error = Error::disconnected("device is closed");
+            self.inner.diagnostics.record(&error, None, 0);
+            return Err(error);
         }
         let mut state = self.lock();
+        let session_id = self.session_id();
+        // The session records a protocol failure with its opcode; this only
+        // records the failures above it (an anchor that does not resolve, an
+        // argument refused before anything was sent), and only when the session
+        // did not just record the same one.
+        let mark = self.inner.diagnostics.mark();
         if let Some(session) = state.session.as_mut() {
             match operation(session) {
                 Ok(value) => return Ok(value),
@@ -483,6 +535,9 @@ impl Device {
                         || !recoverable(error.code())
                         || !self.inner.auto_reconnect.load(Ordering::Relaxed)
                     {
+                        self.inner
+                            .diagnostics
+                            .record_unless_marked(mark, &error, session_id);
                         notify(&self.handler(), |handler| handler.error(&error));
                         return Err(error);
                     }
@@ -491,6 +546,7 @@ impl Device {
         }
         if let Err(error) = self.reopen(&mut state) {
             self.inner.closed.store(true, Ordering::Relaxed);
+            self.inner.diagnostics.record(&error, None, session_id);
             notify(&self.handler(), |handler| handler.error(&error));
             return Err(error);
         }
@@ -500,6 +556,9 @@ impl Device {
             .ok_or_else(|| Error::disconnected("no session after reconnect"))?;
         let value = operation(result);
         if let Err(error) = &value {
+            self.inner
+                .diagnostics
+                .record_unless_marked(mark, error, session_id);
             notify(&self.handler(), |handler| handler.error(error));
         }
         value
@@ -512,14 +571,17 @@ impl Device {
     fn reopen(&self, state: &mut MutexGuard<'_, State>) -> Result<()> {
         state.session = None;
         let transport = crate::manager::open_transport(&self.inner.target)?;
+        let session_id = new_session_id();
         let session = Session::open(
             transport,
             self.inner.options.timeout_ms,
-            new_session_id(),
+            session_id,
             self.inner.metrics.clone(),
+            self.inner.diagnostics.clone(),
             self.inner.sharing.clone(),
         )?;
         state.session = Some(session);
+        self.inner.session_id.store(session_id, Ordering::Relaxed);
         self.inner.metrics.record_reconnect();
         crate::sdk_log!(Level::Info, "reconnected serial={}", self.inner.info.serial);
         notify(&self.handler(), |handler| {

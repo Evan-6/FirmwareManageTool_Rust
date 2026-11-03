@@ -148,6 +148,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | Capability | Rust | C ABI, C++, Python, Go |
 | --- | --- | --- |
 | session: open, close, reconnect, auto-reconnect, state | yes | yes |
+| errors: the calling thread's and the device's own record | yes | yes |
 | queries: device info, STATUS, STATUS_EXT, SESSION_LIST | yes | yes |
 | shared ownership and its `stolen_frames` counter | yes | yes |
 | presence: probe, probe-all, observer on a timer | yes | yes |

@@ -15,6 +15,7 @@ for the handle you want and a working call.
 | open the shared mock | `Device::open_mock_shared(opts)` | `Device::open_mock_shared()` | `Device.open_mock(shared=True)` | `OpenMockShared(…)` |
 | device list | `Manager::list` | `list_json()` | `list_devices()` | `ListJSON()` |
 | replies that belonged to somebody else | `device.stolen_frames()` | `stolen_frames()` | `.stolen_frames` | `StolenFrames()` |
+| the device's latest failure | `device.last_error()` | `last_error()` | `.last_error()` | `LastError()` |
 | info | `device.info()` | `info_json()` | `.info` | `InfoJSON()` |
 | status | `device.status()` | `status_json()` | `.status` | `StatusJSON()` |
 | status ext | `device.status_ext()` | `status_ext_json()` | `.status_ext` | `StatusExtJSON()` |
@@ -773,6 +774,48 @@ The value a failing call returns is the code, and `gdb_last_error(buffer,
 capacity)` yields the same code plus a message. Bindings convert it to
 `gdb::Error` (carrying `code()`), `gdb.GdbError` and `*gdb.Error`.
 
+### Whose error is it
+
+There are two records, and they answer different questions:
+
+| | `gdb_last_error` | `gdb_device_last_error` |
+| --- | --- | --- |
+| scope | the calling thread | the device |
+| cleared by a success | yes | never |
+| survives the thread that failed | no | yes |
+| carries the failing opcode | no | yes, when the failure came from a command |
+| carries the last STATUS | no | yes, when one has been read |
+
+`gdb_last_error` is the one a single-threaded host reads right after a failure,
+and it behaves as it always has: a failing call writes the code and the message,
+a succeeding one clears them. It is per thread now, so two threads that fail
+different calls each read their own instead of whichever wrote last.
+
+`gdb_device_last_error(device, buffer, capacity)` returns the device's own
+record and fills `buffer` with the message `gdb_last_error` would have carried on
+the failing thread, with the structure appended:
+
+```
+no reply to opcode 6 (STATUS) within 120 ms (session 1234) (opcode=STATUS session=1234 status=received:143,completed:142,pending:1)
+absolute move to (5000, 5000) targets monitor 1, but that point is on no screen: … (session=1234)
+```
+
+The prefix is the message the call returned; the parenthesised tail names the
+failing opcode, the session, and the last STATUS the device answered. A negative
+case is left alone on purpose: the SDK never invents a STATUS it has not read.
+`0` means the device has not failed yet; a NULL handle is `Invalid`.
+
+Rust reads the same record through `device.last_error() -> Option<DeviceError>`,
+whose fields are `code`, `message`, `opcode`, `session`, `status` and `ageMs`, and
+whose `describe()` is the string above. C++ is `device.last_error()` returning
+`std::optional<Failure>`, Python `device.last_error()` returning
+`(code, message)`, Go `device.LastError()` returning `(Code, string)`.
+
+A host whose commands run on the heartbeat, a scheduler worker or a movement
+thread should read the device record: the thread-local slot belongs to whichever
+OS thread the failing call happened to run on, and a binding may run the failing
+call and the read on two different ones.
+
 `Disconnected`, `Io` and `Lease` failures trigger one reconnect and one retry when
 auto-reconnect is on; `Timeout` never retries, because retrying a half-delivered
 input command is worse than reporting it.
@@ -812,6 +855,7 @@ reader on the IN endpoint would break the sequence numbers of both sessions.
 uint32_t    gdb_abi_version(void);
 const char *gdb_version(void);
 int32_t     gdb_last_error(char *buffer, size_t capacity);
+int32_t     gdb_device_last_error(const gdb_device *device, char *buffer, size_t capacity);
 void        gdb_string_free(char *text);
 ```
 

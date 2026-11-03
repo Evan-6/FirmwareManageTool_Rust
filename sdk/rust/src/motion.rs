@@ -173,13 +173,25 @@ pub(crate) fn run_path(
     options: &MotionOptions,
     shared: &MovementShared,
 ) -> Result<()> {
-    for point in points {
-        run_move_to(device, point.0, point.1, options, shared)?;
-    }
-    Ok(())
+    device.track((|| {
+        for point in points {
+            run_move_to(device, point.0, point.1, options, shared)?;
+        }
+        Ok(())
+    })())
 }
 
 pub(crate) fn run_move_by(
+    device: &Device,
+    dx: i32,
+    dy: i32,
+    options: &MotionOptions,
+    shared: &MovementShared,
+) -> Result<()> {
+    device.track(move_chunks(device, dx, dy, options, shared))
+}
+
+fn move_chunks(
     device: &Device,
     dx: i32,
     dy: i32,
@@ -261,7 +273,7 @@ pub(crate) fn run_move_to(
     options: &MotionOptions,
     shared: &MovementShared,
 ) -> Result<()> {
-    run_move_to_with(device, probe, x, y, options, shared)
+    device.track(run_move_to_with(device, probe, x, y, options, shared))
 }
 
 /// The absolute move with the pointer source injected.

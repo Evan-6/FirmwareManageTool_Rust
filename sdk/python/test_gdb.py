@@ -506,6 +506,18 @@ class ScreenTargetTests(unittest.TestCase):
             device.mouse.move_to(100, 200, screen=gdb.Screen.containing(100, 200))
             self.assertEqual(device.clamps().clamped_total, 0)
 
+    def test_the_device_remembers_its_last_failure(self):
+        with gdb.Device.open_mock() as device:
+            self.assertEqual(device.last_error(), (0, ""))
+            with self.assertRaises(gdb.GdbError):
+                device.mouse.move_to(10, 10, screen=gdb.Screen.monitor(1))
+            code, message = device.last_error()
+            self.assertEqual(code, gdb.ErrorCode.INVALID_SCREEN)
+            self.assertIn("session=", message)
+            # A success does not clear the record.
+            device.barrier()
+            self.assertEqual(device.last_error()[0], gdb.ErrorCode.INVALID_SCREEN)
+
     def test_a_closed_device_refuses_the_clamp_counters(self):
         device = gdb.Device.open_mock()
         device.close()

@@ -197,6 +197,8 @@ _D.gdb_abi_version.restype = c_uint32
 _D.gdb_version.restype = c_char_p
 _D.gdb_last_error.argtypes = [c_char_p, c_size_t]
 _D.gdb_last_error.restype = c_int32
+_D.gdb_device_last_error.argtypes = [c_void_p, c_char_p, c_size_t]
+_D.gdb_device_last_error.restype = c_int32
 _D.gdb_string_free.argtypes = [c_void_p]
 _D.gdb_set_log_level.argtypes = [c_uint8]
 _D.gdb_set_log_level.restype = c_int32
@@ -917,6 +919,19 @@ class Device:
         """Replies the reader looked past because they answered another session
         or sequence: the counter that tells a collision from a slow board."""
         return _D.gdb_stolen_frames(self._handle())
+
+    def last_error(self) -> tuple[int, str]:
+        """The latest failure the device recorded, whoever called it.
+
+        Returns ``(code, message)``: the message ``gdb_last_error`` would have
+        carried on the thread that failed, plus the failing opcode, the session
+        and the last STATUS the device answered. Unlike the thread-local error,
+        a success does not clear it, so a command that failed on a scheduler
+        worker is still readable here. ``(0, "")`` means no failure yet.
+        """
+        buffer = ctypes.create_string_buffer(512)
+        code = _D.gdb_device_last_error(self._handle(), buffer, len(buffer))
+        return code, buffer.value.decode("utf-8", "replace")
 
     def release_all(self) -> None:
         _check(_D.gdb_release_all(self._handle()))

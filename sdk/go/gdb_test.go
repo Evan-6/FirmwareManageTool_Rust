@@ -618,6 +618,7 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(int64) (WindowInfo, error) = WindowMetrics
 	var _ func() (PlatformState, error) = PreparePlatform
 	var _ func(*Device) (Clamps, error) = (*Device).Clamps
+	var _ func(*Device) (Code, string) = (*Device).LastError
 	var _ func() (string, error) = MonitorsJSON
 	var _ func() ([]Monitor, error) = Monitors
 	var _ func() string = Version
@@ -799,6 +800,40 @@ func TestWindowClientAnchorAndPlatformPrepare(t *testing.T) {
 	}
 	if !strings.Contains(failure.Message, "client area") {
 		t.Fatalf("message %q must name the client area", failure.Message)
+	}
+}
+
+// The device keeps its own record of the latest failure, so a command that
+// failed on another thread — a heartbeat, a scheduler worker — is readable from
+// the one that asks.
+func TestDeviceRemembersTheLastFailure(t *testing.T) {
+	device := openMock(t)
+	if code, message := device.LastError(); code != OK || message != "" {
+		t.Fatalf("a fresh device has no failure: %d %q", code, message)
+	}
+
+	// An anchor the mock does not have is refused above the session and still
+	// recorded with the session it belongs to.
+	err := device.Mouse().MoveToOn(10, 10, ScreenMonitor(1), 0, nil)
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != InvalidScreen {
+		t.Fatalf("MoveToOn(monitor 1) = %v, want InvalidScreen", err)
+	}
+	code, message := device.LastError()
+	if code != InvalidScreen {
+		t.Fatalf("LastError = %d %q, want InvalidScreen", code, message)
+	}
+	if !strings.Contains(message, "session=") {
+		t.Fatalf("a device error must name the session: %q", message)
+	}
+
+	// A success does not clear it: a host that polls a status bar keeps seeing
+	// what went wrong until the next failure.
+	if err := device.Barrier(); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := device.LastError(); code != InvalidScreen {
+		t.Fatalf("a success cleared the record: %d", code)
 	}
 }
 

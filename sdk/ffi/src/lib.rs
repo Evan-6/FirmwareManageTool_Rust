@@ -27,36 +27,64 @@ use gdb_sdk::task::{Priority, Scheduler, TaskId};
 use gdb_sdk::{Button, Device, DeviceInfo, DeviceOptions, TypeTextConfig};
 use input_protocol::KeyId;
 use input_protocol::v3::{self, Command, InputState, SessionInfo, Status, StatusExt};
+use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 mod watch;
 
-/// The failure the last call on any thread reported.
-///
-/// The code is an atomic store on the success path; the message sits behind a
-/// mutex and is written before the code, so a reader that sees a non-zero code
-/// sees a message that belongs to some failure. It is deliberately *not* a
-/// thread-local: a caller in another language reads it in a second call, and Go
-/// is free to run that call on a different OS thread than the one that failed.
-static LAST_CODE: AtomicI32 = AtomicI32::new(0);
-static LAST_MESSAGE: Mutex<String> = Mutex::new(String::new());
-
-fn set_last(error: &Error) {
-    if let Ok(mut message) = LAST_MESSAGE.lock() {
-        message.clear();
-        message.push_str(&error.message);
-    }
-    LAST_CODE.store(i32::from(error.code().as_u8()), Ordering::Relaxed);
+// The failure the last call on *this* thread reported.
+//
+// A host in another language reads it in a second call, which is why it is a
+// pair of write-then-read values rather than a return; but it is per thread, so
+// two threads that fail different calls never read each other's message. A
+// device that commands from several threads — heartbeat, scheduler worker,
+// movement — wants `gdb_device_last_error` instead, which is the device's own
+// record and survives the thread that hit the failure.
+thread_local! {
+    static LAST: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
 }
 
-/// The success path: one relaxed store, no lock, nothing allocated.
+fn set_last(error: &Error) {
+    LAST.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.0 = i32::from(error.code().as_u8());
+        slot.1.clear();
+        slot.1.push_str(&error.message);
+    });
+}
+
+/// The success path: one store, no lock, nothing allocated.
 fn clear_last() {
-    LAST_CODE.store(0, Ordering::Relaxed);
+    LAST.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.0 = 0;
+        slot.1.clear();
+    });
+}
+
+fn last_error() -> (i32, String) {
+    LAST.with(|slot| slot.borrow().clone())
+}
+
+/// Writes `message` into the caller's buffer as a NUL-terminated UTF-8 string,
+/// truncated to fit. A NULL buffer or a zero capacity copies nothing.
+fn copy_message(buffer: *mut c_char, capacity: usize, message: &str) {
+    if buffer.is_null() || capacity == 0 {
+        return;
+    }
+    let mut bytes = message.as_bytes().to_vec();
+    bytes.push(0);
+    let count = bytes.len().min(capacity);
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, count);
+        if count == capacity {
+            *buffer.add(capacity - 1) = 0;
+        }
+    }
 }
 
 fn guard<T>(body: impl FnOnce() -> gdb_sdk::Result<T>) -> gdb_sdk::Result<T> {
@@ -432,22 +460,8 @@ pub extern "C" fn gdb_version() -> *const c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_last_error(buffer: *mut c_char, capacity: usize) -> i32 {
-    let code = LAST_CODE.load(Ordering::Relaxed);
-    if !buffer.is_null() && capacity > 0 {
-        let message = LAST_MESSAGE
-            .lock()
-            .map(|message| message.clone())
-            .unwrap_or_default();
-        let mut bytes = message.as_bytes().to_vec();
-        bytes.push(0);
-        let count = bytes.len().min(capacity);
-        unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buffer, count);
-            if count == capacity {
-                *buffer.add(capacity - 1) = 0;
-            }
-        }
-    }
+    let (code, message) = last_error();
+    copy_message(buffer, capacity, &message);
     code
 }
 
@@ -619,6 +633,38 @@ pub extern "C" fn gdb_stolen_frames(raw: *const GdbDevice) -> u64 {
         Err(error) => {
             set_last(&error);
             0
+        }
+    }
+}
+
+/// The latest failure the device recorded, whoever called it, as the message
+/// `gdb_last_error` would have carried on that thread plus the structure:
+/// which opcode failed, under which session, and the last STATUS the device
+/// answered when one has been read.
+///
+/// Returns the code and fills `buffer`; 0 means the device has not failed yet,
+/// and a NULL handle is `GDB_INVALID`. Unlike `gdb_last_error`, a success does
+/// not clear it: a command that failed on the heartbeat or a scheduler worker is
+/// still readable here from the main thread.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_device_last_error(
+    raw: *const GdbDevice,
+    buffer: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    match guard(|| Ok(unsafe { device(raw) }?.device.last_error())) {
+        Ok(Some(error)) => {
+            copy_message(buffer, capacity, &error.describe());
+            i32::from(error.code)
+        }
+        Ok(None) => {
+            copy_message(buffer, capacity, "");
+            0
+        }
+        Err(error) => {
+            set_last(&error);
+            copy_message(buffer, capacity, &error.message);
+            i32::from(error.code().as_u8())
         }
     }
 }
@@ -2479,6 +2525,111 @@ mod tests {
             i32::from(ErrorCode::Invalid.as_u8())
         );
         gdb_remote_free(ptr::null_mut());
+    }
+
+    /// Every thread has its own `gdb_last_error`, so two failures at the same
+    /// time do not overwrite each other; the device keeps one record of its own
+    /// that survives the thread that hit it.
+    #[test]
+    fn the_last_error_is_per_thread_and_the_device_keeps_its_own() {
+        let raw = open_mock();
+        let shared = raw as usize;
+
+        let invalid = thread::spawn(move || {
+            let raw = shared as *mut GdbDevice;
+            assert_eq!(
+                gdb_command(raw, 0x7f, ptr::null(), 0, ptr::null_mut()),
+                i32::from(ErrorCode::Invalid.as_u8())
+            );
+            (last_code(), message())
+        });
+        let screen = thread::spawn(move || {
+            let raw = shared as *mut GdbDevice;
+            assert_eq!(
+                gdb_mouse_move_to_on(raw, 10, 10, GdbScreen { kind: 1, arg: 1 }, 0, ptr::null()),
+                i32::from(ErrorCode::InvalidScreen.as_u8())
+            );
+            (last_code(), message())
+        });
+
+        let (invalid_code, invalid_text) = invalid.join().expect("thread");
+        let (screen_code, screen_text) = screen.join().expect("thread");
+        assert_eq!(invalid_code, i32::from(ErrorCode::Invalid.as_u8()));
+        assert!(
+            invalid_text.contains("opcode 127") && !invalid_text.contains("monitor index"),
+            "the Invalid thread read somebody else's message: {invalid_text}"
+        );
+        assert_eq!(screen_code, i32::from(ErrorCode::InvalidScreen.as_u8()));
+        assert!(
+            screen_text.contains("monitor index 1") && !screen_text.contains("opcode 127"),
+            "the InvalidScreen thread read somebody else's message: {screen_text}"
+        );
+
+        // This thread never failed, so its slot is empty whatever the others did.
+        assert_eq!(last_code(), 0, "a thread that did not fail has no error");
+
+        // The device, however, remembers the last failure from any thread.
+        let mut buffer = [0 as c_char; 512];
+        let code = gdb_device_last_error(raw, buffer.as_mut_ptr(), buffer.len());
+        assert!(
+            code == i32::from(ErrorCode::Invalid.as_u8())
+                || code == i32::from(ErrorCode::InvalidScreen.as_u8()),
+            "the device recorded no failure: {code}"
+        );
+        let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            text.contains("session="),
+            "a device error must name the session: {text}"
+        );
+        gdb_device_free(raw);
+    }
+
+    /// A failure below the session (an anchor that does not resolve) and one at
+    /// the wire (a command with no reply) both land in the device's record, the
+    /// second with the opcode and the last STATUS the device answered.
+    #[test]
+    fn a_device_names_the_opcode_and_the_last_status_it_answered() {
+        let raw = gdb_open_mock(100, false, false);
+        assert!(!raw.is_null());
+
+        // A status the device answered is what a later failure reports.
+        let answer = gdb_status(raw);
+        assert!(!answer.is_null(), "STATUS must answer: {}", message());
+        gdb_string_free(answer);
+        assert_eq!(last_code(), 0);
+
+        // Silence it: STATUS now waits out the 100 ms timeout.
+        unsafe { &*raw }
+            ._mock
+            .as_ref()
+            .expect("mock handle")
+            .set_silent(true);
+        assert!(gdb_status(raw).is_null());
+        assert_eq!(last_code(), i32::from(ErrorCode::Timeout.as_u8()));
+
+        let mut buffer = [0 as c_char; 512];
+        assert_eq!(
+            gdb_device_last_error(raw, buffer.as_mut_ptr(), buffer.len()),
+            i32::from(ErrorCode::Timeout.as_u8())
+        );
+        let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(text.contains("opcode=STATUS"), "{text}");
+        assert!(text.contains("session="), "{text}");
+        assert!(
+            text.contains("status=received:"),
+            "the last STATUS the device answered belongs in the record: {text}"
+        );
+
+        // A caller mistake is typed and sets the thread-local slot too.
+        assert_eq!(
+            gdb_device_last_error(ptr::null(), ptr::null_mut(), 0),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_device_free(raw);
     }
 
     #[test]
