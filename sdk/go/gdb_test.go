@@ -502,7 +502,7 @@ func TestMoveToOnTargetsAScreenAndRejectsAnUnknownKind(t *testing.T) {
 	movement.Close()
 
 	var failure *Error
-	if err := mouse.MoveToOn(10, 10, Screen{Kind: 4}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+	if err := mouse.MoveToOn(10, 10, Screen{Kind: 5}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
 		t.Fatalf("kind 4 = %v, want Invalid", err)
 	}
 	// A mock has one 1920x1080 screen, so index 1 names a monitor it does not
@@ -613,6 +613,10 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(*Watch) = (*Watch).Stop
 	var _ func(*Watch) = (*Watch).Close
 	var _ func(int32, int32) Screen = ScreenContaining
+	var _ func(int64) Screen = ScreenWindowClient
+	var _ func(int64) (string, error) = WindowMetricsJSON
+	var _ func(int64) (WindowInfo, error) = WindowMetrics
+	var _ func() (PlatformState, error) = PreparePlatform
 	var _ func(*Device) (Clamps, error) = (*Device).Clamps
 	var _ func() (string, error) = MonitorsJSON
 	var _ func() ([]Monitor, error) = Monitors
@@ -655,7 +659,7 @@ func TestScreenContainingPacksThePoint(t *testing.T) {
 	if err := mouse.MoveToOn(5000, 5000, ScreenContaining(5000, 5000), 0, nil); !errors.As(err, &failure) || failure.Code != Unsupported {
 		t.Fatalf("a point on no screen = %v, want Unsupported", err)
 	}
-	if err := mouse.MoveToOn(10, 10, Screen{Kind: 4, Arg: 0}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
+	if err := mouse.MoveToOn(10, 10, Screen{Kind: 5, Arg: 0}, 0, nil); !errors.As(err, &failure) || failure.Code != Invalid {
 		t.Fatalf("an unknown screen kind = %v, want Invalid", err)
 	}
 }
@@ -752,6 +756,49 @@ func TestClampsStartAtZero(t *testing.T) {
 	}
 	if err := mouse.MoveToOn(10, 10, ScreenWindow(0x1234), 0, nil); !errors.As(err, &failure) || failure.Code != StaleWindow {
 		t.Fatalf("a window the mock does not have = %v, want StaleWindow", err)
+	}
+}
+
+// The window-client anchor and the two platform reads a host makes before it
+// converts a capture coordinate: the client area is the picture, the frame is
+// not, and the process has to agree with the SDK about the DPI scale.
+func TestWindowClientAnchorAndPlatformPrepare(t *testing.T) {
+	state, err := PreparePlatform()
+	if err != nil {
+		t.Fatalf("PreparePlatform: %v", err)
+	}
+	if !state.Supported {
+		t.Fatal("Windows has DPI awareness")
+	}
+	if !state.PerMonitor {
+		t.Fatalf("prepare left the process at %q, want per-monitor", state.DpiAwareness)
+	}
+	if state.Value != 2 {
+		t.Fatalf("value = %d, want 2", state.Value)
+	}
+
+	// A handle the system does not know is a typed refusal, not a zeroed answer.
+	_, err = WindowMetrics(0)
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != StaleWindow {
+		t.Fatalf("window metrics of handle 0 = %v, want StaleWindow", err)
+	}
+	if _, err := WindowMetricsJSON(0); err == nil {
+		t.Fatal("the JSON call must fail the same way")
+	}
+
+	// kind 4 is its own anchor: a mock has no windows, so it is a stale window.
+	device := openMock(t)
+	screen := ScreenWindowClient(0x1234)
+	if screen.Kind != 4 {
+		t.Fatalf("kind = %d, want 4", screen.Kind)
+	}
+	err = device.Mouse().MoveToOn(10, 10, screen, 0, nil)
+	if !errors.As(err, &failure) || failure.Code != StaleWindow {
+		t.Fatalf("MoveToOn(window client) = %v, want StaleWindow", err)
+	}
+	if !strings.Contains(failure.Message, "client area") {
+		t.Fatalf("message %q must name the client area", failure.Message)
 	}
 }
 

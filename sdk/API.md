@@ -246,12 +246,15 @@ holds and gaps from log-normal distributions for the same reason, and
 ```c
 typedef struct gdb_screen {
     int32_t kind;   /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND),
-                       3 monitor containing a point (arg = packed x,y) */
+                       3 monitor containing a point (arg = packed x,y),
+                       4 window client area (arg = HWND) */
     int64_t arg;    /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
 } gdb_screen;
 
 /* kind 3: the high 32 bits of arg are x and the low 32 bits are y. */
 static inline gdb_screen gdb_screen_containing(int32_t x, int32_t y);
+/* kind 4: the area inside the frame, where a capture's coordinates start. */
+static inline gdb_screen gdb_screen_window_client(int64_t hwnd);
 
 int32_t gdb_mouse_move_to_on(gdb_device *, int32_t x, int32_t y, gdb_screen screen,
                              uint32_t duration_ms, const gdb_profile *);
@@ -264,6 +267,14 @@ gdb_movement *gdb_mouse_start_move_to_on(gdb_device *, int32_t x, int32_t y,
 /* Every monitor in the order kind 1 indexes them, no handle needed:
    [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, …] */
 char *gdb_monitors_json(void);
+/* One window: the frame kind 2 uses, the client area kind 4 uses, and the flags:
+   {"rect":{"left","top","right","bottom"},"clientOrigin":{"x","y"},
+    "clientSize":{"width","height"},"dpi":96,"visible":true,"minimized":false,
+    "foreground":false} */
+char *gdb_window_metrics(int64_t hwnd);
+/* Per-monitor DPI awareness, raised if it can be:
+   {"supported":true,"dpiAwareness":"perMonitorAware","value":2,"perMonitor":true} */
+char *gdb_platform_prepare(void);
 ```
 
 `gdb_mouse_move_to` and `gdb_mouse_drag` clamp to the primary monitor; the `_on`
@@ -276,8 +287,26 @@ origin.
 | primary | `Screen::Primary` | `Screen::primary()` | `Screen.primary` | `ScreenPrimary()` |
 | monitor *i* | `Screen::Monitor(i)` | `Screen::monitor(i)` | `Screen.monitor(i)` | `ScreenMonitor(i)` |
 | window | `Screen::Window(hwnd)` | `Screen::window(hwnd)` | `Screen.window(hwnd)` | `ScreenWindow(hwnd)` |
+| window client area | `Screen::WindowClient(hwnd)` | `Screen::window_client(hwnd)` | `Screen.window_client(hwnd)` | `ScreenWindowClient(hwnd)` |
 | monitor holding a point | `Screen::Containing(x, y)` | `Screen::containing(x, y)` | `Screen.containing(x, y)` | `ScreenContaining(x, y)` |
 | the layout | `platform::monitors()` | `monitors_json()` | `monitors()` | `Monitors()` / `MonitorsJSON()` |
+| one window | `platform::window_metrics(hwnd)` | `window_metrics_json(hwnd)` | `window_metrics(hwnd)` | `WindowMetrics(hwnd)` |
+| the DPI mode | `platform::prepare()` | `prepare_platform()` | `prepare_platform()` | `PreparePlatform()` |
+
+`Window` is `GetWindowRect`, so its rectangle includes the title bar and the
+borders. `WindowClient` is `GetClientRect` plus `ClientToScreen`: the area inside
+the frame, which is where a game draws and what a capture shows, so a coordinate
+measured on a screenshot starts at its top-left corner. Both are clamped the same
+way and report the same two anchor errors; a client area with no size or on no
+monitor is `StaleWindow` with a message naming the client area.
+
+`window_metrics` is the read a host makes before converting a capture coordinate:
+the frame, `clientOrigin` and `clientSize`, the effective `dpi` of the window's
+display, and `visible`/`minimized`/`foreground`. It needs no handle and sends no
+packet. `prepare` raises the process to per-monitor DPI awareness (v2 where the
+system allows it) and reports the mode it ended up in: `per_monitor` is what says
+the coordinates are physical pixels and not scaled, which is also the mode every
+`gdb_open*` puts the process in before it returns.
 
 `Primary` follows the primary-monitor flag, which need not be index 0.
 `Monitor(i)` is the `i`-th rectangle in `EnumDisplayMonitors` order — not the

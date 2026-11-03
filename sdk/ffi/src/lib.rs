@@ -495,6 +495,12 @@ pub extern "C" fn gdb_device_list() -> *mut c_char {
     }))
 }
 
+/// Opens the first board matching `selector`.
+///
+/// Every open raises the process to per-monitor DPI awareness first, because the
+/// coordinates a host passes in are physical pixels and the SDK reads the
+/// pointer with `GetPhysicalCursorPos`: a process left DPI-unaware would aim at
+/// a scaled picture of the desktop. `gdb_platform_prepare` reports the mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_open(
     selector: *const c_char,
@@ -512,6 +518,7 @@ pub extern "C" fn gdb_open(
         )
     };
     pointer(guard(|| {
+        gdb_sdk::platform::enable_dpi_awareness();
         let device = Manager::open(
             selector.as_deref(),
             DeviceOptions {
@@ -534,6 +541,7 @@ pub extern "C" fn gdb_open_mock(
     heartbeat: bool,
 ) -> *mut GdbDevice {
     pointer(guard(|| {
+        gdb_sdk::platform::enable_dpi_awareness();
         let (device, handle) = Manager::open_mock_with_handle(DeviceOptions {
             auto_reconnect,
             timeout_ms: timeout_ms.max(100),
@@ -566,6 +574,7 @@ pub extern "C" fn gdb_open_shared(
         )
     };
     pointer(guard(|| {
+        gdb_sdk::platform::enable_dpi_awareness();
         let device = Device::open_shared(
             selector.as_deref(),
             DeviceOptions {
@@ -588,6 +597,7 @@ pub extern "C" fn gdb_open_mock_shared(
     heartbeat: bool,
 ) -> *mut GdbDevice {
     pointer(guard(|| {
+        gdb_sdk::platform::enable_dpi_awareness();
         let (device, handle) = Device::open_mock_shared(DeviceOptions {
             auto_reconnect,
             timeout_ms: timeout_ms.max(100),
@@ -1779,6 +1789,38 @@ pub extern "C" fn gdb_monitors_json() -> *mut c_char {
     json_string(guard(gdb_sdk::platform::monitors_json))
 }
 
+/// Makes the process DPI aware (per-monitor v2 where the system allows it) and
+/// reports the mode it ended up in, as
+/// `{"supported":true,"dpiAwareness":"perMonitorAware","value":2,"perMonitor":true}`.
+///
+/// A host converts a screenshot coordinate into a screen coordinate; both sides
+/// have to agree on the scale factor, and the factor is decided by this process
+/// wide setting. Calling it is safe more than once and safe beside an open
+/// device. It never fails on a platform without DPI awareness: `supported` is
+/// false there and the coordinates are used as they are.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_platform_prepare() -> *mut c_char {
+    json_string(guard(gdb_sdk::platform::prepare_json))
+}
+
+/// One window as the system reports it, as JSON:
+/// `{"rect":{"left","top","right","bottom"},"clientOrigin":{"x","y"},
+///   "clientSize":{"width","height"},"dpi":96,"visible":true,
+///   "minimized":false,"foreground":false}`.
+///
+/// `rect` is the frame a window anchor clamps into; `clientOrigin` and
+/// `clientSize` describe the area inside it, which is what a window-client
+/// anchor uses and what a capture shows. `dpi` is the effective DPI of the
+/// window's display (96 = 100%, 0 when the system will not say). GDB_UNSUPPORTED
+/// where the platform has no window APIs and GDB_STALE_WINDOW for a handle that
+/// does not resolve; the result is freed with gdb_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_window_metrics(hwnd: i64) -> *mut c_char {
+    json_string(guard(|| {
+        gdb_sdk::platform::window_metrics_json(hwnd as isize)
+    }))
+}
+
 /// Screen target, laid out as gdb.h's gdb_screen.
 #[repr(C)]
 pub struct GdbScreen {
@@ -1787,7 +1829,8 @@ pub struct GdbScreen {
 }
 
 /// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND), 3 the monitor
-/// containing a point (arg = x in the high 32 bits, y in the low 32).
+/// containing a point (arg = x in the high 32 bits, y in the low 32), 4 window
+/// client (arg = HWND).
 fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
     match kind {
         0 => Ok(Screen::Primary),
@@ -1797,9 +1840,10 @@ fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
             (arg as u64 >> 32) as u32 as i32,
             arg as u32 as i32,
         )),
+        4 => Ok(Screen::WindowClient(arg as isize)),
         other => Err(Error::invalid(format!(
             "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window, \
-             3 the monitor containing a packed point"
+             3 the monitor containing a packed point, 4 a window's client area"
         ))),
     }
 }
@@ -2435,6 +2479,62 @@ mod tests {
             i32::from(ErrorCode::Invalid.as_u8())
         );
         gdb_remote_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn the_window_client_anchor_and_the_platform_reads_are_shaped_for_a_host() {
+        // kind 4 carries the handle the way kind 2 does, and it is a different
+        // anchor: the client area, not the frame.
+        assert_eq!(
+            screen_from(4, 0x1234).expect("window client"),
+            Screen::WindowClient(0x1234)
+        );
+        assert_eq!(
+            screen_from(2, 0x1234).expect("window"),
+            Screen::Window(0x1234),
+            "kind 2 must keep meaning the whole frame"
+        );
+
+        // A mock has no windows, so the anchor is a stale window, not a panic.
+        let raw = open_mock();
+        assert_eq!(
+            gdb_mouse_move_to_on(
+                raw,
+                10,
+                10,
+                GdbScreen {
+                    kind: 4,
+                    arg: 0x1234
+                },
+                0,
+                ptr::null()
+            ),
+            i32::from(ErrorCode::StaleWindow.as_u8())
+        );
+        assert!(message().contains("client area"), "{}", message());
+        gdb_device_free(raw);
+
+        // The DPI mode: one object, every field named, and the platform says
+        // whether it has the concept at all.
+        let prepared = json_of(gdb_platform_prepare());
+        for field in ["supported", "dpiAwareness", "value", "perMonitor"] {
+            assert!(prepared.get(field).is_some(), "prepare without {field}");
+        }
+        assert_eq!(prepared["supported"].as_bool(), Some(cfg!(windows)));
+        assert!(prepared["dpiAwareness"].is_string());
+        assert!(prepared["perMonitor"].is_boolean());
+
+        // A handle the system does not know: a typed refusal, never a zeroed
+        // answer that a caller would read as "the window is at (0, 0)".
+        assert!(gdb_window_metrics(0).is_null());
+        assert_eq!(
+            last_code(),
+            i32::from(if cfg!(windows) {
+                ErrorCode::StaleWindow.as_u8()
+            } else {
+                ErrorCode::Unsupported.as_u8()
+            })
+        );
     }
 
     #[test]

@@ -43,6 +43,8 @@ __all__ = [
     "probe",
     "probe_all",
     "monitors",
+    "window_metrics",
+    "prepare_platform",
     "LIBRARY",
 ]
 
@@ -292,6 +294,13 @@ class Screen:
         return cls(2, hwnd)
 
     @classmethod
+    def window_client(cls, hwnd: int) -> "Screen":
+        """A window's client area: the part inside the frame, which is where a
+        game draws and where a screenshot's coordinates start. ``window`` is the
+        whole frame, title bar and borders included."""
+        return cls(4, hwnd)
+
+    @classmethod
     def containing(cls, x: int, y: int) -> "Screen":
         """The monitor holding the point, so a caller that starts a move from a
         coordinate does not have to know which display that is.
@@ -317,6 +326,10 @@ _D.gdb_metrics_clamps.argtypes = [c_void_p, POINTER(Clamps)]
 _D.gdb_metrics_clamps.restype = c_int32
 _D.gdb_monitors_json.argtypes = []
 _D.gdb_monitors_json.restype = c_void_p
+_D.gdb_window_metrics.argtypes = [ctypes.c_int64]
+_D.gdb_window_metrics.restype = c_void_p
+_D.gdb_platform_prepare.argtypes = []
+_D.gdb_platform_prepare.restype = c_void_p
 _D.gdb_mouse_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_to_on.restype = c_int32
 _D.gdb_mouse_move_path_on.argtypes = [c_void_p, POINTER(_Point), c_size_t, _Screen, c_uint32, POINTER(_Profile)]
@@ -1127,6 +1140,30 @@ def monitors() -> list[dict]:
     safe beside a session; read it instead of guessing which index a display is.
     """
     return _take(_D.gdb_monitors_json())
+
+
+def window_metrics(hwnd: int) -> dict:
+    """One window as the system reports it.
+
+    The dict is ``{"rect", "clientOrigin", "clientSize", "dpi", "visible",
+    "minimized", "foreground"}``: ``rect`` is the frame ``Screen.window`` clamps
+    into, and ``clientOrigin``/``clientSize`` describe the area inside it, which
+    is what ``Screen.window_client`` uses and what a capture shows. Raises
+    ``UNSUPPORTED`` where the platform has no window APIs and ``STALE_WINDOW``
+    for a handle that does not resolve. No device handle is needed.
+    """
+    return _take(_D.gdb_window_metrics(hwnd))
+
+
+def prepare_platform() -> dict:
+    """Raises the process to per-monitor DPI awareness and reports the mode.
+
+    Returns ``{"supported", "dpiAwareness", "value", "perMonitor"}``. A host that
+    turns a screenshot coordinate into a screen coordinate has to agree with the
+    SDK about the scale factor, and this is what decides it; safe more than once
+    and safe beside an open device. Every ``Device.open*`` already calls it.
+    """
+    return _take(_D.gdb_platform_prepare())
 
 
 class Observer:

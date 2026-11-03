@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 import unittest
@@ -528,6 +529,34 @@ class ScreenTargetTests(unittest.TestCase):
             sum(1 for entry in listed if entry["primary"]), 1,
             "exactly the entry Screen.primary resolves to is marked primary",
         )
+
+    def test_the_window_client_anchor_and_the_platform_reads(self):
+        state = gdb.prepare_platform()
+        self.assertEqual(
+            set(state), {"supported", "dpiAwareness", "value", "perMonitor"}
+        )
+        self.assertIsInstance(state["supported"], bool)
+        if sys.platform == "win32":
+            self.assertTrue(state["supported"])
+            self.assertTrue(state["perMonitor"], state)
+
+        # A handle the system does not know is a typed refusal.
+        with self.assertRaises(gdb.GdbError) as caught:
+            gdb.window_metrics(0)
+        self.assertEqual(
+            caught.exception.code,
+            gdb.ErrorCode.STALE_WINDOW if sys.platform == "win32"
+            else gdb.ErrorCode.UNSUPPORTED,
+        )
+
+        # kind 4 is the client area, and a mock has no windows.
+        screen = gdb.Screen.window_client(0x1234)
+        self.assertEqual((screen.kind, screen.arg), (4, 0x1234))
+        with gdb.Device.open_mock() as device:
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.mouse.move_to(10, 10, screen=screen)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.STALE_WINDOW)
+            self.assertIn("client area", caught.exception.message)
 
     def test_the_anchor_error_codes_are_named(self):
         self.assertEqual(gdb.ErrorCode.INVALID_SCREEN, 11)

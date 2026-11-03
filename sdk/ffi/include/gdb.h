@@ -235,7 +235,8 @@ int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y,
  */
 typedef struct gdb_screen {
     int32_t kind;  /* 0 primary, 1 monitor (arg = index), 2 window (arg = HWND),
-                      3 monitor containing a point (arg = packed x,y, see below) */
+                      3 monitor containing a point (arg = packed x,y, see below),
+                      4 window client area (arg = HWND) */
     int64_t arg;   /* HWND is pointer-sized, so this is 64-bit even in a 32-bit host */
 } gdb_screen;
 
@@ -249,6 +250,17 @@ static inline gdb_screen gdb_screen_containing(int32_t x, int32_t y) {
     gdb_screen screen;
     screen.kind = 3;
     screen.arg = (int64_t)(((uint64_t)(uint32_t)x << 32) | (uint64_t)(uint32_t)y);
+    return screen;
+}
+
+/* kind 4 anchors on a window's client area: the part inside the frame, which is
+   what a capture shows. A window anchor (kind 2) uses GetWindowRect, so its
+   rectangle includes the title bar and the borders and a destination measured on
+   the picture lands a few pixels off. */
+static inline gdb_screen gdb_screen_window_client(int64_t hwnd) {
+    gdb_screen screen;
+    screen.kind = 4;
+    screen.arg = hwnd;
     return screen;
 }
 
@@ -278,6 +290,29 @@ int32_t gdb_mouse_click_at_on(gdb_device *device, int32_t x, int32_t y, gdb_scre
  * packet is sent; the result is freed with gdb_string_free, and NULL comes back
  * with gdb_last_error set when the system has nothing to report. */
 char *gdb_monitors_json(void);
+
+/* One window as the system reports it, as JSON:
+     {"rect":{"left","top","right","bottom"},
+      "clientOrigin":{"x","y"},"clientSize":{"width","height"},
+      "dpi":96,"visible":true,"minimized":false,"foreground":false}
+   `rect` is the frame kind 2 clamps into; `clientOrigin` and `clientSize`
+   describe the area inside it, which is what kind 4 uses and what a capture
+   shows. `dpi` is the window display's effective DPI (96 = 100%, 0 when the
+   system will not say). GDB_UNSUPPORTED where the platform has no window APIs,
+   GDB_STALE_WINDOW for a handle that does not resolve. Freed with
+   gdb_string_free. */
+char *gdb_window_metrics(int64_t hwnd);
+
+/* Raises the process to per-monitor DPI awareness where the system allows it and
+   reports the mode it ended up in:
+     {"supported":true,"dpiAwareness":"perMonitorAware","value":2,"perMonitor":true}
+   A host that turns a screenshot coordinate into a screen coordinate has to
+   agree with the SDK about the scale factor, and this is what decides it. Safe
+   more than once and safe beside an open device; every gdb_open* already calls
+   it, so this is for a host that converts coordinates before it opens one. It
+   does not fail on a platform without DPI awareness: `supported` is false and
+   the coordinates are used as they are. Freed with gdb_string_free. */
+char *gdb_platform_prepare(void);
 
 gdb_movement *gdb_mouse_start_move_to(gdb_device *device, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_by(gdb_device *device, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile *profile);
@@ -451,7 +486,8 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// gdb_scheduler_elapsed_ms, 5 the metrics snapshot, 6 the screen-targeted
     /// absolute moves, 7 the arrival watch, 8 the monitor listing, the containing
     /// anchor, the clamp counters and the separate anchor error codes, 9 the
-    /// caller-timed clicks and gdb_mouse_click_at_on.
+    /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
+    /// gdb_window_metrics and gdb_platform_prepare.
 #define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;

@@ -215,6 +215,49 @@ type Monitor struct {
 	Dpi     uint32 `json:"dpi"`
 }
 
+// Rect is a physical-pixel rectangle in virtual-desktop coordinates.
+type Rect struct {
+	Left   int32 `json:"left"`
+	Top    int32 `json:"top"`
+	Right  int32 `json:"right"`
+	Bottom int32 `json:"bottom"`
+}
+
+// Point is a position in virtual-desktop pixels.
+type Point struct {
+	X int32 `json:"x"`
+	Y int32 `json:"y"`
+}
+
+// Size is a width and a height in pixels.
+type Size struct {
+	Width  int32 `json:"width"`
+	Height int32 `json:"height"`
+}
+
+// WindowInfo is one window as WindowMetricsJSON reports it: the frame, the
+// client area inside it, the DPI of the display it sits on, and the flags a host
+// checks before it converts a capture coordinate into a screen one.
+type WindowInfo struct {
+	Rect         Rect   `json:"rect"`
+	ClientOrigin Point  `json:"clientOrigin"`
+	ClientSize   Size   `json:"clientSize"`
+	Dpi          uint32 `json:"dpi"`
+	Visible      bool   `json:"visible"`
+	Minimized    bool   `json:"minimized"`
+	Foreground   bool   `json:"foreground"`
+}
+
+// PlatformState is the DPI awareness the process runs with, as
+// PreparePlatform reports it. PerMonitor is the mode in which coordinates are
+// physical pixels and are not scaled by the system.
+type PlatformState struct {
+	Supported    bool   `json:"supported"`
+	DpiAwareness string `json:"dpiAwareness"`
+	Value        int32  `json:"value"`
+	PerMonitor   bool   `json:"perMonitor"`
+}
+
 // Screen is which rectangle an absolute move is clamped into. Coordinates stay
 // virtual-desktop physical pixels: the target is not a new origin.
 type Screen struct {
@@ -240,6 +283,11 @@ func ScreenWindow(hwnd int64) Screen { return Screen{Kind: 2, Arg: hwnd} }
 func ScreenContaining(x, y int32) Screen {
 	return Screen{Kind: 3, Arg: int64(uint64(uint32(x))<<32 | uint64(uint32(y)))}
 }
+
+// ScreenWindowClient is a window's client area: the part inside the frame, which
+// is where a game draws and where a screenshot's coordinates start. ScreenWindow
+// is the whole frame, title bar and borders included.
+func ScreenWindowClient(hwnd int64) Screen { return Screen{Kind: 4, Arg: hwnd} }
 
 // rawScreen mirrors gdb_screen, padding included.
 type rawScreen struct {
@@ -292,6 +340,8 @@ var (
 	procMetricsReset   *syscall.LazyProc
 	procMetricsClamps  *syscall.LazyProc
 	procMonitorsJSON   *syscall.LazyProc
+	procWindowMetrics  *syscall.LazyProc
+	procPlatformPrep   *syscall.LazyProc
 	procButton         *syscall.LazyProc
 	procClick          *syscall.LazyProc
 	procClickTimed     *syscall.LazyProc
@@ -408,6 +458,8 @@ func library() *syscall.LazyDLL {
 		procMetricsReset = dll.NewProc("gdb_metrics_reset")
 		procMetricsClamps = dll.NewProc("gdb_metrics_clamps")
 		procMonitorsJSON = dll.NewProc("gdb_monitors_json")
+		procWindowMetrics = dll.NewProc("gdb_window_metrics")
+		procPlatformPrep = dll.NewProc("gdb_platform_prepare")
 		procButton = dll.NewProc("gdb_mouse_button")
 		procClick = dll.NewProc("gdb_mouse_click")
 		procClickTimed = dll.NewProc("gdb_mouse_click_timed")
@@ -754,6 +806,47 @@ func Monitors() ([]Monitor, error) {
 		return nil, &Error{Code: Framing, Message: err.Error()}
 	}
 	return monitors, nil
+}
+
+// WindowMetricsJSON is one window as the system reports it: the frame, the client
+// area inside it, the effective DPI and the window flags. No handle is needed and
+// no packet is sent.
+func WindowMetricsJSON(hwnd int64) (string, error) {
+	library()
+	pointer, _, _ := procWindowMetrics.Call(uintptr(hwnd))
+	return take(pointer)
+}
+
+// WindowMetrics is WindowMetricsJSON decoded.
+func WindowMetrics(hwnd int64) (WindowInfo, error) {
+	text, err := WindowMetricsJSON(hwnd)
+	if err != nil {
+		return WindowInfo{}, err
+	}
+	var metrics WindowInfo
+	if err := json.Unmarshal([]byte(text), &metrics); err != nil {
+		return WindowInfo{}, &Error{Code: Framing, Message: err.Error()}
+	}
+	return metrics, nil
+}
+
+// PreparePlatform raises the process to per-monitor DPI awareness where the
+// system allows it and reports the mode it ended up in. A host that converts a
+// screenshot coordinate into a screen coordinate has to agree with the SDK about
+// the scale factor. Safe more than once and safe beside an open device; every
+// open already calls it.
+func PreparePlatform() (PlatformState, error) {
+	library()
+	pointer, _, _ := procPlatformPrep.Call()
+	text, err := take(pointer)
+	if err != nil {
+		return PlatformState{}, err
+	}
+	var state PlatformState
+	if err := json.Unmarshal([]byte(text), &state); err != nil {
+		return PlatformState{}, &Error{Code: Framing, Message: err.Error()}
+	}
+	return state, nil
 }
 
 func boolArg(value bool) uintptr {

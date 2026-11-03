@@ -221,6 +221,9 @@ struct Screen {
     // Windows settings shows.
     static Screen monitor(int32_t index) { return Screen{1, index}; }
     static Screen window(int64_t hwnd) { return Screen{2, hwnd}; }
+    // The area inside the frame: where a game draws and where a capture's
+    // coordinates start. `window` is the whole frame, title bar included.
+    static Screen window_client(int64_t hwnd) { return Screen{4, hwnd}; }
     // The monitor holding the point, so a caller that starts a move from a
     // coordinate does not have to know which display that is. The point is
     // packed into the same 64-bit argument every target uses.
@@ -367,6 +370,8 @@ struct Api {
     decltype(&gdb_metrics_reset) metrics_reset = nullptr;
     decltype(&gdb_metrics_clamps) metrics_clamps = nullptr;
     decltype(&gdb_monitors_json) monitors_json = nullptr;
+    decltype(&gdb_window_metrics) window_metrics = nullptr;
+    decltype(&gdb_platform_prepare) platform_prepare = nullptr;
     decltype(&gdb_mouse_move_to_on) mouse_move_to_on = nullptr;
     decltype(&gdb_mouse_move_path_on) mouse_move_path_on = nullptr;
     decltype(&gdb_mouse_start_move_to_on) mouse_start_move_to_on = nullptr;
@@ -496,6 +501,8 @@ inline Api& api() {
         GDB_OPTIONAL(metrics_reset, "gdb_metrics_reset")
         GDB_OPTIONAL(metrics_clamps, "gdb_metrics_clamps")
         GDB_OPTIONAL(monitors_json, "gdb_monitors_json")
+        GDB_OPTIONAL(window_metrics, "gdb_window_metrics")
+        GDB_OPTIONAL(platform_prepare, "gdb_platform_prepare")
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
@@ -678,6 +685,35 @@ inline std::string probe_all() {
 inline std::string monitors_json() {
     detail::require_clamps_surface();
     return detail::take(api().monitors_json());
+}
+
+// One window as the system reports it: {"rect", "clientOrigin", "clientSize",
+// "dpi", "visible", "minimized", "foreground"}. `rect` is the frame
+// Screen::window clamps into; the client fields describe the area inside it,
+// which is what Screen::window_client uses and what a capture shows. Throws
+// Unsupported where the platform has no window APIs and StaleWindow for a handle
+// that does not resolve. No device handle is needed.
+inline std::string window_metrics_json(int64_t hwnd) {
+    if (api().window_metrics == nullptr) {
+        throw Error(ErrorCode::Unsupported,
+                    "this gdb.dll predates the window metrics; use a library that "
+                    "exports gdb_window_metrics");
+    }
+    return detail::take(api().window_metrics(hwnd));
+}
+
+// Makes the process per-monitor DPI aware where the system allows it and reports
+// the mode: {"supported", "dpiAwareness", "value", "perMonitor"}. A host that
+// converts a screenshot coordinate into a screen coordinate has to agree with the
+// SDK about the scale factor, and this is what decides it. Safe beside a session;
+// every open already calls it.
+inline std::string prepare_platform() {
+    if (api().platform_prepare == nullptr) {
+        throw Error(ErrorCode::Unsupported,
+                    "this gdb.dll predates the platform preparation; use a library "
+                    "that exports gdb_platform_prepare");
+    }
+    return detail::take(api().platform_prepare());
 }
 
 class Movement {
