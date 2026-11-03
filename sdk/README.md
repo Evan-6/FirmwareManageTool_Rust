@@ -167,6 +167,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | raw command passthrough | yes | yes |
 | logging: level, sink, `Trace` packet log | yes | yes |
 | events: state changes and errors | yes | yes |
+| events with a structured JSON payload | yes | yes |
 | flash: build, UF2 pack, BOOTSEL copy, verify | yes | — |
 | broker server: `Server`, `Source`, `run_if_requested` | yes | — |
 | replay: `Recorder`, `Recording` | yes | — |

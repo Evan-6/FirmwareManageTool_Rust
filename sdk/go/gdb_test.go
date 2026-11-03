@@ -165,6 +165,64 @@ func TestMouseAndMovement(t *testing.T) {
 	movement.Close()
 }
 
+// The JSON event surface: the same state changes, with the fields the tuple
+// callback only implies.
+func TestJSONEventsCarryTheStateAndTheStatus(t *testing.T) {
+	device, err := OpenMockOptions(200, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var events []map[string]any
+	if err := device.SetEventHandlerJSON(func(kind int32, event string) {
+		var body map[string]any
+		if err := json.Unmarshal([]byte(event), &body); err != nil {
+			t.Errorf("event %d is not JSON: %v: %s", kind, err, event)
+			return
+		}
+		body["kind"] = float64(kind)
+		mu.Lock()
+		events = append(events, body)
+		mu.Unlock()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A STATUS first, so the payload has a summary to carry.
+	if _, err := device.StatusJSON(); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		seen := len(events)
+		mu.Unlock()
+		if seen > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("closing the device produced no JSON event")
+	}
+	state := events[0]
+	if state["state"].(float64) != float64(StateDisconnected) {
+		t.Fatalf("the state event must name the new state: %v", state)
+	}
+	status, ok := state["status"].(map[string]any)
+	if !ok {
+		t.Fatalf("the last STATUS must ride along: %v", state)
+	}
+	if _, ok := status["received"]; !ok {
+		t.Fatalf("the status summary has no received count: %v", status)
+	}
+}
+
 func TestLoggingReachesTheSink(t *testing.T) {
 	var mu sync.Mutex
 	var lines []string

@@ -29,7 +29,7 @@ pub mod watch;
 mod session;
 
 pub use broker::{Client as BrokerClient, Server as BrokerServer};
-pub use device::{Device, DeviceInfo, DeviceOptions, Ownership, StrayHook};
+pub use device::{Device, DeviceInfo, DeviceOptions, Ownership, StrayHook, WeakDevice};
 pub use diagnostics::{DeviceError, StatusSummary};
 pub use error::{Error, ErrorCode, Result};
 pub use event::{ConnectionState, EventHandler};

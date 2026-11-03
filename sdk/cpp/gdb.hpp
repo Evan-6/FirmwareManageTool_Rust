@@ -336,6 +336,7 @@ struct Api {
     decltype(&gdb_barrier) barrier = nullptr;
     decltype(&gdb_bootloader) bootloader = nullptr;
     decltype(&gdb_set_event_handler) set_event_handler = nullptr;
+    decltype(&gdb_set_event_handler_json) set_event_handler_json = nullptr;
     decltype(&gdb_profile_default) profile_default = nullptr;
     decltype(&gdb_command) command = nullptr;
     decltype(&gdb_packet_free) packet_free = nullptr;
@@ -547,6 +548,7 @@ inline Api& api() {
         GDB_OPTIONAL(window_metrics, "gdb_window_metrics")
         GDB_OPTIONAL(platform_prepare, "gdb_platform_prepare")
         GDB_OPTIONAL(device_last_error, "gdb_device_last_error")
+        GDB_OPTIONAL(set_event_handler_json, "gdb_set_event_handler_json")
         GDB_OPTIONAL(abi_version_full, "gdb_abi_version_full")
         GDB_OPTIONAL(capabilities, "gdb_capabilities")
         GDB_OPTIONAL(mouse_move_to_on_pursuit, "gdb_mouse_move_to_on_pursuit")
@@ -1358,6 +1360,12 @@ public:
 
     void set_event_handler(std::function<void(int32_t, int32_t, std::string)> handler);
     void clear_event_handler();
+    // The same events as one JSON object per call: {"state":2,"status":{…}} for a
+    // state change, {"code":2,"message":"…","status":{…}} for an error, with
+    // "status" null until a STATUS has been read. It replaces the plain handler —
+    // one slot, one callback — and a null function clears it.
+    void set_event_handler_json(std::function<void(int32_t, std::string)> handler);
+    void clear_event_handler_json();
 
     Mouse mouse() const { return Mouse(raw()); }
     Keyboard keyboard() const { return Keyboard(raw()); }
@@ -1374,6 +1382,7 @@ private:
 
     detail::DeviceHandle handle_{nullptr, api().device_free};
     std::shared_ptr<std::function<void(int32_t, int32_t, std::string)>> events_;
+    std::shared_ptr<std::function<void(int32_t, std::string)>> events_json_;
 };
 
 class Scheduler {
@@ -1456,6 +1465,34 @@ inline void Device::set_event_handler(
 inline void Device::clear_event_handler() {
     detail::check(api().set_event_handler(raw(), nullptr, nullptr));
     events_.reset();
+}
+
+inline void Device::set_event_handler_json(
+    std::function<void(int32_t, std::string)> handler) {
+    if (api().set_event_handler_json == nullptr) {
+        throw Error(ErrorCode::Unsupported,
+                    "this gdb.dll predates the JSON events; use a library that "
+                    "exports gdb_set_event_handler_json");
+    }
+    events_json_ = std::make_shared<std::function<void(int32_t, std::string)>>(
+        std::move(handler));
+    detail::check(api().set_event_handler_json(
+        raw(),
+        [](void* user, int32_t kind, const char* json) {
+            auto* callback = static_cast<std::function<void(int32_t, std::string)>*>(user);
+            try {
+                (*callback)(kind, json != nullptr ? std::string(json) : std::string());
+            } catch (...) {
+            }
+        },
+        events_json_.get()));
+}
+
+inline void Device::clear_event_handler_json() {
+    if (api().set_event_handler_json != nullptr) {
+        detail::check(api().set_event_handler_json(raw(), nullptr, nullptr));
+    }
+    events_json_.reset();
 }
 
 inline std::unique_ptr<Scheduler> Device::scheduler() const {

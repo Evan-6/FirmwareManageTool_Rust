@@ -201,6 +201,22 @@ class DeviceTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(any(kind == 0 and code == gdb.ConnectionState.DISCONNECTED for kind, code, _ in seen))
 
+    def test_json_events_carry_the_state_and_the_status(self):
+        device = gdb.Device.open_mock(timeout_ms=200)
+        seen: list[tuple[int, dict]] = []
+        device.set_event_handler_json(lambda kind, body: seen.append((kind, body)))
+        _ = device.status  # a summary for the payload to carry
+        device.close()
+        deadline = time.monotonic() + 2
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(seen, "closing the device produced no JSON event")
+        kind, body = seen[0]
+        self.assertEqual(kind, 0)
+        self.assertEqual(body["state"], gdb.ConnectionState.DISCONNECTED)
+        self.assertIsInstance(body["status"], dict)
+        self.assertIn("received", body["status"])
+
     def test_missing_selector_is_disconnected(self):
         with self.assertRaises(gdb.GdbError) as caught:
             gdb.Device.open("no-such-serial")

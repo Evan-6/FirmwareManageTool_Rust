@@ -150,6 +150,11 @@ impl Diagnostics {
         }
     }
 
+    /// The last STATUS the device answered, when one has been read.
+    pub(crate) fn status_summary(&self) -> Option<StatusSummary> {
+        self.status.lock().ok().and_then(|slot| *slot)
+    }
+
     /// The latest failure, or `None` while the device has not failed yet.
     pub(crate) fn last(&self) -> Option<DeviceError> {
         let failure = self.failure.lock().ok()?.clone()?;

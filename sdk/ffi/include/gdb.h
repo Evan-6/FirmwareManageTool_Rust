@@ -103,6 +103,10 @@ typedef struct gdb_packet {
 
 /* user callback for connection events; message is NULL unless kind == ERROR */
 typedef void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *message);
+/* the same events, one JSON object per call: {"state":2,"status":{…}} for a state
+   change, {"code":2,"message":"…","status":{…}} for an error. status is null
+   until a STATUS has been read; the pointer is valid only for the call. */
+typedef void (*gdb_event_json_fn)(void *user, int32_t kind, const char *json);
 /* task callback: return 0 to report success, or a gdb_error value */
 typedef int32_t (*gdb_task_fn)(void *user);
 typedef void (*gdb_log_fn)(void *user, int32_t level, const char *message);
@@ -116,7 +120,7 @@ const char *gdb_version(void);
 /* What this build can do, as a JSON object of booleans:
      {"click_timed":true,"click_at_on":true,"window_metrics":true,
       "window_client_screen":true,"pursuit":true,"move_report":true,
-      "event_json":false,"scheduler":true,"broker":true,"replay":false,
+      "event_json":true,"scheduler":true,"broker":true,"replay":false,
       "flash":false}
    A host reads it once, after loading the library, to learn which of the
    abilities behind GDB_ABI_VERSION_MINOR are present here: a false is a
@@ -228,6 +232,9 @@ int32_t gdb_release_all(gdb_device *device);
 int32_t gdb_barrier(gdb_device *device);
 int32_t gdb_bootloader(gdb_device *device);
 int32_t gdb_set_event_handler(gdb_device *device, gdb_event_fn func, void *user);
+/* The same events, one JSON object each. It replaces the plain handler: one slot,
+   one callback. NULL clears it. */
+int32_t gdb_set_event_handler_json(gdb_device *device, gdb_event_json_fn func, void *user);
 
 gdb_profile gdb_profile_default(void);
 
@@ -537,8 +544,8 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// anchor, the clamp counters and the separate anchor error codes, 9 the
     /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
     /// gdb_window_metrics, gdb_platform_prepare, gdb_device_last_error,
-    /// gdb_abi_version_full, gdb_capabilities, the pursuit move and
-    /// gdb_mouse_move_to_on_report.
+    /// gdb_abi_version_full, gdb_capabilities, the pursuit move,
+    /// gdb_mouse_move_to_on_report and gdb_set_event_handler_json.
 #define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;

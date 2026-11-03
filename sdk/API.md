@@ -26,6 +26,7 @@ for the handle you want and a working call.
 | barrier | `device.barrier()` | `barrier()` | `.barrier()` | `Barrier()` |
 | bootloader | `device.bootloader()` | `bootloader()` | `.bootloader()` | `Bootloader()` |
 | events | `set_event_handler(Arc<dyn EventHandler>)` | `set_event_handler(fn)` | `.set_event_handler(fn)` | `SetEventHandler(fn)` |
+| events as JSON | `set_event_handler` (`DeviceError`/`StatusSummary`) | `set_event_handler_json(fn)` | `.set_event_handler_json(fn)` | `SetEventHandlerJSON(fn)` |
 | log level | `log::set_level(Level)` | `set_log_level(int)` | `set_log_level(int)` | `SetLogLevel(uint8)` |
 | log sink | `log::set_sink(fn)` | `set_log_sink(fn)` | `set_log_sink(fn)` | `SetLogSink(fn)` |
 | relative move | `move_by(dx, dy, opts)` | `move_by(dx, dy, ms)` | `.move_by(dx, dy, ms)` | `MoveBy(dx, dy, ms, p)` |
@@ -936,6 +937,7 @@ instead of waiting for a symbol.
 
 ```c
 typedef void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *message);
+typedef void (*gdb_event_json_fn)(void *user, int32_t kind, const char *json);
 typedef int32_t (*gdb_task_fn)(void *user);
 typedef void (*gdb_log_fn)(void *user, int32_t level, const char *message);
 typedef void (*gdb_watch_fn)(void *user, int32_t kind, const char *json);
@@ -946,6 +948,21 @@ connecting, 2 connected, 3 error), `2` error (`code` = `gdb_error`, `message` se
 `message` is NULL otherwise. Enums in the header: `gdb_error`, `gdb_button`,
 `gdb_ease`, `gdb_event_kind`, `gdb_connection_state`. Strings the library returns
 are freed with `gdb_string_free`, packets with `gdb_packet_free`.
+
+`gdb_set_event_handler_json` delivers the same events as one JSON object per
+call, with the structure the tuple only implies:
+
+```json
+{"state":2,"status":{"received":143,"completed":143,"pending":0}}
+{"code":2,"message":"no reply to opcode 6 (STATUS) within 1000 ms (session 1234)",
+ "status":{"received":143,"completed":142,"pending":1}}
+```
+
+`status` is the last STATUS the device answered, or `null` until one has been
+read. It replaces the plain handler — one slot, one callback, whichever setter
+ran last — and NULL clears it. Rust callers build the same payload from
+`DeviceError` and `Device::status_summary()`; the device is held weakly there, so
+a handler installed on a device cannot keep its own host alive.
 
 ## Replay
 

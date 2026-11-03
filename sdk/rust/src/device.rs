@@ -133,6 +133,21 @@ pub struct Device {
     pub(crate) inner: Arc<Inner>,
 }
 
+/// A [`Device`] that does not keep it alive.
+///
+/// An event handler is stored on the device, so a handler that held a `Device`
+/// would keep its own host alive forever. This is the handle for that case:
+/// upgrade it inside the callback, and let the device go when the host drops it.
+#[derive(Clone)]
+pub struct WeakDevice(Weak<Inner>);
+
+impl WeakDevice {
+    /// The device, or `None` when it has already been dropped.
+    pub fn upgrade(&self) -> Option<Device> {
+        self.0.upgrade().map(|inner| Device { inner })
+    }
+}
+
 impl Device {
     pub(crate) fn from_transport(
         transport: Box<dyn Transport>,
@@ -298,6 +313,20 @@ impl Device {
     /// slot the next good call wiped.
     pub fn last_error(&self) -> Option<DeviceError> {
         self.inner.diagnostics.last()
+    }
+
+    /// The device without a strong reference to it, for an event handler that
+    /// wants to read the device from inside a callback.
+    pub fn downgrade(&self) -> WeakDevice {
+        WeakDevice(Arc::downgrade(&self.inner))
+    }
+
+    /// The last STATUS the device answered, in the shape a failure reports.
+    ///
+    /// `None` until a STATUS has been read. Cheap enough for an event callback:
+    /// one uncontended lock on a copy of three numbers.
+    pub fn status_summary(&self) -> Option<crate::diagnostics::StatusSummary> {
+        self.inner.diagnostics.status_summary()
     }
 
     /// Records `error` as this device's latest failure and hands it back, for

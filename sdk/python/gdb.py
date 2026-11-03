@@ -237,6 +237,8 @@ for name in ("gdb_release_all", "gdb_barrier", "gdb_bootloader"):
     getattr(_D, name).restype = c_int32
 _D.gdb_set_event_handler.argtypes = [c_void_p, c_void_p, c_void_p]
 _D.gdb_set_event_handler.restype = c_int32
+_D.gdb_set_event_handler_json.argtypes = [c_void_p, c_void_p, c_void_p]
+_D.gdb_set_event_handler_json.restype = c_int32
 _D.gdb_command.argtypes = [c_void_p, c_uint8, POINTER(c_uint8), c_size_t, POINTER(_Packet)]
 _D.gdb_command.restype = c_int32
 _D.gdb_packet_free.argtypes = [POINTER(_Packet)]
@@ -791,6 +793,7 @@ class Keyboard:
 # Task callbacks must stay referenced for as long as the scheduler lives.
 _TASK_CALLBACK = ctypes.CFUNCTYPE(c_int32, c_void_p)
 _EVENT_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_int32, c_char_p)
+_EVENT_JSON_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
 _LOG_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
 # A watch callback runs on the watch thread; ctypes acquires the GIL for it.
 _WATCH_CALLBACK = ctypes.CFUNCTYPE(None, c_void_p, c_int32, c_char_p)
@@ -1050,6 +1053,36 @@ class Device:
         self._events.append(wrapped)
         _check(
             _D.gdb_set_event_handler(
+                self._handle(), ctypes.cast(wrapped, c_void_p), None
+            )
+        )
+
+    def set_event_handler_json(self, callback: Callable[[int, dict], None] | None) -> None:
+        """The same events as one JSON object per call.
+
+        ``{"state":2,"status":{…}}`` for a state change and
+        ``{"code":2,"message":"…","status":{…}}`` for an error, with ``status``
+        ``None`` until a STATUS has been read. It replaces
+        :meth:`set_event_handler` — one slot, one callback — and ``None`` clears
+        it. The callback runs on whichever thread produced the event; copy the
+        dict if it outlives the call.
+        """
+        if callback is None:
+            _check(_D.gdb_set_event_handler_json(self._handle(), None, None))
+            self._events.clear()
+            return
+
+        def forward(_user, kind, text):
+            try:
+                body = json.loads((text or b"{}").decode("utf-8"))
+            except ValueError:
+                body = {}
+            callback(kind, body)
+
+        wrapped = _EVENT_JSON_CALLBACK(forward)
+        self._events.append(wrapped)
+        _check(
+            _D.gdb_set_event_handler_json(
                 self._handle(), ctypes.cast(wrapped, c_void_p), None
             )
         )

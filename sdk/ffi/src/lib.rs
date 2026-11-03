@@ -410,6 +410,7 @@ unsafe fn motion_options(duration_ms: u32, profile: *const GdbProfile) -> Motion
 }
 
 type EventFn = extern "C" fn(user: *mut c_void, kind: i32, code: i32, message: *const c_char);
+type EventJsonFn = extern "C" fn(user: *mut c_void, kind: i32, json: *const c_char);
 
 struct FfiHandler {
     func: EventFn,
@@ -430,6 +431,63 @@ impl EventHandler for FfiHandler {
             2,
             i32::from(error.code().as_u8()),
             message.as_ptr(),
+        );
+    }
+}
+
+/// The same events, one JSON object per call instead of two loose arguments.
+///
+/// The payload carries what the plain callback only implies: the state value,
+/// the error code with its message, and the last STATUS the device answered when
+/// there is one. The device is held weakly, so installing a handler cannot keep
+/// its own host alive.
+struct FfiJsonHandler {
+    func: EventJsonFn,
+    user: usize,
+    device: gdb_sdk::WeakDevice,
+}
+
+unsafe impl Send for FfiJsonHandler {}
+unsafe impl Sync for FfiJsonHandler {}
+
+impl FfiJsonHandler {
+    fn emit(&self, kind: i32, body: serde_json::Value) {
+        let text = CString::new(body.to_string()).unwrap_or_default();
+        (self.func)(self.user as *mut c_void, kind, text.as_ptr());
+    }
+
+    /// The device's last STATUS, or JSON null when none has been read.
+    fn status(&self) -> serde_json::Value {
+        match self
+            .device
+            .upgrade()
+            .and_then(|device| device.status_summary())
+        {
+            Some(status) => serde_json::json!({
+                "received": status.received,
+                "completed": status.completed,
+                "pending": status.pending,
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+}
+
+impl EventHandler for FfiJsonHandler {
+    fn state(&self, state: ConnectionState) {
+        self.emit(
+            0,
+            serde_json::json!({"state": state as i32, "status": self.status()}),
+        );
+    }
+    fn error(&self, error: &Error) {
+        self.emit(
+            2,
+            serde_json::json!({
+                "code": error.code().as_u8(),
+                "message": error.message,
+                "status": self.status(),
+            }),
         );
     }
 }
@@ -491,7 +549,7 @@ pub extern "C" fn gdb_capabilities() -> *mut c_char {
             "window_client_screen": windows,
             "pursuit": true,
             "move_report": true,
-            "event_json": false,
+            "event_json": true,
             "scheduler": true,
             "broker": windows,
             "replay": false,
@@ -861,6 +919,35 @@ pub extern "C" fn gdb_set_event_handler(
                 func,
                 user: user as usize,
             }))),
+            None => handle.device.set_event_handler(None),
+        }
+        Ok(())
+    }))
+}
+
+/// The same events as one JSON object per call: `{"state":2,"status":{…}}` for a
+/// state change and `{"code":2,"message":"…","status":{…}}` for an error, with
+/// `status` null until a STATUS has been read.
+///
+/// It replaces the plain handler — one slot, one callback — and passing NULL
+/// clears it. kind is the same `gdb_event_kind`, and the JSON pointer is valid
+/// only for the duration of the call, so copy what outlives it.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_set_event_handler_json(
+    raw: *mut GdbDevice,
+    func: Option<EventJsonFn>,
+    user: *mut c_void,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        match func {
+            Some(func) => handle
+                .device
+                .set_event_handler(Some(Arc::new(FfiJsonHandler {
+                    func,
+                    user: user as usize,
+                    device: handle.device.downgrade(),
+                }))),
             None => handle.device.set_event_handler(None),
         }
         Ok(())
@@ -2738,6 +2825,89 @@ mod tests {
             "a failed move must leave the caller's struct alone"
         );
         gdb_device_free(raw);
+    }
+
+    static JSON_EVENTS: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+    extern "C" fn capture_json(_user: *mut c_void, kind: i32, json: *const c_char) {
+        let text = unsafe { CStr::from_ptr(json) }
+            .to_string_lossy()
+            .into_owned();
+        JSON_EVENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push((kind, text));
+    }
+
+    /// A state change and an error, each as one JSON object with the fields the
+    /// plain callback only implies, and the last STATUS the device answered.
+    #[test]
+    fn json_events_carry_the_state_the_error_and_the_last_status() {
+        let _serialised = LOG_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        JSON_EVENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+
+        let raw = gdb_open_mock(100, false, false);
+        assert!(!raw.is_null());
+        // A STATUS so the payload has a summary to carry.
+        let status = gdb_status(raw);
+        assert!(!status.is_null(), "{}", message());
+        gdb_string_free(status);
+
+        assert_eq!(
+            gdb_set_event_handler_json(raw, Some(capture_json), ptr::null_mut()),
+            0,
+            "{}",
+            message()
+        );
+
+        // An error event: silence the device and let the command time out.
+        unsafe { &*raw }
+            ._mock
+            .as_ref()
+            .expect("mock handle")
+            .set_silent(true);
+        assert!(gdb_status(raw).is_null());
+        // A state event: closing the device reports Disconnected.
+        gdb_close(raw);
+        gdb_device_free(raw);
+        assert_eq!(
+            gdb_set_event_handler_json(ptr::null_mut(), None, ptr::null_mut()),
+            i32::from(ErrorCode::Invalid.as_u8()),
+            "a NULL handle is the caller's mistake"
+        );
+
+        let events = JSON_EVENTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let error = events
+            .iter()
+            .find(|(kind, _)| *kind == 2)
+            .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).expect("error JSON"))
+            .expect("an error event");
+        assert_eq!(error["code"], i32::from(ErrorCode::Timeout.as_u8()));
+        assert!(
+            error["message"]
+                .as_str()
+                .expect("a message")
+                .contains("opcode 6"),
+            "{error}"
+        );
+        assert!(
+            error["status"]["received"].as_u64().is_some(),
+            "the last STATUS the device answered rides along: {error}"
+        );
+
+        let state = events
+            .iter()
+            .find(|(kind, _)| *kind == 0)
+            .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).expect("state JSON"))
+            .expect("a state event");
+        assert_eq!(state["state"], 0, "closed is Disconnected: {state}");
+        assert!(state.get("status").is_some());
     }
 
     #[test]

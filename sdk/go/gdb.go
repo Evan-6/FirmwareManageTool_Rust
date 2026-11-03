@@ -362,6 +362,7 @@ var (
 	procBarrier        *syscall.LazyProc
 	procBootloader     *syscall.LazyProc
 	procSetEvents      *syscall.LazyProc
+	procSetEventsJSON  *syscall.LazyProc
 	procProfileDefault *syscall.LazyProc
 	procCommand        *syscall.LazyProc
 	procPacketFree     *syscall.LazyProc
@@ -485,6 +486,7 @@ func library() *syscall.LazyDLL {
 		procBarrier = dll.NewProc("gdb_barrier")
 		procBootloader = dll.NewProc("gdb_bootloader")
 		procSetEvents = dll.NewProc("gdb_set_event_handler")
+		procSetEventsJSON = dll.NewProc("gdb_set_event_handler_json")
 		procProfileDefault = dll.NewProc("gdb_profile_default")
 		procCommand = dll.NewProc("gdb_command")
 		procPacketFree = dll.NewProc("gdb_packet_free")
@@ -1400,6 +1402,7 @@ var (
 	callbackMu      sync.Mutex
 	nextCallbackID  uintptr = 1
 	eventCallbacks          = map[uintptr]func(int32, int32, string){}
+	eventJSONCallbacks      = map[uintptr]func(int32, string){}
 	taskCallbacks           = map[uintptr]func() int32{}
 	watchCallbacks          = map[uintptr]func(int32, map[string]any){}
 	eventTrampoline         = syscall.NewCallback(func(user, kind, code, message uintptr) uintptr {
@@ -1413,6 +1416,22 @@ var (
 		if callback != nil {
 			callback(int32(kind), int32(code), text)
 		}
+		return 0
+	})
+	// The JSON kind: one object per event, decoded here so a caller never sees
+	// the DLL's buffer, which is only valid for the duration of the call.
+	eventJSONTrampoline = syscall.NewCallback(func(user, kind, body uintptr) uintptr {
+		callbackMu.Lock()
+		callback := eventJSONCallbacks[user]
+		callbackMu.Unlock()
+		if callback == nil {
+			return 0
+		}
+		text := "{}"
+		if body != 0 {
+			text = cString(body)
+		}
+		callback(int32(kind), text)
 		return 0
 	})
 	taskTrampoline = syscall.NewCallback(func(user uintptr) uintptr {
@@ -1554,6 +1573,33 @@ func (d *Device) SetEventHandler(callback func(kind, code int32, message string)
 	} else {
 		d.events[id] = callback
 		code, _, _ = procSetEvents.Call(d.handle, eventTrampoline, id)
+	}
+	return check(code)
+}
+
+// SetEventHandlerJSON installs the same events as one JSON object per call:
+// {"state":2,"status":{…}} for a state change and
+// {"code":2,"message":"…","status":{…}} for an error, with "status" null until a
+// STATUS has been read.
+//
+// It replaces SetEventHandler — one slot, one callback — and nil clears it. The
+// callback runs on whichever thread produced the event, so it must return
+// quickly; copy the string if it outlives the call.
+func (d *Device) SetEventHandlerJSON(callback func(kind int32, json string)) error {
+	callbackMu.Lock()
+	id := nextCallbackID
+	nextCallbackID++
+	if callback == nil {
+		delete(eventJSONCallbacks, id)
+	} else {
+		eventJSONCallbacks[id] = callback
+	}
+	callbackMu.Unlock()
+	var code uintptr
+	if callback == nil {
+		code, _, _ = procSetEventsJSON.Call(d.handle, 0, 0)
+	} else {
+		code, _, _ = procSetEventsJSON.Call(d.handle, eventJSONTrampoline, id)
 	}
 	return check(code)
 }
