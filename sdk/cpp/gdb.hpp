@@ -278,6 +278,8 @@ struct Api {
     Module module = nullptr;
 
     decltype(&gdb_abi_version) abi_version = nullptr;
+    decltype(&gdb_abi_version_full) abi_version_full = nullptr;
+    decltype(&gdb_capabilities) capabilities = nullptr;
     decltype(&gdb_version) version = nullptr;
     decltype(&gdb_last_error) last_error = nullptr;
     decltype(&gdb_device_last_error) device_last_error = nullptr;
@@ -381,6 +383,7 @@ struct Api {
     decltype(&gdb_window_metrics) window_metrics = nullptr;
     decltype(&gdb_platform_prepare) platform_prepare = nullptr;
     decltype(&gdb_mouse_move_to_on) mouse_move_to_on = nullptr;
+    decltype(&gdb_mouse_move_to_on_pursuit) mouse_move_to_on_pursuit = nullptr;
     decltype(&gdb_mouse_move_path_on) mouse_move_path_on = nullptr;
     decltype(&gdb_mouse_start_move_to_on) mouse_start_move_to_on = nullptr;
     decltype(&gdb_watch_start) watch_start = nullptr;
@@ -512,6 +515,9 @@ inline Api& api() {
         GDB_OPTIONAL(window_metrics, "gdb_window_metrics")
         GDB_OPTIONAL(platform_prepare, "gdb_platform_prepare")
         GDB_OPTIONAL(device_last_error, "gdb_device_last_error")
+        GDB_OPTIONAL(abi_version_full, "gdb_abi_version_full")
+        GDB_OPTIONAL(capabilities, "gdb_capabilities")
+        GDB_OPTIONAL(mouse_move_to_on_pursuit, "gdb_mouse_move_to_on_pursuit")
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
@@ -804,6 +810,17 @@ public:
                            const Profile* profile = nullptr) {
         auto raw = detail::profile_or_default(profile);
         return Movement(api().mouse_start_move_by(device_, dx, dy, duration_ms, &raw));
+    }
+    // Chase the pointer to (x, y) on `screen` with no planned trajectory and no
+    // barrier per step: the device's report rate sets the speed, which is the
+    // mode for a caller that retargets every frame.
+    void move_to_on_pursuit(int32_t x, int32_t y, const Screen& screen) {
+        if (api().mouse_move_to_on_pursuit == nullptr) {
+            throw Error(ErrorCode::Unsupported,
+                        "this gdb.dll predates pursuit moves; use a library that "
+                        "exports gdb_mouse_move_to_on_pursuit");
+        }
+        detail::check(api().mouse_move_to_on_pursuit(device_, x, y, screen.raw()));
     }
     Movement start_move_path(const std::vector<Point>& points,
                              uint32_t duration_ms = 0,
@@ -1418,5 +1435,26 @@ inline std::string version() { return std::string(api().version()); }
 inline uint32_t abi_version() { return api().abi_version(); }
 // The header is the truth for the minor: gdb_attach arrived with 1.1.
 inline uint32_t abi_minor_version() { return GDB_ABI_VERSION_MINOR; }
+// The major and the minor the loaded library implements, so a host can tell a
+// library older (or newer) than the header it compiled against.
+inline std::pair<uint32_t, uint32_t> abi_versions() {
+    if (api().abi_version_full == nullptr) {
+        return {api().abi_version(), abi_minor_version()};
+    }
+    uint32_t major = 0;
+    uint32_t minor = 0;
+    detail::check(api().abi_version_full(&major, &minor));
+    return {major, minor};
+}
+// What the loaded library can do, as the ABI's JSON object of booleans: a false
+// is a capability with no C symbol, or one this platform does not have.
+inline std::string capabilities() {
+    if (api().capabilities == nullptr) {
+        throw Error(ErrorCode::Unsupported,
+                    "this gdb.dll predates the capability list; use a library that "
+                    "exports gdb_capabilities");
+    }
+    return detail::take(api().capabilities());
+}
 
 }  // namespace gdb

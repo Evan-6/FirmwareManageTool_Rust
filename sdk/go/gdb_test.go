@@ -115,6 +115,9 @@ func TestMouseAndMovement(t *testing.T) {
 	if err := mouse.MoveTo(400, 300, 50, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := mouse.MoveToOnPursuit(1400, 300, ScreenMonitor(0)); err != nil {
+		t.Fatal(err)
+	}
 	if err := mouse.Click(Left, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -603,6 +606,7 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) error = (*Mouse).MoveToOn
 	var _ func(*Mouse, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickTimed
 	var _ func(*Mouse, int32, int32, Screen, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickAtOn
+	var _ func(*Mouse, int32, int32, Screen) error = (*Mouse).MoveToOnPursuit
 	var _ func(*Mouse, [][2]int32, Screen, uint32, *Profile) error = (*Mouse).MovePathOn
 	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) (*Movement, error) = (*Mouse).StartMoveToOn
 	var _ func() Screen = ScreenPrimary
@@ -623,6 +627,8 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func() ([]Monitor, error) = Monitors
 	var _ func() string = Version
 	var _ func() uint32 = LibraryABIVersion
+	var _ func() (uint32, uint32) = LibraryABIVersions
+	var _ func() (string, error) = Capabilities
 }
 
 // The containing anchor: kind 3 with the point packed into the argument, which
@@ -834,6 +840,42 @@ func TestDeviceRemembersTheLastFailure(t *testing.T) {
 	}
 	if code, _ := device.LastError(); code != InvalidScreen {
 		t.Fatalf("a success cleared the record: %d", code)
+	}
+}
+
+// The loaded library's own revision and capability list: what a host reads
+// before it trusts a symbol its binding assumes.
+func TestRuntimeABIAndCapabilities(t *testing.T) {
+	major, minor := LibraryABIVersions()
+	if major != ABIVersion || minor != ABIMinor {
+		t.Fatalf("library reports %d.%d, the binding was written against %d.%d",
+			major, minor, ABIVersion, ABIMinor)
+	}
+
+	text, err := Capabilities()
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	var listed map[string]bool
+	if err := json.Unmarshal([]byte(text), &listed); err != nil {
+		t.Fatalf("the capability list is not a JSON object of booleans: %v: %s", err, text)
+	}
+	keys := []string{
+		"click_timed", "click_at_on", "window_metrics", "window_client_screen",
+		"pursuit", "move_report", "event_json", "scheduler", "broker", "replay", "flash",
+	}
+	for _, name := range keys {
+		if _, ok := listed[name]; !ok {
+			t.Fatalf("the capability list has no %q: %s", name, text)
+		}
+	}
+	for _, name := range []string{"click_timed", "pursuit", "scheduler", "broker"} {
+		if !listed[name] {
+			t.Fatalf("%q is false in this build: %s", name, text)
+		}
+	}
+	if listed["replay"] || listed["flash"] {
+		t.Fatalf("replay and flash have no C symbol: %s", text)
 	}
 }
 

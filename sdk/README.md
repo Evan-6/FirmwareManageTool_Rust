@@ -16,7 +16,9 @@ language without a binding (C#, JNI, Node, Godot) calls the same `gdb_*`
 functions directly, which is all the three bindings do.
 
 The ABI is major 1, minor 9 (`GDB_ABI_VERSION_MINOR`); `gdb_abi_version()`
-answers the major at run time, `gdb_version()` the SDK string.
+answers the major at run time, `gdb_abi_version_full()` the major and the minor,
+`gdb_capabilities()` the abilities behind them, and `gdb_version()` the SDK
+string.
 
 ## Choose your handle
 
@@ -149,6 +151,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | --- | --- | --- |
 | session: open, close, reconnect, auto-reconnect, state | yes | yes |
 | errors: the calling thread's and the device's own record | yes | yes |
+| revision and capability list at run time | yes | yes |
 | queries: device info, STATUS, STATUS_EXT, SESSION_LIST | yes | yes |
 | shared ownership and its `stolen_frames` counter | yes | yes |
 | presence: probe, probe-all, observer on a timer | yes | yes |

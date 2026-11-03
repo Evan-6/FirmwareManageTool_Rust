@@ -108,7 +108,21 @@ typedef int32_t (*gdb_task_fn)(void *user);
 typedef void (*gdb_log_fn)(void *user, int32_t level, const char *message);
 
 uint32_t gdb_abi_version(void);
+/* The major and the minor at run time. GDB_INVALID on a NULL out pointer, and
+   neither slot is written then. gdb_abi_version() keeps answering the major. */
+int32_t gdb_abi_version_full(uint32_t *major, uint32_t *minor);
 const char *gdb_version(void);
+
+/* What this build can do, as a JSON object of booleans:
+     {"click_timed":true,"click_at_on":true,"window_metrics":true,
+      "window_client_screen":true,"pursuit":true,"move_report":false,
+      "event_json":false,"scheduler":true,"broker":true,"replay":false,
+      "flash":false}
+   A host reads it once, after loading the library, to learn which of the
+   abilities behind GDB_ABI_VERSION_MINOR are present here: a false is a
+   capability with no C symbol (the Rust-only rows of the README) or one the
+   platform does not have. Freed with gdb_string_free. */
+char *gdb_capabilities(void);
 
 /* Fills buffer with the last error message and returns its code (0 = none).
    This one answers for the calling thread: two threads that fail at the same
@@ -291,6 +305,12 @@ gdb_movement *gdb_mouse_start_move_to_on(gdb_device *device, int32_t x, int32_t 
    click with the caller's timing. Same clamping and error codes as
    gdb_mouse_move_to_on; the click half is gdb_mouse_click_timed. */
 int32_t gdb_mouse_click_at_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint8_t button, uint8_t count, uint32_t hold_ms, uint32_t gap_ms, uint32_t jitter_ms);
+
+/* An absolute move in pursuit mode: read the pointer, send what is left, repeat,
+   with no planned trajectory and no barrier per step. The mode for a caller that
+   retargets every frame; the device's report rate sets the speed, and the same
+   clamping and error codes as gdb_mouse_move_to_on apply. */
+int32_t gdb_mouse_move_to_on_pursuit(gdb_device *device, int32_t x, int32_t y, gdb_screen screen);
 
 /* Every monitor, in exactly the order kind 1 indexes them:
  *   [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, ...]
@@ -498,7 +518,8 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// absolute moves, 7 the arrival watch, 8 the monitor listing, the containing
     /// anchor, the clamp counters and the separate anchor error codes, 9 the
     /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
-    /// gdb_window_metrics, gdb_platform_prepare and gdb_device_last_error.
+    /// gdb_window_metrics, gdb_platform_prepare, gdb_device_last_error,
+    /// gdb_abi_version_full, gdb_capabilities and the pursuit move.
 #define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;

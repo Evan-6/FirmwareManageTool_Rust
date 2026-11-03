@@ -453,6 +453,54 @@ pub extern "C" fn gdb_abi_version() -> u32 {
     1
 }
 
+/// The minor revision this build implements. `gdb.h` carries the same number in
+/// `GDB_ABI_VERSION_MINOR`; the test below fails when they drift apart.
+const ABI_VERSION_MINOR: u32 = 9;
+
+/// The major and the minor at run time, for a host that has to know whether the
+/// library it loaded is the one its bindings were written against.
+///
+/// `gdb_abi_version` keeps returning the major alone. `GDB_INVALID` on a NULL
+/// out pointer, and neither slot is written in that case.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_abi_version_full(major: *mut u32, minor: *mut u32) -> i32 {
+    code(guard(|| {
+        let major = unsafe { major.as_mut() }.ok_or_else(|| Error::invalid("major is NULL"))?;
+        let minor = unsafe { minor.as_mut() }.ok_or_else(|| Error::invalid("minor is NULL"))?;
+        *major = gdb_abi_version();
+        *minor = ABI_VERSION_MINOR;
+        Ok(())
+    }))
+}
+
+/// What this build can do, as JSON object of booleans.
+///
+/// A host that checks `GDB_ABI_VERSION_MINOR` learns the revision; this says
+/// which of the abilities behind it are actually present, so a feature that is
+/// additive but platform-bound (window metrics need Windows) can be skipped
+/// instead of failing at the first call. A capability spelled `false` here has
+/// no C symbol at all: the bindings cannot reach it in any language.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_capabilities() -> *mut c_char {
+    json_string(guard(|| {
+        let windows = cfg!(windows);
+        let body = serde_json::json!({
+            "click_timed": true,
+            "click_at_on": true,
+            "window_metrics": windows,
+            "window_client_screen": windows,
+            "pursuit": true,
+            "move_report": false,
+            "event_json": false,
+            "scheduler": true,
+            "broker": windows,
+            "replay": false,
+            "flash": false,
+        });
+        Ok(body.to_string())
+    }))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_version() -> *const c_char {
     c"0.1.0".as_ptr()
@@ -1939,6 +1987,27 @@ pub extern "C" fn gdb_mouse_move_path_on(
     }))
 }
 
+/// An absolute move in pursuit mode: read the pointer, send what is left,
+/// repeat, with no trajectory and no barrier per step.
+///
+/// This is the mode for a caller that retargets every frame; the device's own
+/// report rate sets the speed, so `duration_ms` and the human profile play no
+/// part. `MotionOptions::pursuit()` in Rust, and the same clamping and error
+/// codes as gdb_mouse_move_to_on.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_move_to_on_pursuit(
+    raw: *mut GdbDevice,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let options = MotionOptions::pursuit().with_screen(screen_from(screen.kind, screen.arg)?);
+        handle.device.mouse().move_to(x, y, options)
+    }))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_mouse_start_move_to_on(
     raw: *mut GdbDevice,
@@ -1980,6 +2049,19 @@ mod tests {
         let raw = gdb_open_mock(1000, false, false);
         assert!(!raw.is_null(), "the mock device did not open");
         raw
+    }
+
+    /// The minor `gdb.h` declares, read from the header the DLL was built with.
+    fn header_minor() -> u32 {
+        let header = include_str!("../include/gdb.h");
+        let marker = "#define GDB_ABI_VERSION_MINOR ";
+        let start = header.find(marker).expect("gdb.h has no minor");
+        header[start + marker.len()..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .expect("the minor is not a number")
     }
 
     fn writes(raw: *mut GdbDevice) -> Vec<v3::Packet> {
@@ -2527,9 +2609,85 @@ mod tests {
         gdb_remote_free(ptr::null_mut());
     }
 
-    /// Every thread has its own `gdb_last_error`, so two failures at the same
-    /// time do not overwrite each other; the device keeps one record of its own
-    /// that survives the thread that hit it.
+    /// The runtime revision, the capability list and the pursuit move: the three
+    /// things a host reads before it trusts a symbol it has not called yet.
+    #[test]
+    fn the_runtime_revision_and_the_capability_list_describe_this_build() {
+        let mut major = 0u32;
+        let mut minor = 0u32;
+        assert_eq!(gdb_abi_version_full(&mut major, &mut minor), 0);
+        assert_eq!(major, 1);
+        assert_eq!(
+            minor,
+            header_minor(),
+            "the runtime minor and gdb.h disagree"
+        );
+        assert_eq!(
+            gdb_abi_version_full(ptr::null_mut(), &mut minor),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+
+        let capabilities = json_of(gdb_capabilities());
+        for name in [
+            "click_timed",
+            "click_at_on",
+            "window_metrics",
+            "window_client_screen",
+            "pursuit",
+            "move_report",
+            "event_json",
+            "scheduler",
+            "broker",
+            "replay",
+            "flash",
+        ] {
+            assert!(
+                capabilities
+                    .get(name)
+                    .and_then(|value| value.as_bool())
+                    .is_some(),
+                "the capability list has no boolean {name}: {capabilities}"
+            );
+        }
+        assert_eq!(capabilities["click_timed"], serde_json::Value::Bool(true));
+        assert_eq!(capabilities["pursuit"], serde_json::Value::Bool(true));
+        assert_eq!(
+            capabilities["window_metrics"],
+            serde_json::Value::Bool(cfg!(windows))
+        );
+        assert_eq!(
+            capabilities["replay"],
+            serde_json::Value::Bool(false),
+            "replay has no C symbol, so a binding cannot reach it"
+        );
+
+        // Pursuit: the same clamping, no trajectory and no barrier per step.
+        let raw = open_mock();
+        let before = writes(raw).len();
+        assert_eq!(
+            gdb_mouse_move_to_on_pursuit(raw, 1400, 300, GdbScreen { kind: 0, arg: 0 }),
+            0,
+            "{}",
+            message()
+        );
+        let sent = writes(raw);
+        let tail: Vec<u8> = sent[before..].iter().map(|packet| packet.opcode).collect();
+        assert!(
+            !tail.contains(&v3::BARRIER),
+            "pursuit must not wait for a barrier per step: {tail:?}"
+        );
+        assert!(
+            tail.iter().all(|opcode| *opcode == v3::MOUSE_MOVE),
+            "pursuit sends moves and nothing else: {tail:?}"
+        );
+        assert_eq!(
+            gdb_mouse_move_to_on_pursuit(raw, 10, 10, GdbScreen { kind: 9, arg: 0 }),
+            i32::from(ErrorCode::Invalid.as_u8()),
+            "an unknown anchor is refused before anything is sent"
+        );
+        gdb_device_free(raw);
+    }
+
     #[test]
     fn the_last_error_is_per_thread_and_the_device_keeps_its_own() {
         let raw = open_mock();

@@ -32,6 +32,7 @@ for the handle you want and a working call.
 | raw relative move (no barrier) | `move_raw(dx, dy)` | `move_raw(dx, dy)` | `.move_raw(dx, dy)` | `MoveRaw(dx, dy)` |
 | absolute move | `move_to(x, y, opts)` | `move_to(x, y, ms)` | `.move_to(x, y, ms)` | `MoveTo(x, y, ms, p)` |
 | absolute move on a screen | `MotionOptions::with_screen` | `move_to(x, y, Screen::monitor(i))` | `.move_to(…, screen=Screen.monitor(1))` | `MoveToOn(x, y, ScreenMonitor(1), …)` |
+| absolute move in pursuit mode | `MotionOptions::pursuit()` | `move_to_on_pursuit(x, y, screen)` | `.move_to_on_pursuit(x, y, screen)` | `MoveToOnPursuit(x, y, screen)` |
 | absolute move from the monitor holding a point | `Screen::Containing(x, y)` | `Screen::containing(x, y)` | `Screen.containing(x, y)` | `ScreenContaining(x, y)` |
 | monitor layout | `platform::monitors()` | `monitors_json()` | `monitors()` | `Monitors()` |
 | path | `move_path(&[(x, y)], opts)` | `move_path({{…}}, ms)` | `.move_path([(x, y)], ms)` | `MovePath([][2]int32, ms, p)` |
@@ -217,7 +218,10 @@ is read, whatever is left is sent, and no barrier waits for each step, so a
 pointer that reports quickly is followed at the device's rate. `duration_ms` and
 the human profile are ignored. A movement that has finished cannot be retargeted,
 so a caller following a stream of targets starts the next movement when
-`Movement::is_finished()` turns true.
+`Movement::is_finished()` turns true. Over the C ABI it is
+`gdb_mouse_move_to_on_pursuit(device, x, y, screen)` (`mouse.move_to_on_pursuit`
+in C++ and Python, `Mouse.MoveToOnPursuit` in Go): it takes the anchor and nothing
+else, because the mode ignores both the duration and the profile.
 
 Rust shapes:
 
@@ -853,6 +857,8 @@ reader on the IN endpoint would break the sequence numbers of both sessions.
 
 ```c
 uint32_t    gdb_abi_version(void);
+int32_t     gdb_abi_version_full(uint32_t *major, uint32_t *minor);
+char       *gdb_capabilities(void);
 const char *gdb_version(void);
 int32_t     gdb_last_error(char *buffer, size_t capacity);
 int32_t     gdb_device_last_error(const gdb_device *device, char *buffer, size_t capacity);
@@ -860,8 +866,40 @@ void        gdb_string_free(char *text);
 ```
 
 The header is the authority on the minor revision, `GDB_ABI_VERSION_MINOR`;
-`gdb::abi_minor_version()` and `gdb.ABIMinor` read the same number. Every revision
-is additive — no existing symbol changes shape.
+`gdb::abi_minor_version()` and `gdb.ABIMinor` read the same number, and the
+library answers the pair it implements through `gdb_abi_version_full`. Every
+revision is additive — no existing symbol changes shape.
+
+| | Version | Capabilities |
+| --- | --- | --- |
+| Rust | `gdb::abi_minor_version()` (compile time) | — |
+| C ABI | `gdb_abi_version_full(&major, &minor)` | `gdb_capabilities()` |
+| C++ | `abi_versions()` | `capabilities()` |
+| Python | `abi_versions()` | `capabilities()` |
+| Go | `LibraryABIVersions()` | `Capabilities()` |
+
+`gdb_abi_version_full` returns `Invalid` and writes neither slot when one of the
+out pointers is NULL. `gdb_abi_version()` keeps answering the major alone, so
+the call that existed before still means what it meant.
+
+### Capabilities
+
+`gdb_capabilities()` is one JSON object of booleans, read once after the library
+loads:
+
+```json
+{"click_timed":true,"click_at_on":true,"window_metrics":true,
+ "window_client_screen":true,"pursuit":true,"move_report":true,
+ "event_json":true,"scheduler":true,"broker":true,"replay":false,"flash":false}
+```
+
+A revision number says the symbols may be there; this says whether the ability
+behind them is. `window_metrics` and `window_client_screen` are false off
+Windows, `broker` is false off Windows too (named pipes), and `replay` and
+`flash` are false everywhere: they are Rust-only and a binding over `gdb.dll`
+cannot reach them. A host that finds a `false` it needs links the Rust crate
+instead of waiting for a symbol.
+
 | Handle | Opened by | Carries |
 | --- | --- | --- |
 | `gdb_device` | `gdb_open`, `gdb_open_mock`, `gdb_open_shared`, `gdb_open_mock_shared` | session, typed input, queries, errors, logging, `gdb_command`, `gdb_move_raw`, scheduler, metrics |

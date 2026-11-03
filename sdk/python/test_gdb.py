@@ -19,6 +19,22 @@ class DeviceTests(unittest.TestCase):
     def test_abi_and_version(self):
         self.assertEqual(gdb.LIBRARY.gdb_abi_version(), gdb.ABI_VERSION)
         self.assertEqual(gdb.LIBRARY.gdb_version(), b"0.1.0")
+        self.assertEqual(gdb.abi_versions(), (gdb.ABI_VERSION, gdb.ABI_VERSION_MINOR))
+
+    def test_the_capability_list_describes_this_build(self):
+        listed = gdb.capabilities()
+        self.assertEqual(
+            set(listed),
+            {"click_timed", "click_at_on", "window_metrics", "window_client_screen",
+             "pursuit", "move_report", "event_json", "scheduler", "broker", "replay",
+             "flash"},
+        )
+        for name, value in listed.items():
+            self.assertIsInstance(value, bool, name)
+        for name in ("click_timed", "pursuit", "scheduler", "broker"):
+            self.assertTrue(listed[name], name)
+        self.assertFalse(listed["replay"], "replay has no C symbol")
+        self.assertFalse(listed["flash"], "flash has no C symbol")
 
     def test_shared_open_reports_the_stolen_frames(self):
         with gdb.Device.open_mock(shared=True) as device:
@@ -92,6 +108,7 @@ class DeviceTests(unittest.TestCase):
         with gdb.Device.open_mock() as device:
             device.mouse.move_by(120, -80, duration_ms=20)
             device.mouse.move_path([(10, 10), (20, 20)], duration_ms=10)
+            device.mouse.move_to_on_pursuit(1400, 300, gdb.Screen.primary)
             device.mouse.button(gdb.Button.LEFT, True)
             device.mouse.button(gdb.Button.LEFT, False)
             device.mouse.click(gdb.Button.RIGHT, 2)

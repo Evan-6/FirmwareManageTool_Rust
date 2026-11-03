@@ -305,6 +305,8 @@ var (
 	procDeviceLastError *syscall.LazyProc
 	procVersion        *syscall.LazyProc
 	procABIVersion     *syscall.LazyProc
+	procABIVersionFull *syscall.LazyProc
+	procCapabilities   *syscall.LazyProc
 	procStringFree     *syscall.LazyProc
 	procSetLogLevel    *syscall.LazyProc
 	procSetLogSink     *syscall.LazyProc
@@ -337,6 +339,7 @@ var (
 	procMoveToOn       *syscall.LazyProc
 	procMovePathOn     *syscall.LazyProc
 	procStartMoveToOn  *syscall.LazyProc
+	procMoveToOnPursuit *syscall.LazyProc
 	procMetricsGet     *syscall.LazyProc
 	procMetricsReset   *syscall.LazyProc
 	procMetricsClamps  *syscall.LazyProc
@@ -424,6 +427,8 @@ func library() *syscall.LazyDLL {
 		procDeviceLastError = dll.NewProc("gdb_device_last_error")
 		procVersion = dll.NewProc("gdb_version")
 		procABIVersion = dll.NewProc("gdb_abi_version")
+		procABIVersionFull = dll.NewProc("gdb_abi_version_full")
+		procCapabilities = dll.NewProc("gdb_capabilities")
 		procStringFree = dll.NewProc("gdb_string_free")
 		procSetLogLevel = dll.NewProc("gdb_set_log_level")
 		procSetLogSink = dll.NewProc("gdb_set_log_sink")
@@ -456,6 +461,7 @@ func library() *syscall.LazyDLL {
 		procMoveToOn = dll.NewProc("gdb_mouse_move_to_on")
 		procMovePathOn = dll.NewProc("gdb_mouse_move_path_on")
 		procStartMoveToOn = dll.NewProc("gdb_mouse_start_move_to_on")
+		procMoveToOnPursuit = dll.NewProc("gdb_mouse_move_to_on_pursuit")
 		procMetricsGet = dll.NewProc("gdb_metrics_get")
 		procMetricsReset = dll.NewProc("gdb_metrics_reset")
 		procMetricsClamps = dll.NewProc("gdb_metrics_clamps")
@@ -647,6 +653,30 @@ func LibraryABIVersion() uint32 {
 	library()
 	value, _, _ := procABIVersion.Call()
 	return uint32(value)
+}
+
+// LibraryABIVersions is the major and the minor the loaded library implements,
+// so a host can compare the minor against ABIMinor before it calls a symbol the
+// binding assumes. A library older than this binding answers a smaller minor;
+// one from the future a larger.
+func LibraryABIVersions() (major, minor uint32) {
+	library()
+	majorValue, minorValue := uint32(0), uint32(0)
+	procABIVersionFull.Call(
+		uintptr(unsafe.Pointer(&majorValue)),
+		uintptr(unsafe.Pointer(&minorValue)),
+	)
+	return majorValue, minorValue
+}
+
+// Capabilities is what the loaded library can do, as the ABI's JSON object of
+// booleans: click_timed, click_at_on, window_metrics, window_client_screen,
+// pursuit, move_report, event_json, scheduler, broker, replay and flash. A false
+// is a capability with no C symbol or one this platform does not have.
+func Capabilities() (string, error) {
+	library()
+	pointer, _, _ := procCapabilities.Call()
+	return take(pointer)
 }
 
 // Open connects to the first device matching selector (serial or HID path).
@@ -1577,6 +1607,21 @@ func (m *Mouse) StartMoveToOn(x, y int32, screen Screen, durationMs uint32, prof
 		uintptr(unsafe.Pointer(prof)),
 	)
 	return newMovement(pointer)
+}
+
+// MoveToOnPursuit moves to x, y on `screen` by chasing the pointer directly: no
+// planned trajectory and no barrier per step, so the device's own report rate
+// sets the speed. This is the mode for a caller that retargets every frame.
+// Same clamping and error codes as MoveToOn.
+func (m *Mouse) MoveToOnPursuit(x, y int32, screen Screen) error {
+	raw := screen.raw()
+	code, _, _ := procMoveToOnPursuit.Call(
+		m.device.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&raw)),
+	)
+	return check(code)
 }
 
 // MovePath visits each point in order.

@@ -45,6 +45,8 @@ __all__ = [
     "monitors",
     "window_metrics",
     "prepare_platform",
+    "abi_versions",
+    "capabilities",
     "LIBRARY",
 ]
 
@@ -194,6 +196,10 @@ LIBRARY = _load()
 
 _D = LIBRARY
 _D.gdb_abi_version.restype = c_uint32
+_D.gdb_abi_version_full.argtypes = [POINTER(c_uint32), POINTER(c_uint32)]
+_D.gdb_abi_version_full.restype = c_int32
+_D.gdb_capabilities.argtypes = []
+_D.gdb_capabilities.restype = c_void_p
 _D.gdb_version.restype = c_char_p
 _D.gdb_last_error.argtypes = [c_char_p, c_size_t]
 _D.gdb_last_error.restype = c_int32
@@ -338,6 +344,8 @@ _D.gdb_mouse_move_path_on.argtypes = [c_void_p, POINTER(_Point), c_size_t, _Scre
 _D.gdb_mouse_move_path_on.restype = c_int32
 _D.gdb_mouse_start_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_start_move_to_on.restype = c_void_p
+_D.gdb_mouse_move_to_on_pursuit.argtypes = [c_void_p, c_int32, c_int32, _Screen]
+_D.gdb_mouse_move_to_on_pursuit.restype = c_int32
 _D.gdb_mouse_move_to.restype = c_int32
 _D.gdb_mouse_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_path.restype = c_int32
@@ -617,6 +625,12 @@ class Mouse:
             _check(_D.gdb_mouse_move_path(self._handle(), array, count, duration_ms, _profile_pointer(profile)))
             return
         _check(_D.gdb_mouse_move_path_on(self._handle(), array, count, screen._raw(), duration_ms, _profile_pointer(profile)))
+
+    def move_to_on_pursuit(self, x: int, y: int, screen: Screen) -> None:
+        """Chases the pointer to ``(x, y)`` on ``screen`` with no planned
+        trajectory and no barrier per step: the device's own report rate sets
+        the speed, which is the mode for a caller that retargets every frame."""
+        _check(_D.gdb_mouse_move_to_on_pursuit(self._handle(), x, y, screen._raw()))
 
     def start_move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> Movement:
         pointer = _D.gdb_mouse_start_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile))
@@ -1179,6 +1193,24 @@ def prepare_platform() -> dict:
     and safe beside an open device. Every ``Device.open*`` already calls it.
     """
     return _take(_D.gdb_platform_prepare())
+
+
+def abi_versions() -> tuple[int, int]:
+    """The major and the minor the loaded library implements, at run time."""
+    major, minor = c_uint32(), c_uint32()
+    _check(_D.gdb_abi_version_full(byref(major), byref(minor)))
+    return major.value, minor.value
+
+
+def capabilities() -> dict:
+    """What the loaded library can do, as a dict of booleans.
+
+    Keys: ``click_timed``, ``click_at_on``, ``window_metrics``,
+    ``window_client_screen``, ``pursuit``, ``move_report``, ``event_json``,
+    ``scheduler``, ``broker``, ``replay``, ``flash``. A false is a capability
+    with no C symbol, or one this platform does not have.
+    """
+    return _take(_D.gdb_capabilities())
 
 
 class Observer:
