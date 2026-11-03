@@ -174,12 +174,19 @@ pub(crate) fn run_path(
     options: &MotionOptions,
     shared: &MovementShared,
 ) -> Result<()> {
-    device.track((|| {
-        for point in points {
-            run_move_to(device, point.0, point.1, options, shared)?;
-        }
-        Ok(())
-    })())
+    device.track(path_segments(device, points, options, shared))
+}
+
+fn path_segments(
+    device: &Device,
+    points: &[(i32, i32)],
+    options: &MotionOptions,
+    shared: &MovementShared,
+) -> Result<()> {
+    for point in points {
+        run_move_to(device, point.0, point.1, options, shared)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn run_move_by(
