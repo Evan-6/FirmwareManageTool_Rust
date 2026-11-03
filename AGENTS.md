@@ -34,6 +34,7 @@ cargo test  --workspace --exclude firmware-manage-tool-app --all-targets
 python scripts/sync-input-protocol.py --check
 python scripts/check-clients.py
 python scripts/check-bindings.py
+python scripts/check-docs.py
 bash scripts/check-sdk.sh
 node scripts/check-ipc.mjs
 npm --prefix ui ci && npm --prefix ui run build      # required before src-tauri builds
@@ -61,7 +62,10 @@ Host commands never pass `--target`: `target/debug` and `target/release` are it.
   exported symbols as the list and fails when C++, Python or Go has no name for a
   symbol, for a field of a struct passed by pointer, or for an anchor
   constructor; a binding that compiles but lacks the symbol fails only at run
-  time in that one language.
+  time in that one language. `python scripts/check-docs.py` checks the other
+  direction: the covered table, `API.md` and the capability JSON must name
+  exactly the symbols the library exports, so a document cannot promise a call
+  that is not there or hide one that is.
 - Documents describe the current state only. No changelogs, no migration notes,
   no "previously we…" — git holds the history.
 - Chinese for user-facing text and comments, English for SDK docs and API names.

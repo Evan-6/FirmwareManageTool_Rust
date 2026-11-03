@@ -25,6 +25,7 @@ cargo clippy --manifest-path firmware/app/Cargo.toml --target thumbv6m-none-eabi
 python scripts/sync-input-protocol.py --check
 python scripts/check-clients.py
 python scripts/check-bindings.py
+python scripts/check-docs.py
 bash scripts/check-sdk.sh
 node scripts/check-ipc.mjs
 echo "preflight ok"

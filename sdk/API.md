@@ -1036,6 +1036,11 @@ connecting, 2 connected, 3 error), `2` error (`code` = `gdb_error`, `message` se
 `gdb_ease`, `gdb_event_kind`, `gdb_connection_state`. Strings the library returns
 are freed with `gdb_string_free`, packets with `gdb_packet_free`.
 
+```c
+int32_t gdb_set_event_handler(gdb_device *device, gdb_event_fn func, void *user);
+int32_t gdb_set_event_handler_json(gdb_device *device, gdb_event_json_fn func, void *user);
+```
+
 `gdb_set_event_handler_json` delivers the same events as one JSON object per
 call, with the structure the tuple only implies:
 

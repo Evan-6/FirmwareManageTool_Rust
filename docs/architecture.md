@@ -53,10 +53,11 @@ watchdog、LED。佇列深度、租約、位移上限這些容量與時序數字
 | --- | --- |
 | `node scripts/check-ipc.mjs` | IPC 契約：以 `generate_handler![…]` 與 `enum UiEvent` 為真相，雙向比對 `ui/src/lib/ipc.ts`／`types.ts` |
 | `python scripts/sync-input-protocol.py --check`、`python scripts/check-clients.py` | 協議常數與生成的客戶端沒有走鐘 |
-| `python scripts/check-bindings.py` | C ABI 表面：以 `gdb.h` 與實際匯出的符號為清單，雙向比對三個綁定的名字、ABI minor 與 by-pointer struct 的欄位（`gdb_metrics`、`gdb_clamps`、`gdb_move_report`） |
+| `python scripts/check-bindings.py` | C ABI 表面：以 `gdb.h` 與實際匯出的符號為清單，雙向比對三個綁定的名字、ABI minor 與 by-pointer struct 的欄位（`gdb_metrics`、`gdb_clamps`、`gdb_move_report`、`gdb_flash_stats`、`gdb_replay_outcome`） |
+| `python scripts/check-docs.py` | 文件與符號一致：README 的「What is covered」表格、`API.md` 與 `gdb.h`／`API.md` 的能力 JSON 都要和實際匯出的符號與 `gdb_capabilities` 的字面值相符 |
 | `bash scripts/check-sdk.sh` | SDK 端到端：Rust、C++、Python、（找得到就）Go，全部對著同一份 `gdb.dll` |
 
-四者都掛在 `scripts/preflight.sh` 裡，連同前端建置、fmt、clippy、workspace 測試與韌體
+五者都掛在 `scripts/preflight.sh` 裡，連同前端建置、fmt、clippy、workspace 測試與韌體
 測試一起跑。任何一項紅燈都算沒完成。
 
 ## 建置產物
