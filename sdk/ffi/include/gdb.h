@@ -115,7 +115,7 @@ const char *gdb_version(void);
 
 /* What this build can do, as a JSON object of booleans:
      {"click_timed":true,"click_at_on":true,"window_metrics":true,
-      "window_client_screen":true,"pursuit":true,"move_report":false,
+      "window_client_screen":true,"pursuit":true,"move_report":true,
       "event_json":false,"scheduler":true,"broker":true,"replay":false,
       "flash":false}
    A host reads it once, after loading the library, to learn which of the
@@ -311,6 +311,24 @@ int32_t gdb_mouse_click_at_on(gdb_device *device, int32_t x, int32_t y, gdb_scre
    retargets every frame; the device's report rate sets the speed, and the same
    clamping and error codes as gdb_mouse_move_to_on apply. */
 int32_t gdb_mouse_move_to_on_pursuit(gdb_device *device, int32_t x, int32_t y, gdb_screen screen);
+
+/* Where an absolute move was asked to go, where the pointer was measured when it
+   finished, whether the anchor pulled the point back, and how long it took.
+   applied_* is a measurement taken after the move converged, not the requested
+   point echoed back; the four coordinates are virtual-desktop pixels. */
+typedef struct gdb_move_report {
+    int32_t requested_x;
+    int32_t requested_y;
+    int32_t applied_x;
+    int32_t applied_y;
+    bool clamped;          /* the anchor rectangle pulled the destination inside it */
+    uint64_t elapsed_us;   /* wall time of the move, from first read to last */
+} gdb_move_report;
+
+/* The move gdb_mouse_move_to_on makes, plus the report. out must not be NULL
+   (GDB_INVALID) and is untouched when the call fails. GDB_UNSUPPORTED where the
+   platform cannot report the pointer: the numbers are never invented. */
+int32_t gdb_mouse_move_to_on_report(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile, gdb_move_report *out);
 
 /* Every monitor, in exactly the order kind 1 indexes them:
  *   [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, ...]
@@ -519,7 +537,8 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// anchor, the clamp counters and the separate anchor error codes, 9 the
     /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
     /// gdb_window_metrics, gdb_platform_prepare, gdb_device_last_error,
-    /// gdb_abi_version_full, gdb_capabilities and the pursuit move.
+    /// gdb_abi_version_full, gdb_capabilities, the pursuit move and
+    /// gdb_mouse_move_to_on_report.
 #define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;

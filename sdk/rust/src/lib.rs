@@ -37,7 +37,7 @@ pub use keyboard::{ChordConfig, KeyStroke, TypeTextConfig};
 pub use log::Level;
 pub use manager::{DeviceEntry, Manager};
 pub use metrics::MetricsSnapshot;
-pub use motion::{MotionOptions, Movement};
+pub use motion::{MotionOptions, MoveReport, Movement};
 pub use mouse::Button;
 pub use probe::{Observer, Probe, ProbeEvent};
 pub use replay::{Recorder, Recording};

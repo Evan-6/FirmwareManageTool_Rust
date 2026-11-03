@@ -117,6 +117,13 @@ def binding_block(language, type_name):
 STRUCTS = {
     "gdb_metrics": {"python": "Metrics", "go": "Metrics", "cpp": "Metrics"},
     "gdb_clamps": {"python": "Clamps", "go": "Clamps", "cpp": "Clamps"},
+    "gdb_move_report": {
+        # The Python binding hands the caller a frozen dataclass and keeps the
+        # ctypes mirror private, so the layout check looks at that struct.
+        "python": "_MoveReport",
+        "go": "MoveReport",
+        "cpp": "MoveReport",
+    },
 }
 
 # Capabilities that are not one symbol each: a constructor or a method name has

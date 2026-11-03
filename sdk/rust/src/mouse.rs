@@ -2,7 +2,7 @@
 
 use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::motion::{MotionOptions, Movement, run_move_by, run_move_to};
+use crate::motion::{MotionOptions, MoveReport, Movement, run_move_by, run_move_to};
 use gdb_motion::{Rng, SplitMix64, lognormal};
 use input_protocol::v3::Command;
 
@@ -65,6 +65,25 @@ impl Mouse {
     pub fn move_to(&self, x: i32, y: i32, options: MotionOptions) -> Result<()> {
         let shared = crate::motion::MovementShared::default();
         run_move_to(&self.device, x, y, &options, &shared)
+    }
+
+    /// An absolute move that also reports where the pointer ended.
+    ///
+    /// The same move [`Mouse::move_to`] makes, clamped into its anchor and
+    /// driven by the same feedback loop, followed by one read of the pointer: the
+    /// answer says what was asked for, where the pointer was measured, whether
+    /// the anchor had to pull the point back, and how long it took. On a
+    /// platform that cannot report the pointer the move fails with `Unsupported`
+    /// rather than inventing numbers.
+    pub fn move_to_report(&self, x: i32, y: i32, options: MotionOptions) -> Result<MoveReport> {
+        let shared = crate::motion::MovementShared::default();
+        self.device.track(crate::motion::run_move_to_report(
+            &self.device,
+            x,
+            y,
+            &options,
+            &shared,
+        ))
     }
 
     /// Starts an absolute move on a worker thread so the caller can retarget or

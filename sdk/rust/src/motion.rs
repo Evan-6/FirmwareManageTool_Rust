@@ -6,6 +6,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::platform;
 use gdb_motion::{HumanProfile, Node, Screen as ScreenSize, SplitMix64, trajectory_with};
 use input_protocol::pointer::{RelativeTracker, Step};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -220,6 +221,80 @@ fn move_chunks(
     Ok(())
 }
 
+/// Where an absolute move was asked to go, where it aimed, and where the pointer
+/// actually ended up.
+///
+/// An absolute move is clamped into its anchor and then converges, so a
+/// destination outside the anchor still "succeeds" and the click still lands
+/// inside the window. These numbers are the honest account of that: `applied_*`
+/// is the measured pointer after the move, `clamped` says the SDK had to pull
+/// the requested point into the rectangle first, and the two differ when the
+/// anchor was the wrong one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveReport {
+    pub requested_x: i32,
+    pub requested_y: i32,
+    /// Where the pointer was measured when the move finished. On a platform
+    /// that cannot report it the move fails with `Unsupported` instead.
+    pub applied_x: i32,
+    pub applied_y: i32,
+    /// True when the requested point lay outside the anchor rectangle and the
+    /// move aimed at the nearest point inside it.
+    pub clamped: bool,
+    /// Wall time the move took, from the first read of the pointer to the last.
+    pub elapsed_us: u64,
+}
+
+impl MoveReport {
+    /// How far the pointer ended from where the caller asked, in pixels.
+    pub fn error_px(&self) -> i32 {
+        (self.applied_x - self.requested_x)
+            .abs()
+            .max((self.applied_y - self.requested_y).abs())
+    }
+}
+
+/// [`run_move_to_with`], plus the measured landing.
+pub(crate) fn run_move_to_report(
+    device: &Device,
+    x: i32,
+    y: i32,
+    options: &MotionOptions,
+    shared: &MovementShared,
+) -> Result<MoveReport> {
+    run_move_to_report_with(device, probe, x, y, options, shared)
+}
+
+/// The report with the pointer source injected, so a test can drive a move on a
+/// desktop the mock does not have.
+pub(crate) fn run_move_to_report_with(
+    device: &Device,
+    probe: TargetProbe,
+    x: i32,
+    y: i32,
+    options: &MotionOptions,
+    shared: &MovementShared,
+) -> Result<MoveReport> {
+    let started = Instant::now();
+    let aimed = run_move_to_with(device, probe, x, y, options, shared)?;
+    let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    // The landing is measured, never assumed: the same read the feedback loop
+    // uses, after it converged. A host that cannot report the pointer has
+    // already failed the move above with `Unsupported`.
+    let landed = probe(device, options.screen)
+        .map_err(|error| Error::unsupported(format!("cannot measure the landing: {error}")))?
+        .cursor;
+    Ok(MoveReport {
+        requested_x: x,
+        requested_y: y,
+        applied_x: landed.0,
+        applied_y: landed.1,
+        clamped: aimed != (x, y),
+        elapsed_us,
+    })
+}
+
 /// Where the OS is asked for the pointer and the monitor layout. The mock device
 /// answers from its simulated pointer, and tests replace it to start a move on a
 /// monitor the mock does not really have.
@@ -273,10 +348,12 @@ pub(crate) fn run_move_to(
     options: &MotionOptions,
     shared: &MovementShared,
 ) -> Result<()> {
-    device.track(run_move_to_with(device, probe, x, y, options, shared))
+    device.track(run_move_to_with(device, probe, x, y, options, shared).map(|_aim| ()))
 }
 
-/// The absolute move with the pointer source injected.
+/// The absolute move with the pointer source injected. Returns the point the
+/// move finally aimed at, which is the caller's point clamped into the anchor
+/// (and the last retarget, when there was one).
 pub(crate) fn run_move_to_with(
     device: &Device,
     probe: TargetProbe,
@@ -284,7 +361,7 @@ pub(crate) fn run_move_to_with(
     y: i32,
     options: &MotionOptions,
     shared: &MovementShared,
-) -> Result<()> {
+) -> Result<(i32, i32)> {
     platform::enable_dpi_awareness();
     let screen = options.screen;
     let target = probe(device, screen)?;
@@ -336,7 +413,7 @@ pub(crate) fn run_move_to_with(
             deadline = started + trajectory_span(&nodes) + STALL;
         }
         let Some(node) = nodes.get(index).copied() else {
-            return Ok(());
+            return Ok(aim);
         };
         let elapsed = started.elapsed();
         let node_at = Duration::from_millis(node.at_ms);
@@ -379,7 +456,7 @@ pub(crate) fn run_move_to_with(
             Step::Arrived => {
                 if index + 1 == nodes.len() {
                     device.barrier()?;
-                    return Ok(());
+                    return Ok(aim);
                 }
                 index += 1;
             }
@@ -399,14 +476,14 @@ pub(crate) fn run_move_to_with(
 /// and no barrier per step, so a pointer that reports its position quickly is
 /// followed at the rate of the device. Retargeting replaces the aim and the
 /// deadline; only a pointer that stops closing the gap fails.
-fn pursue(
+pub(crate) fn pursue(
     device: &Device,
     probe: TargetProbe,
     target: platform::Target,
     mut aim: (i32, i32),
     screen: platform::Screen,
     shared: &MovementShared,
-) -> Result<()> {
+) -> Result<(i32, i32)> {
     let started = Instant::now();
     let mut tracker = RelativeTracker::with_tick(Duration::from_millis(1));
     let mut best = gap(target.cursor, aim);
@@ -446,7 +523,7 @@ fn pursue(
             }
         }
         match tracker.step(cursor, aim, Instant::now()) {
-            Step::Arrived => return Ok(()),
+            Step::Arrived => return Ok(aim),
             Step::Wait => thread::sleep(Duration::from_millis(1)),
             Step::Move(dx, dy) => device.send_mouse_move(dx as i16, dy as i16)?,
         }
@@ -663,6 +740,45 @@ mod tests {
             failure.message.contains(" ms"),
             "the timeout must say how long it waited: {failure}"
         );
+    }
+
+    #[test]
+    fn a_move_report_measures_the_landing_and_names_a_clamp() {
+        let device = mock();
+        // The anchor is the right-hand rect; (500, 300) is on the left screen,
+        // so the move is pulled to the anchor's edge and still converges.
+        let shared = MovementShared::default();
+        let report = run_move_to_report_with(
+            &device,
+            two_screens,
+            500,
+            300,
+            &MotionOptions::linear(60),
+            &shared,
+        )
+        .expect("clamped move");
+        assert!(report.clamped, "{report:?}");
+        assert_eq!((report.requested_x, report.requested_y), (500, 300));
+        assert!(
+            (report.applied_x - 960).abs() <= 1 && (report.applied_y - 300).abs() <= 1,
+            "the applied point must be the measured landing: {report:?}"
+        );
+        assert_eq!(report.error_px(), 460, "{report:?}");
+        assert!(report.elapsed_us > 0, "a move takes time: {report:?}");
+
+        // A destination inside the anchor is not clamped and is reached.
+        let shared = MovementShared::default();
+        let report = run_move_to_report_with(
+            &device,
+            two_screens,
+            1400,
+            300,
+            &MotionOptions::linear(60),
+            &shared,
+        )
+        .expect("plain move");
+        assert!(!report.clamped, "{report:?}");
+        assert!(report.error_px() <= 1, "{report:?}");
     }
 
     #[test]

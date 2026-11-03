@@ -204,6 +204,39 @@ type Clamps struct {
 	AppliedY     int32
 }
 
+// MoveReport is where an absolute move was asked to go, where the pointer was
+// measured when it finished, whether the anchor pulled the point back, and how
+// long it took. Laid out field for field like gdb_move_report.
+//
+// AppliedX/AppliedY are a measurement taken after the move converged, never the
+// requested point echoed back, so the remaining error is
+// max(|AppliedX-RequestedX|, |AppliedY-RequestedY|).
+type MoveReport struct {
+	RequestedX int32
+	RequestedY int32
+	AppliedX   int32
+	AppliedY   int32
+	Clamped    bool
+	ElapsedUs  uint64
+}
+
+// ErrorPx is how far the pointer ended from where the caller asked, in pixels:
+// the larger of the two axis errors.
+func (r MoveReport) ErrorPx() int32 {
+	dx := r.AppliedX - r.RequestedX
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := r.AppliedY - r.RequestedY
+	if dy < 0 {
+		dy = -dy
+	}
+	if dy > dx {
+		return dy
+	}
+	return dx
+}
+
 // Monitor is one display, as Monitors lists them: the order ScreenMonitor
 // indexes them in, which is not the numbering Windows settings shows.
 type Monitor struct {
@@ -340,6 +373,7 @@ var (
 	procMovePathOn     *syscall.LazyProc
 	procStartMoveToOn  *syscall.LazyProc
 	procMoveToOnPursuit *syscall.LazyProc
+	procMoveToOnReport *syscall.LazyProc
 	procMetricsGet     *syscall.LazyProc
 	procMetricsReset   *syscall.LazyProc
 	procMetricsClamps  *syscall.LazyProc
@@ -462,6 +496,7 @@ func library() *syscall.LazyDLL {
 		procMovePathOn = dll.NewProc("gdb_mouse_move_path_on")
 		procStartMoveToOn = dll.NewProc("gdb_mouse_start_move_to_on")
 		procMoveToOnPursuit = dll.NewProc("gdb_mouse_move_to_on_pursuit")
+		procMoveToOnReport = dll.NewProc("gdb_mouse_move_to_on_report")
 		procMetricsGet = dll.NewProc("gdb_metrics_get")
 		procMetricsReset = dll.NewProc("gdb_metrics_reset")
 		procMetricsClamps = dll.NewProc("gdb_metrics_clamps")
@@ -1622,6 +1657,28 @@ func (m *Mouse) MoveToOnPursuit(x, y int32, screen Screen) error {
 		uintptr(unsafe.Pointer(&raw)),
 	)
 	return check(code)
+}
+
+// MoveToOnReport is MoveToOn plus where the pointer actually ended: the
+// measurement is taken after the move converged, so the remaining error is the
+// caller's to see instead of assumed. Clamped says the anchor rectangle pulled
+// the destination inside it, which is what a wrong anchor looks like.
+func (m *Mouse) MoveToOnReport(x, y int32, screen Screen, durationMs uint32, profile *Profile) (MoveReport, error) {
+	raw, prof := screen.raw(), profileArg(profile)
+	var report MoveReport
+	code, _, _ := procMoveToOnReport.Call(
+		m.device.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&raw)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(prof)),
+		uintptr(unsafe.Pointer(&report)),
+	)
+	if code != 0 {
+		return MoveReport{}, check(code)
+	}
+	return report, nil
 }
 
 // MovePath visits each point in order.

@@ -490,7 +490,7 @@ pub extern "C" fn gdb_capabilities() -> *mut c_char {
             "window_metrics": windows,
             "window_client_screen": windows,
             "pursuit": true,
-            "move_report": false,
+            "move_report": true,
             "event_json": false,
             "scheduler": true,
             "broker": windows,
@@ -1987,6 +1987,58 @@ pub extern "C" fn gdb_mouse_move_path_on(
     }))
 }
 
+/// Where an absolute move was asked to go, where the pointer was measured when
+/// it finished, whether the anchor had to pull the point back, and how long it
+/// took. Laid out as gdb.h's `gdb_move_report`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GdbMoveReport {
+    pub requested_x: i32,
+    pub requested_y: i32,
+    pub applied_x: i32,
+    pub applied_y: i32,
+    pub clamped: bool,
+    pub elapsed_us: u64,
+}
+
+/// An absolute move that also reports where the pointer ended.
+///
+/// `applied_*` is a measurement, taken after the move converged, never the
+/// requested point echoed back: a host can compute the remaining error itself.
+/// `clamped` is true when the anchor rectangle pulled the destination inside it,
+/// which is what a wrong anchor looks like. `out` must not be NULL and is
+/// untouched when the call fails; the move is `gdb_mouse_move_to_on`'s.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_move_to_on_report(
+    raw: *mut GdbDevice,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+    out: *mut GdbMoveReport,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let target = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        let options = unsafe { motion_options(duration_ms, profile) };
+        let options = MotionOptions {
+            screen: screen_from(screen.kind, screen.arg)?,
+            ..options
+        };
+        let report = handle.device.mouse().move_to_report(x, y, options)?;
+        *target = GdbMoveReport {
+            requested_x: report.requested_x,
+            requested_y: report.requested_y,
+            applied_x: report.applied_x,
+            applied_y: report.applied_y,
+            clamped: report.clamped,
+            elapsed_us: report.elapsed_us,
+        };
+        Ok(())
+    }))
+}
+
 /// An absolute move in pursuit mode: read the pointer, send what is left,
 /// repeat, with no trajectory and no barrier per step.
 ///
@@ -2611,6 +2663,83 @@ mod tests {
 
     /// The runtime revision, the capability list and the pursuit move: the three
     /// things a host reads before it trusts a symbol it has not called yet.
+    /// The move report: a measurement of where the pointer ended, and the clamp
+    /// flag that says the anchor pulled the destination back.
+    #[test]
+    fn the_move_report_is_a_measurement_not_an_echo() {
+        let raw = open_mock();
+        let mut report = GdbMoveReport {
+            requested_x: 0,
+            requested_y: 0,
+            applied_x: 0,
+            applied_y: 0,
+            clamped: true,
+            elapsed_us: 0,
+        };
+        assert_eq!(
+            gdb_mouse_move_to_on_report(
+                raw,
+                300,
+                200,
+                GdbScreen { kind: 0, arg: 0 },
+                20,
+                ptr::null(),
+                &mut report
+            ),
+            0,
+            "{}",
+            message()
+        );
+        assert_eq!((report.requested_x, report.requested_y), (300, 200));
+        assert!(
+            (report.applied_x - 300).abs() <= 1 && (report.applied_y - 200).abs() <= 1,
+            "the applied point is where the pointer was measured: {report:?}",
+        );
+        assert!(!report.clamped, "a point on the anchor is not clamped");
+        assert!(report.elapsed_us > 0, "a move takes time");
+
+        // A caller mistake is typed and the caller's struct is not touched.
+        let mut slot = GdbMoveReport {
+            requested_x: 7,
+            requested_y: 7,
+            applied_x: 7,
+            applied_y: 7,
+            clamped: true,
+            elapsed_us: 7,
+        };
+        assert_eq!(
+            gdb_mouse_move_to_on_report(
+                raw,
+                10,
+                10,
+                GdbScreen { kind: 0, arg: 0 },
+                0,
+                ptr::null(),
+                ptr::null_mut()
+            ),
+            i32::from(ErrorCode::Invalid.as_u8()),
+            "out is required"
+        );
+        assert_eq!(
+            gdb_mouse_move_to_on_report(
+                raw,
+                5000,
+                5000,
+                GdbScreen { kind: 1, arg: 1 },
+                0,
+                ptr::null(),
+                &mut slot
+            ),
+            i32::from(ErrorCode::InvalidScreen.as_u8())
+        );
+        assert_eq!(
+            (slot.applied_x, slot.elapsed_us, slot.clamped),
+            (7, 7, true),
+            "a failed move must leave the caller's struct alone"
+        );
+        gdb_device_free(raw);
+    }
+
     #[test]
     fn the_runtime_revision_and_the_capability_list_describe_this_build() {
         let mut major = 0u32;

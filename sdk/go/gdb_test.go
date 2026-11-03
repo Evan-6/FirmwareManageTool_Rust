@@ -127,6 +127,22 @@ func TestMouseAndMovement(t *testing.T) {
 	if err := mouse.ClickAtOn(300, 200, ScreenMonitor(0), Left, 1, 5, 0, 0); err != nil {
 		t.Fatal(err)
 	}
+	report, err := mouse.MoveToOnReport(420, 260, ScreenMonitor(0), 20, nil)
+	if err != nil {
+		t.Fatalf("MoveToOnReport: %v", err)
+	}
+	if report.RequestedX != 420 || report.RequestedY != 260 {
+		t.Fatalf("the report lost the request: %+v", report)
+	}
+	if report.Clamped {
+		t.Fatalf("a point on the mock screen is not clamped: %+v", report)
+	}
+	if error := report.ErrorPx(); error > 1 {
+		t.Fatalf("the move landed %d px away: %+v", error, report)
+	}
+	if report.ElapsedUs == 0 {
+		t.Fatalf("a move takes time: %+v", report)
+	}
 	if err := mouse.Wheel(120, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -607,6 +623,8 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(*Mouse, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickTimed
 	var _ func(*Mouse, int32, int32, Screen, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickAtOn
 	var _ func(*Mouse, int32, int32, Screen) error = (*Mouse).MoveToOnPursuit
+	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) (MoveReport, error) = (*Mouse).MoveToOnReport
+	var _ func(MoveReport) int32 = MoveReport.ErrorPx
 	var _ func(*Mouse, [][2]int32, Screen, uint32, *Profile) error = (*Mouse).MovePathOn
 	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) (*Movement, error) = (*Mouse).StartMoveToOn
 	var _ func() Screen = ScreenPrimary

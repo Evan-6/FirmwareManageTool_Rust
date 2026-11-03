@@ -216,6 +216,37 @@ struct Clamps {
     }
 };
 
+// Where an absolute move was asked to go, where the pointer was measured when it
+// finished, whether the anchor pulled the point back, and how long it took.
+// applied_x/applied_y are a measurement taken after the move converged, never the
+// requested point echoed back; error_px is what is left of the request.
+struct MoveReport {
+    int32_t requested_x = 0;
+    int32_t requested_y = 0;
+    int32_t applied_x = 0;
+    int32_t applied_y = 0;
+    bool clamped = false;
+    uint64_t elapsed_us = 0;
+
+    int32_t error_px() const {
+        const int32_t dx = applied_x - requested_x;
+        const int32_t dy = applied_y - requested_y;
+        return (dx < 0 ? -dx : dx) > (dy < 0 ? -dy : dy) ? (dx < 0 ? -dx : dx)
+                                                         : (dy < 0 ? -dy : dy);
+    }
+
+    static MoveReport from_raw(const gdb_move_report& raw) {
+        MoveReport report;
+        report.requested_x = raw.requested_x;
+        report.requested_y = raw.requested_y;
+        report.applied_x = raw.applied_x;
+        report.applied_y = raw.applied_y;
+        report.clamped = raw.clamped;
+        report.elapsed_us = raw.elapsed_us;
+        return report;
+    }
+};
+
 // Which rectangle an absolute move is clamped into. Coordinates stay
 // virtual-desktop physical pixels: the target is not a new origin.
 struct Screen {
@@ -384,6 +415,7 @@ struct Api {
     decltype(&gdb_platform_prepare) platform_prepare = nullptr;
     decltype(&gdb_mouse_move_to_on) mouse_move_to_on = nullptr;
     decltype(&gdb_mouse_move_to_on_pursuit) mouse_move_to_on_pursuit = nullptr;
+    decltype(&gdb_mouse_move_to_on_report) mouse_move_to_on_report = nullptr;
     decltype(&gdb_mouse_move_path_on) mouse_move_path_on = nullptr;
     decltype(&gdb_mouse_start_move_to_on) mouse_start_move_to_on = nullptr;
     decltype(&gdb_watch_start) watch_start = nullptr;
@@ -518,6 +550,7 @@ inline Api& api() {
         GDB_OPTIONAL(abi_version_full, "gdb_abi_version_full")
         GDB_OPTIONAL(capabilities, "gdb_capabilities")
         GDB_OPTIONAL(mouse_move_to_on_pursuit, "gdb_mouse_move_to_on_pursuit")
+        GDB_OPTIONAL(mouse_move_to_on_report, "gdb_mouse_move_to_on_report")
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
@@ -821,6 +854,23 @@ public:
                         "exports gdb_mouse_move_to_on_pursuit");
         }
         detail::check(api().mouse_move_to_on_pursuit(device_, x, y, screen.raw()));
+    }
+    // The same move as move_to(x, y, screen), plus where the pointer actually
+    // ended: applied_* is measured after the move converged, so the remaining
+    // error is the caller's to see instead of assumed.
+    MoveReport move_to_report(int32_t x, int32_t y, const Screen& screen,
+                              uint32_t duration_ms = 0,
+                              const Profile* profile = nullptr) {
+        if (api().mouse_move_to_on_report == nullptr) {
+            throw Error(ErrorCode::Unsupported,
+                        "this gdb.dll predates the move report; use a library that "
+                        "exports gdb_mouse_move_to_on_report");
+        }
+        auto raw_profile = detail::profile_or_default(profile);
+        gdb_move_report report{};
+        detail::check(api().mouse_move_to_on_report(device_, x, y, screen.raw(),
+                                                    duration_ms, &raw_profile, &report));
+        return MoveReport::from_raw(report);
     }
     Movement start_move_path(const std::vector<Point>& points,
                              uint32_t duration_ms = 0,

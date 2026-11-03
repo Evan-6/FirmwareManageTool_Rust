@@ -33,6 +33,7 @@ for the handle you want and a working call.
 | absolute move | `move_to(x, y, opts)` | `move_to(x, y, ms)` | `.move_to(x, y, ms)` | `MoveTo(x, y, ms, p)` |
 | absolute move on a screen | `MotionOptions::with_screen` | `move_to(x, y, Screen::monitor(i))` | `.move_to(…, screen=Screen.monitor(1))` | `MoveToOn(x, y, ScreenMonitor(1), …)` |
 | absolute move in pursuit mode | `MotionOptions::pursuit()` | `move_to_on_pursuit(x, y, screen)` | `.move_to_on_pursuit(x, y, screen)` | `MoveToOnPursuit(x, y, screen)` |
+| absolute move with its landing | `move_to_report(x, y, opts)` | `move_to_report(x, y, screen)` | `.move_to_report(…)` | `MoveToOnReport(…)` |
 | absolute move from the monitor holding a point | `Screen::Containing(x, y)` | `Screen::containing(x, y)` | `Screen.containing(x, y)` | `ScreenContaining(x, y)` |
 | monitor layout | `platform::monitors()` | `monitors_json()` | `monitors()` | `Monitors()` |
 | path | `move_path(&[(x, y)], opts)` | `move_path({{…}}, ms)` | `.move_path([(x, y)], ms)` | `MovePath([][2]int32, ms, p)` |
@@ -330,6 +331,31 @@ or on no monitor — so the caller knows to re-read the handle or fall back to a
 monitor instead of retrying a call this machine will never support. The mock
 reports one 1920×1080 screen, where `Primary`, `Monitor(0)` and `Containing`
 work. Relative moves ignore the target.
+
+### Where the pointer ended
+
+```c
+typedef struct gdb_move_report {
+    int32_t requested_x, requested_y;   /* what the caller asked for */
+    int32_t applied_x, applied_y;       /* where the pointer was measured */
+    bool clamped;                       /* the anchor pulled the request back */
+    uint64_t elapsed_us;                /* wall time of the move */
+} gdb_move_report;
+
+int32_t gdb_mouse_move_to_on_report(gdb_device *, int32_t x, int32_t y,
+                                    gdb_screen screen, uint32_t duration_ms,
+                                    const gdb_profile *, gdb_move_report *out);
+```
+
+The move is `gdb_mouse_move_to_on`'s; the report is one more read of the pointer
+after it converged. `applied_*` is that measurement, never the request echoed
+back, so `max(|applied - requested|)` is the error a caller can log — a clamped
+move still reports where it ended, and `clamped` says why it is not the request.
+`out` must not be NULL and is left untouched when the call fails. A platform
+that cannot read the pointer fails with `Unsupported` instead of inventing
+numbers. Rust is `mouse.move_to_report(x, y, options) -> MoveReport` (with
+`error_px()`), C++/Python/Go name the same call; `gdb_metrics_clamps` remains the
+counter for "how many moves were clamped", while this is the per-move answer.
 
 The trajectory duration is a floor, not a budget: the deadline moves forward every
 time the pointer closes the gap, and a move whose reports stop making progress
@@ -892,7 +918,6 @@ loads:
  "window_client_screen":true,"pursuit":true,"move_report":true,
  "event_json":true,"scheduler":true,"broker":true,"replay":false,"flash":false}
 ```
-
 A revision number says the symbols may be there; this says whether the ability
 behind them is. `window_metrics` and `window_client_screen` are false off
 Windows, `broker` is false off Windows too (named pipes), and `replay` and

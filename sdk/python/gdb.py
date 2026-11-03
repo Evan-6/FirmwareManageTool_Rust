@@ -31,6 +31,7 @@ __all__ = [
     "KeyStep",
     "Point",
     "Packet",
+    "MoveReport",
     "Movement",
     "Mouse",
     "Keyboard",
@@ -285,6 +286,38 @@ class Clamps(ctypes.Structure):
         return {name: getattr(self, name) for name, _ in self._fields_}
 
 
+class _MoveReport(ctypes.Structure):
+    """gdb_move_report, field for field."""
+    _fields_ = [
+        ("requested_x", c_int32), ("requested_y", c_int32),
+        ("applied_x", c_int32), ("applied_y", c_int32),
+        ("clamped", c_bool),
+        ("elapsed_us", c_uint64),
+    ]
+
+
+@dataclass(frozen=True)
+class MoveReport:
+    """Where an absolute move was asked to go and where the pointer ended.
+
+    ``applied_x``/``applied_y`` are a measurement taken after the move
+    converged, never the requested point echoed back; ``clamped`` says the
+    anchor rectangle pulled the destination inside it, which is what a wrong
+    anchor looks like. ``elapsed_us`` is the wall time of the move.
+    """
+
+    requested_x: int
+    requested_y: int
+    applied_x: int
+    applied_y: int
+    clamped: bool
+    elapsed_us: int
+
+    @property
+    def error_px(self) -> int:
+        return max(abs(self.applied_x - self.requested_x), abs(self.applied_y - self.requested_y))
+
+
 class Screen:
     """Which rectangle an absolute move is clamped into. Coordinates stay
     virtual-desktop physical pixels; the target is not a new origin."""
@@ -346,6 +379,8 @@ _D.gdb_mouse_start_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c
 _D.gdb_mouse_start_move_to_on.restype = c_void_p
 _D.gdb_mouse_move_to_on_pursuit.argtypes = [c_void_p, c_int32, c_int32, _Screen]
 _D.gdb_mouse_move_to_on_pursuit.restype = c_int32
+_D.gdb_mouse_move_to_on_report.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile), POINTER(_MoveReport)]
+_D.gdb_mouse_move_to_on_report.restype = c_int32
 _D.gdb_mouse_move_to.restype = c_int32
 _D.gdb_mouse_move_path.argtypes = [c_void_p, POINTER(_Point), c_size_t, c_uint32, POINTER(_Profile)]
 _D.gdb_mouse_move_path.restype = c_int32
@@ -631,6 +666,28 @@ class Mouse:
         trajectory and no barrier per step: the device's own report rate sets
         the speed, which is the mode for a caller that retargets every frame."""
         _check(_D.gdb_mouse_move_to_on_pursuit(self._handle(), x, y, screen._raw()))
+
+    def move_to_report(self, x: int, y: int, screen: Screen, duration_ms: int = 0,
+                       profile: Profile | None = None) -> MoveReport:
+        """An absolute move that also reports where the pointer ended.
+
+        ``applied_x``/``applied_y`` are measured after the move converged, so
+        the remaining error is visible instead of assumed; ``clamped`` is true
+        when the anchor rectangle pulled the destination inside it.
+        """
+        out = _MoveReport()
+        _check(_D.gdb_mouse_move_to_on_report(
+            self._handle(), x, y, screen._raw(), duration_ms,
+            _profile_pointer(profile), ctypes.byref(out),
+        ))
+        return MoveReport(
+            requested_x=out.requested_x,
+            requested_y=out.requested_y,
+            applied_x=out.applied_x,
+            applied_y=out.applied_y,
+            clamped=out.clamped,
+            elapsed_us=out.elapsed_us,
+        )
 
     def start_move_to(self, x: int, y: int, duration_ms: int = 0, profile: Profile | None = None) -> Movement:
         pointer = _D.gdb_mouse_start_move_to(self._handle(), x, y, duration_ms, _profile_pointer(profile))
