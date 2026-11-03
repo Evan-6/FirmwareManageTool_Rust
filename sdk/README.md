@@ -15,7 +15,7 @@ name translation only, so they cannot drift from the SDK — only lag it. A
 language without a binding (C#, JNI, Node, Godot) calls the same `gdb_*`
 functions directly, which is all the three bindings do.
 
-The ABI is major 1, minor 9 (`GDB_ABI_VERSION_MINOR`); `gdb_abi_version()`
+The ABI is major 1, minor 10 (`GDB_ABI_VERSION_MINOR`); `gdb_abi_version()`
 answers the major at run time, `gdb_abi_version_full()` the major and the minor,
 `gdb_capabilities()` the abilities behind them, and `gdb_version()` the SDK
 string.
@@ -27,7 +27,7 @@ string.
 | is the only one controlling the board | direct, exclusive | `gdb_open` | `Manager::open` | a reply another process takes is one `Timeout` |
 | controls the board while others may command it too | direct, shared | `gdb_open_shared` | `Device::open_shared` | a taken reply is one `Busy` naming the command, and the SDK never reopens the session on its own |
 | only displays the board's numbers while another program controls it | presence | `gdb_probe`, `gdb_probe_all`, `gdb_observer_start` | `probe::read_selector`, `probe::all`, `Observer::start` | no session and no packet, so no owner slot is taken; every command on an observer answers `Unsupported` |
-| sends input to a board another process owns | attached | `gdb_attach`, `gdb_remote_*` | `broker::Client::connect` | the broker's op set only: no absolute move, drag, typing, chord, scheduler or events |
+| sends input to a board another process owns | attached | `gdb_attach`, `gdb_remote_*` | `broker::Client::connect` | the broker's op set — including the broker-side absolute move — and no drag, typing, chord, scheduler or events |
 | runs with no hardware at all | mock | `gdb_open_mock`, `gdb_open_mock_shared`, `gdb_open_mock_layout` | `Manager::open_mock`, `Device::open_mock_shared`, `Manager::open_mock_layout` | one 1920×1080 virtual screen and a virtual cursor, unless the caller describes the desktop |
 
 The first two rows are one `gdb_device` handle; presence and attachment are their
@@ -164,7 +164,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | scheduler: submit, absolute due, every, pause, resume, cancel, wait_idle, taken errors | yes | yes (C++ has no `submit_at` or `elapsed_ms`) |
 | metrics: frame counters, latency percentiles, clamped moves | yes | yes |
 | watch: arrivals, removals, bootloader volumes | yes | yes |
-| broker client: attach, spawn, the op set, typed results | yes | yes |
+| broker client: attach, spawn, the op set, the capability query, typed results | yes | yes |
 | raw command passthrough | yes | yes |
 | logging: level, sink, `Trace` packet log | yes | yes |
 | events: state changes and errors | yes | yes |
@@ -193,6 +193,14 @@ Limits, in the order they bite:
   half stays `Recorder`.
 - **The broker's server is Rust.** A client attaches from any language, but the
   process that owns the board embeds `gdb::broker`.
+- **An attached client sends what the broker answers.** `gdb_remote_caps` is the
+  list: today the relative moves, the broker-side absolute move, buttons, wheel,
+  keys, the raw command and the queries. Absolute moves need a broker that speaks
+  wire revision 2; one from revision 1 answers `Unsupported` for them and for
+  `caps` itself, which is why a client that gets no `caps` answer assumes the
+  revision-1 set. A drag or a typing loop is several of those ops, so a caller
+  that needs them starts them one at a time instead of expecting a host-side
+  worker behind the pipe.
 - **`set_stray_hook` is Rust.** A shared handle in every other language still
   counts `stolen_frames`; it cannot hand a foreign frame on.
 - **Named pipes are Windows-only.** `Server::new`, `Client::connect` and

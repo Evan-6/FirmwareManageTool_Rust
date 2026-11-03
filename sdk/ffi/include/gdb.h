@@ -661,7 +661,8 @@ char *gdb_watch_listing(const gdb_watch *watch);
  * What an attached handle does not offer: raw HID reports, the capability scan,
  * host-side motion workers (gdb_mouse_move_to, drags, typing, chords), flashing
  * and the bootloader. Those need the collection itself, so they stay on the
- * broker's side of the pipe.
+ * broker's side of the pipe. An absolute move is offered as the broker's own
+ * operation (gdb_remote_mouse_move_to), not as a host-side worker.
  */
 
     /// The minor revision documents each additive batch: 1 the attached surface,
@@ -673,8 +674,11 @@ char *gdb_watch_listing(const gdb_watch *watch);
     /// caller-timed clicks, gdb_mouse_click_at_on, the window-client anchor,
     /// gdb_window_metrics, gdb_platform_prepare, gdb_device_last_error,
     /// gdb_abi_version_full, gdb_capabilities, the pursuit move,
-    /// gdb_mouse_move_to_on_report and gdb_set_event_handler_json.
-#define GDB_ABI_VERSION_MINOR 9u
+    /// gdb_mouse_move_to_on_report and gdb_set_event_handler_json, 10 the
+    /// caller-supplied mock layout with gdb_device_monitors_json, the flashing
+    /// and replay surfaces, the attached capability query and the attached
+    /// absolute move.
+#define GDB_ABI_VERSION_MINOR 10u
 
 typedef struct gdb_remote gdb_remote;
 
@@ -709,6 +713,25 @@ int32_t gdb_remote_mouse_move(gdb_remote* remote, int16_t dx, int16_t dy);
 int32_t gdb_remote_move_by(gdb_remote* remote, int32_t dx, int32_t dy, uint32_t duration_ms, const gdb_profile* profile);
 /* One relative move of any size: split at the +/-1024 report limit, no barrier. */
 int32_t gdb_remote_move_raw(gdb_remote* remote, int32_t dx, int32_t dy);
+
+/* The ops the broker behind this handle accepts and the wire revision it speaks:
+     {"protocol":2,"ops":["caps","info","status",…]}
+   The names are the ones the broker's op table uses. A broker that predates the
+   query answers GDB_UNSUPPORTED, and this then reports the protocol-1 op set,
+   which is what such a broker still accepts - so the call fails only when the
+   pipe does. Freed with gdb_string_free. */
+char* gdb_remote_caps(const gdb_remote* remote);
+
+/* An absolute move made by the broker, clamped into the broker's primary
+   monitor. duration_ms == 0 picks a natural duration and profile may be NULL.
+   The coordinates are the desktop the broker's board drives, not this process's:
+   the broker owns the session and reads its own pointer. A broker that predates
+   the op answers GDB_UNSUPPORTED, so read gdb_remote_caps when the version is
+   not known. */
+int32_t gdb_remote_mouse_move_to(gdb_remote* remote, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile* profile);
+/* The same move with the anchor spelled out, exactly as gdb_mouse_move_to_on
+   takes it; the rectangle is the broker's desktop. */
+int32_t gdb_remote_mouse_move_to_on(gdb_remote* remote, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile* profile);
 /* Raw HID button mask: left=1, right=2, middle=4, back=8, forward=16. */
 int32_t gdb_remote_mouse_buttons(gdb_remote* remote, uint8_t bits);
 int32_t gdb_remote_wheel(gdb_remote* remote, int32_t vertical, int32_t horizontal);

@@ -513,7 +513,7 @@ pub extern "C" fn gdb_abi_version() -> u32 {
 
 /// The minor revision this build implements. `gdb.h` carries the same number in
 /// `GDB_ABI_VERSION_MINOR`; the test below fails when they drift apart.
-const ABI_VERSION_MINOR: u32 = 9;
+const ABI_VERSION_MINOR: u32 = 10;
 
 /// The major and the minor at run time, for a host that has to know whether the
 /// library it loaded is the one its bindings were written against.
@@ -2206,6 +2206,65 @@ pub extern "C" fn gdb_remote_move_raw(raw: *mut GdbRemote, dx: i32, dy: i32) -> 
     code(guard(|| unsafe { remote(raw) }?.client.move_raw(dx, dy)))
 }
 
+/// The ops the broker behind this handle accepts and the wire revision it speaks:
+/// `{"protocol":2,"ops":["caps","info","status",…]}`.
+///
+/// A broker that predates the query answers `GDB_UNSUPPORTED`; this then reports
+/// the protocol-1 op set, which is what such a broker still accepts. Freed with
+/// gdb_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_caps(raw: *const GdbRemote) -> *mut c_char {
+    json_string(guard(|| {
+        let handle = unsafe { remote(raw) }?;
+        let caps = handle.client.caps()?;
+        serde_json::to_string(&caps).map_err(|error| Error::io(error.to_string()))
+    }))
+}
+
+/// An absolute move made by the broker, clamped into the broker's primary
+/// monitor. `duration_ms == 0` picks a natural duration; `profile` may be NULL.
+///
+/// The coordinates are the desktop the broker's board drives, not this process's:
+/// the broker owns the session and reads its own pointer. A broker that predates
+/// the op answers `GDB_UNSUPPORTED` — read `gdb_remote_caps` first if the version
+/// is not known.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_mouse_move_to(
+    raw: *mut GdbRemote,
+    x: i32,
+    y: i32,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { remote(raw) }?;
+        let options = unsafe { motion_options(duration_ms, profile) };
+        handle.client.move_to(x, y, options)
+    }))
+}
+
+/// The same absolute move with the anchor spelled out, exactly as
+/// `gdb_mouse_move_to_on` takes it: a monitor index, a window, the monitor that
+/// holds a point, or a window's client area. The rectangle is the broker's.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_remote_mouse_move_to_on(
+    raw: *mut GdbRemote,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+    duration_ms: u32,
+    profile: *const GdbProfile,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { remote(raw) }?;
+        let options = MotionOptions {
+            screen: screen_from(screen.kind, screen.arg)?,
+            ..unsafe { motion_options(duration_ms, profile) }
+        };
+        handle.client.move_to(x, y, options)
+    }))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_remote_mouse_buttons(raw: *mut GdbRemote, bits: u8) -> i32 {
     code(guard(|| unsafe { remote(raw) }?.client.mouse_buttons(bits)))
@@ -2387,22 +2446,10 @@ pub struct GdbScreen {
 
 /// 0 primary, 1 monitor (arg = index), 2 window (arg = HWND), 3 the monitor
 /// containing a point (arg = x in the high 32 bits, y in the low 32), 4 window
-/// client (arg = HWND).
+/// client (arg = HWND). The conversion lives on `Screen` so the broker's wire
+/// form and the header's struct decode identically.
 fn screen_from(kind: i32, arg: i64) -> gdb_sdk::Result<Screen> {
-    match kind {
-        0 => Ok(Screen::Primary),
-        1 => Ok(Screen::Monitor(arg as usize)),
-        2 => Ok(Screen::Window(arg as isize)),
-        3 => Ok(Screen::Containing(
-            (arg as u64 >> 32) as u32 as i32,
-            arg as u32 as i32,
-        )),
-        4 => Ok(Screen::WindowClient(arg as isize)),
-        other => Err(Error::invalid(format!(
-            "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window, \
-             3 the monitor containing a packed point, 4 a window's client area"
-        ))),
-    }
+    Screen::from_parts(kind, arg)
 }
 
 #[unsafe(no_mangle)]
@@ -3363,6 +3410,66 @@ mod tests {
 
         assert_eq!(gdb_remote_release_all(second), 0, "{}", message());
         assert_eq!(mock.held().buttons, 0, "release_all must reach the device");
+
+        // What the broker accepts: the wire revision and the op list, including
+        // the absolute move this build added.
+        let caps = json_of(gdb_remote_caps(first));
+        assert_eq!(caps["protocol"], 2, "{caps}");
+        let ops: Vec<String> = caps["ops"]
+            .as_array()
+            .expect("ops is an array")
+            .iter()
+            .map(|op| op.as_str().unwrap_or_default().to_string())
+            .collect();
+        for op in ["caps", "status", "move_to", "command", "close"] {
+            assert!(ops.contains(&op.to_string()), "{op} missing from {caps}");
+        }
+
+        // An absolute move made by the broker. The mock's pointer is wherever the
+        // moves above left it, so the check is that a second move to the same
+        // target needs no travel: it is already there.
+        assert_eq!(
+            gdb_remote_mouse_move_to(first, 1400, 300, 40, ptr::null()),
+            0,
+            "{}",
+            message()
+        );
+        let before = mock.writes().len();
+        assert_eq!(
+            gdb_remote_mouse_move_to(first, 1400, 300, 40, ptr::null()),
+            0,
+            "{}",
+            message()
+        );
+        let (dx, dy) = mock.writes()[before..]
+            .iter()
+            .filter(|packet| packet.opcode == v3::MOUSE_MOVE)
+            .fold((0i32, 0i32), |(x, y), packet| {
+                (
+                    x + i32::from(i16::from_le_bytes([packet.payload[0], packet.payload[1]])),
+                    y + i32::from(i16::from_le_bytes([packet.payload[2], packet.payload[3]])),
+                )
+            });
+        assert!(
+            dx.abs() <= 2 && dy.abs() <= 2,
+            "the second brokered move to the same point travelled ({dx}, {dy})"
+        );
+
+        // The anchor travels too: a monitor index the broker's desktop does not
+        // report is refused with the anchor code, not silently clamped.
+        assert_eq!(
+            gdb_remote_mouse_move_to_on(
+                first,
+                10,
+                10,
+                GdbScreen { kind: 1, arg: 5 },
+                20,
+                ptr::null()
+            ),
+            i32::from(ErrorCode::InvalidScreen.as_u8()),
+            "{}",
+            message()
+        );
 
         // Errors arrive as the same codes the direct calls use.
         let mut reply = GdbPacket::empty();

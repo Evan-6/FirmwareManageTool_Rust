@@ -101,6 +101,85 @@ use std::time::{Duration, Instant};
 /// Used when a caller does not name the pipe.
 pub const DEFAULT_NAME: &str = "default";
 
+/// The wire revision this build speaks. 1 is the op set a client shipped before
+/// the capability query existed; 2 adds `caps` and `move_to`.
+pub const PROTOCOL: u32 = 2;
+
+/// Every op this build's broker answers. A client reads it through `caps` instead
+/// of assuming, because a broker process may be an older build.
+pub const OPS: &[&str] = &[
+    "caps",
+    "info",
+    "status",
+    "status_ext",
+    "sessions",
+    "key",
+    "mouse_move",
+    "move_by",
+    "move_to",
+    "move_raw",
+    "mouse_buttons",
+    "wheel",
+    "barrier",
+    "release_all",
+    "command",
+    "close",
+];
+
+/// What a broker answers to `caps`, and what a client reports about it.
+///
+/// `protocol` is the wire revision and `ops` the operations that broker accepts.
+/// An older broker has no `caps` op at all and answers `Unsupported`, which is
+/// why [`Client::caps`] falls back to [`Caps::legacy`] instead of failing: a
+/// caller then knows it may send the protocol-1 set and nothing more.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caps {
+    pub protocol: u32,
+    pub ops: Vec<String>,
+}
+
+impl Caps {
+    /// What this build answers.
+    pub fn current() -> Self {
+        Self {
+            protocol: PROTOCOL,
+            ops: OPS.iter().map(|op| (*op).to_string()).collect(),
+        }
+    }
+
+    /// The op set of a broker that predates the capability query. Every op here
+    /// is one protocol 1 answered, so sending them is safe; `move_to` is not in
+    /// it, because an old broker would answer `Unsupported` rather than move.
+    pub fn legacy() -> Self {
+        Self {
+            protocol: 1,
+            ops: [
+                "info",
+                "status",
+                "status_ext",
+                "sessions",
+                "key",
+                "mouse_move",
+                "move_by",
+                "move_raw",
+                "mouse_buttons",
+                "wheel",
+                "barrier",
+                "release_all",
+                "command",
+                "close",
+            ]
+            .iter()
+            .map(|op| (*op).to_string())
+            .collect(),
+        }
+    }
+
+    pub fn supports(&self, op: &str) -> bool {
+        self.ops.iter().any(|known| known == op)
+    }
+}
+
 /// The pipe path a broker name maps to, e.g. `\\.\pipe\gdbox-default`.
 pub fn pipe_path(name: &str) -> String {
     format!(r"\\.\pipe\gdbox-{name}")
@@ -233,6 +312,30 @@ struct MoveByArgs {
     duration_ms: u32,
     #[serde(default)]
     profile: Option<gdb_motion::HumanProfile>,
+}
+
+/// An absolute move over the pipe: a coordinate, and the anchor it is clamped
+/// into. `screen` is the `gdb_screen` pair, so a caller that already speaks the
+/// C ABI sends the same numbers.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveToArgs {
+    x: i32,
+    y: i32,
+    #[serde(default)]
+    duration_ms: u32,
+    #[serde(default)]
+    profile: Option<gdb_motion::HumanProfile>,
+    #[serde(default)]
+    screen: ScreenWire,
+}
+
+#[derive(Deserialize, Default)]
+struct ScreenWire {
+    #[serde(default)]
+    kind: i32,
+    #[serde(default)]
+    arg: i64,
 }
 
 #[derive(Deserialize)]
@@ -654,6 +757,12 @@ impl Inner {
         if op == "close" {
             return Ok(Value::Null);
         }
+        // The capability query is about this server, not the device: it answers
+        // while no board has appeared yet, which is exactly when a client wants
+        // to know what it may send.
+        if op == "caps" {
+            return serde_json::to_value(Caps::current()).map_err(json_error);
+        }
         let slot = lock(&self.device);
         let device = slot
             .as_ref()
@@ -702,6 +811,17 @@ impl Inner {
                     ..MotionOptions::default()
                 };
                 device.mouse().move_by(args.dx, args.dy, options)?;
+                Ok(Value::Null)
+            }
+            "move_to" => {
+                let args: MoveToArgs = parse_args(args)?;
+                let options = MotionOptions {
+                    duration_ms: args.duration_ms,
+                    profile: args.profile.unwrap_or_default(),
+                    screen: crate::platform::Screen::from_parts(args.screen.kind, args.screen.arg)?,
+                    pursuit: false,
+                };
+                device.mouse().move_to(args.x, args.y, options)?;
                 Ok(Value::Null)
             }
             "mouse_buttons" => {
@@ -1222,6 +1342,43 @@ impl Client {
     pub fn move_raw(&self, dx: i32, dy: i32) -> Result<()> {
         self.call("move_raw", json!({"dx": dx, "dy": dy}))
             .map(|_| ())
+    }
+
+    /// The ops this broker accepts and the wire revision it speaks.
+    ///
+    /// A broker that predates the query answers `Unsupported`; the answer then is
+    /// [`Caps::legacy`], because the client knows the protocol-1 set still works
+    /// and nothing else does. So this call never fails for that reason: it tells a
+    /// caller what to send instead of letting it discover the gap one
+    /// `Unsupported` at a time.
+    pub fn caps(&self) -> Result<Caps> {
+        match self.call("caps", json!({})) {
+            Ok(value) => serde_json::from_value(value).map_err(json_error),
+            Err(error) if error.code() == ErrorCode::Unsupported => Ok(Caps::legacy()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// An absolute move made by the broker, clamped into the anchor `options`
+    /// carries.
+    ///
+    /// The coordinates are the broker's desktop, not this process's: the broker
+    /// owns the board and reads its own pointer, so a client on another machine's
+    /// session still aims at the screen the game is on. An older broker answers
+    /// `Unsupported`; check [`Client::caps`] before relying on it.
+    pub fn move_to(&self, x: i32, y: i32, options: MotionOptions) -> Result<()> {
+        let (kind, arg) = options.screen.parts();
+        self.call(
+            "move_to",
+            json!({
+                "x": x,
+                "y": y,
+                "durationMs": options.duration_ms,
+                "profile": options.profile,
+                "screen": {"kind": kind, "arg": arg},
+            }),
+        )
+        .map(|_| ())
     }
 
     /// The raw HID button mask: left=1, right=2, middle=4, back=8, forward=16.
@@ -2137,7 +2294,7 @@ mod pipe {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandWire, DEFAULT_NAME, pipe_path, requested_name};
+    use super::{Caps, CommandWire, DEFAULT_NAME, OPS, pipe_path, requested_name};
     use input_protocol::v3::Command;
 
     fn args(line: &str) -> Vec<String> {
@@ -2196,6 +2353,39 @@ mod tests {
             let restored: Command = wire.into();
             assert_eq!(command.wire().unwrap(), restored.wire().unwrap());
         }
+    }
+
+    /// What the capability query reports: the current build's op set, and the
+    /// protocol-1 set a broker that predates the query still accepts. A client
+    /// that cannot ask must not be told `move_to` works.
+    #[test]
+    fn the_capability_set_names_what_a_broker_accepts() {
+        let current = Caps::current();
+        assert_eq!(current.protocol, 2);
+        for op in ["caps", "move_to", "status", "close"] {
+            assert!(current.supports(op), "{op} missing from {current:?}");
+        }
+        assert_eq!(current.ops.len(), OPS.len());
+
+        let legacy = Caps::legacy();
+        assert_eq!(legacy.protocol, 1);
+        assert!(
+            !legacy.supports("caps"),
+            "a protocol-1 broker has no caps op"
+        );
+        assert!(
+            !legacy.supports("move_to"),
+            "a protocol-1 broker answers Unsupported for an absolute move"
+        );
+        for op in ["status", "move_by", "command", "close"] {
+            assert!(legacy.supports(op), "{op} was answered by protocol 1");
+        }
+
+        // The JSON a client receives is the same shape either way.
+        let text = serde_json::to_string(&current).unwrap();
+        assert!(text.starts_with("{\"protocol\":2,\"ops\":["), "{text}");
+        let back: Caps = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, current);
     }
 
     /// The listener must own a spare instance, not one.

@@ -66,6 +66,8 @@ for the handle you want and a working call.
 | presence on a timer | `Observer::start` | `Observer::start` | `Observer(...)` | `Observe(sel, ms)` |
 | watch the bus | `Watch::start` | `Watch::start` | `watch(fn)` | `NewWatch(ms, fn)` |
 | attach to a broker | `broker::Client::connect(name)` | `Remote::attach(name)` | `Remote.attach(name)` | `Attach(name)` |
+| what an attached broker accepts | `Client::caps()` | `caps_json()` | `remote.caps()` | `Remote.Caps()` |
+| an absolute move the broker makes | `Client::move_to(x, y, opts)` | `move_to(x, y, ms)` / `move_to(x, y, Screen, ms)` | `move_to(…, screen=…)` | `Remote.MoveTo` / `MoveToOn` |
 | start a broker if none is listening | `Client::connect_or_spawn(name, exe)` | `Remote::spawn(name)` | `Remote.spawn(name)` | `Spawn(name)` |
 | record / replay | `replay::Recorder`, `Recording`, `Reader` | `Replay::open(path)` | `Replay.open(path)` | `ReplayOpen(path)` |
 | pack an ELF, copy a UF2 | `flash::pack_elf`, `flash::write_image`, `flash::drives` | `FlashImage::pack`, `image.write`, `flash_drives_json` | `flash_pack`, `image.write`, `flash_drives` | `FlashPack`, `image.Write`, `FlashDrives` |
@@ -720,8 +722,13 @@ One process owns the device; the others drive it over `\\.\pipe\gdbox-<name>`
 
 ```rust
 pub const DEFAULT_NAME: &str = "default";
+pub const PROTOCOL: u32 = 2;                            // the wire revision this build speaks
+pub const OPS: &[&str];                                 // every op the server answers
 pub fn pipe_path(name: &str) -> String;
 pub fn run_if_requested() -> bool;                      // main() hook for --gdbox-broker
+
+pub struct Caps { pub protocol: u32, pub ops: Vec<String> }   // Client::caps()
+    // current(): this build; legacy(): what a pre-`caps` broker accepts
 
 pub enum Source { Auto, Selector(String), Device(Device) }
 pub struct Server;                                      // Server::new(name, source)
@@ -729,7 +736,7 @@ pub struct Server;                                      // Server::new(name, sou
 
 pub struct Client;                                      // Client::connect(name)
     // connect_timeout(name, wait), available(name), connect_or_spawn(name, exe),
-    // set_timeout(Duration), events(), is_closed(), close()  — and Drop closes
+    // set_timeout(Duration), caps(), events(), is_closed(), close()  — and Drop closes
 
 pub enum Event { State(ConnectionState), Error(Error), Closed }
 ```
@@ -749,6 +756,13 @@ int32_t gdb_remote_mouse_move(gdb_remote *, int16_t dx, int16_t dy);    /* must 
 int32_t gdb_remote_move_by(gdb_remote *, int32_t dx, int32_t dy, uint32_t duration_ms,
                            const gdb_profile *profile);
 int32_t gdb_remote_move_raw(gdb_remote *, int32_t dx, int32_t dy);
+/* {"protocol":2,"ops":["caps","info",…]} — what this broker accepts. */
+char   *gdb_remote_caps(const gdb_remote *);
+int32_t gdb_remote_mouse_move_to(gdb_remote *, int32_t x, int32_t y,
+                                 uint32_t duration_ms, const gdb_profile *profile);
+int32_t gdb_remote_mouse_move_to_on(gdb_remote *, int32_t x, int32_t y,
+                                    gdb_screen screen, uint32_t duration_ms,
+                                    const gdb_profile *profile);
 int32_t gdb_remote_mouse_buttons(gdb_remote *, uint8_t bits);  /* 1/2/4/8/16 */
 int32_t gdb_remote_wheel(gdb_remote *, int32_t vertical, int32_t horizontal);
 int32_t gdb_remote_barrier(gdb_remote *);
@@ -758,9 +772,12 @@ int32_t gdb_remote_command(gdb_remote *, uint8_t opcode, const uint8_t *payload,
 int32_t gdb_remote_close(gdb_remote *);
 ```
 
-An attached handle has no absolute move, `start_move_*`, drag, typing, chord,
+An attached handle has no host-side motion worker, drag, typing, chord,
 scheduler, events or metrics: each needs the collection or the process that owns
-it. Its JSON is the direct handle's JSON, so one parser serves both.
+it. Its absolute move is the broker's own — `move_to` on the broker's desktop,
+anchored on the monitor the caller names — because the pointer it converges on is
+the broker's, not this process's. Its JSON is the direct handle's JSON, so one
+parser serves both.
 
 `Server::new` creates the pipe before it returns, so an immediate `connect`
 succeeds. `Source::Auto` and `Source::Selector` retry every 500 ms until a device
@@ -772,16 +789,27 @@ unless `set_timeout` says otherwise; `connect` waits 250 ms for a busy pipe.
 
 | op | args | result |
 | --- | --- | --- |
+| `caps` | `{}` | `{protocol, ops}` — answered before a device exists |
 | `info`, `status`, `status_ext`, `sessions` | `{}` | device info, STATUS, STATUS_EXT, `[{id, leaseMs, held, flags}]` |
 | `key` | `{page?, usage, down?}` | `null` |
 | `mouse_move` | `{dx, dy}` (i16) | `null` |
 | `move_by` | `{dx, dy, durationMs?, profile?}` | `null` |
+| `move_to` | `{x, y, durationMs?, profile?, screen?}` | `null` |
 | `move_raw` | `{dx, dy}` (i32) | `null` |
 | `mouse_buttons` | `{buttons}` | `null` |
 | `wheel` | `{vertical, horizontal}` | `null` |
 | `barrier`, `release_all` | `{}` | `null` |
 | `command` | `{command: {kind, …}}` | `{packet: {opcode, flags, session, sequence, payload} \| null}` |
 | `close` | `{}` | `null`, then the server hangs up |
+
+`caps` reports the wire revision and the op names above, so a client learns what
+the broker accepts instead of assuming: a broker from before the query has no
+`caps` op and answers `code: 8`, and the client then falls back to the revision-1
+set that such a broker does answer. `screen` is the `gdb_screen` pair
+(`{kind, arg}`, primary when absent), so an absolute move can anchor on a monitor
+index, a window or a point on the broker's desktop. It is a broker-side move: the
+broker reads its own pointer and clamps into its own layout, which is why the
+coordinates are the game machine's, not the caller's.
 
 `key` defaults `page` to 7 and `down` to true, so `{"usage":4}` is a tap.
 `command.kind` is one of `open`, `close`, `heartbeat`, `status`, `barrier`,

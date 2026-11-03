@@ -114,6 +114,42 @@ pub enum Screen {
     WindowClient(isize),
 }
 
+/// The `(kind, arg)` pair the C ABI's `gdb_screen` and the broker's wire both
+/// carry, so a screen survives a language and a process boundary unchanged.
+impl Screen {
+    /// kind 0 primary, 1 monitor, 2 window, 3 the monitor holding a packed
+    /// point, 4 window client area.
+    pub fn parts(self) -> (i32, i64) {
+        match self {
+            Self::Primary => (0, 0),
+            Self::Monitor(index) => (1, index as i64),
+            Self::Window(hwnd) => (2, hwnd as i64),
+            Self::Containing(x, y) => (3, (((x as u32) as u64) << 32 | (y as u32) as u64) as i64),
+            Self::WindowClient(hwnd) => (4, hwnd as i64),
+        }
+    }
+
+    /// The screen a pair names; an unknown kind is `Invalid` rather than a
+    /// silent primary, because a destination on the wrong screen is a click in
+    /// the wrong place.
+    pub fn from_parts(kind: i32, arg: i64) -> Result<Self> {
+        match kind {
+            0 => Ok(Self::Primary),
+            1 => Ok(Self::Monitor(arg as usize)),
+            2 => Ok(Self::Window(arg as isize)),
+            3 => Ok(Self::Containing(
+                ((arg as u64) >> 32) as u32 as i32,
+                arg as u32 as i32,
+            )),
+            4 => Ok(Self::WindowClient(arg as isize)),
+            other => Err(Error::invalid(format!(
+                "unknown screen kind {other}: 0 is primary, 1 a monitor index, 2 a window, \
+                 3 the monitor containing a packed point, 4 a window's client area"
+            ))),
+        }
+    }
+}
+
 impl std::fmt::Display for Screen {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1020,6 +1056,31 @@ mod tests {
                 .code(),
             ErrorCode::StaleWindow
         );
+    }
+
+    /// A screen survives the C ABI and the broker wire as one `(kind, arg)`
+    /// pair, so the two decoders must agree, and an unknown kind must be refused
+    /// instead of silently becoming the primary monitor.
+    #[test]
+    fn a_screen_round_trips_through_its_wire_pair() {
+        let screens = [
+            Screen::Primary,
+            Screen::Monitor(3),
+            Screen::Window(0x1234),
+            Screen::WindowClient(-2),
+            Screen::Containing(-500, 300),
+            Screen::Containing(1400, -300),
+        ];
+        for screen in screens {
+            let (kind, arg) = screen.parts();
+            assert_eq!(Screen::from_parts(kind, arg).unwrap(), screen, "{screen}");
+        }
+        assert_eq!(Screen::Containing(-500, 300).parts().0, 3);
+        assert_eq!(Screen::Primary.parts(), (0, 0));
+
+        let error = Screen::from_parts(9, 0).unwrap_err();
+        assert_eq!(error.code(), ErrorCode::Invalid);
+        assert!(error.message.contains("unknown screen kind 9"), "{error}");
     }
 
     /// The two platform reads a host makes before it converts a screenshot

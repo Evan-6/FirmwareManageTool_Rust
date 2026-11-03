@@ -60,7 +60,7 @@ __all__ = [
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 9
+ABI_VERSION_MINOR = 10
 
 
 class ErrorCode:
@@ -506,6 +506,12 @@ _D.gdb_remote_move_by.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(
 _D.gdb_remote_move_by.restype = c_int32
 _D.gdb_remote_move_raw.argtypes = [c_void_p, c_int32, c_int32]
 _D.gdb_remote_move_raw.restype = c_int32
+_D.gdb_remote_caps.argtypes = [c_void_p]
+_D.gdb_remote_caps.restype = c_void_p
+_D.gdb_remote_mouse_move_to.argtypes = [c_void_p, c_int32, c_int32, c_uint32, POINTER(_Profile)]
+_D.gdb_remote_mouse_move_to.restype = c_int32
+_D.gdb_remote_mouse_move_to_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint32, POINTER(_Profile)]
+_D.gdb_remote_mouse_move_to_on.restype = c_int32
 _D.gdb_remote_mouse_buttons.argtypes = [c_void_p, c_uint8]
 _D.gdb_remote_mouse_buttons.restype = c_int32
 _D.gdb_remote_wheel.argtypes = [c_void_p, c_int32, c_int32]
@@ -1203,8 +1209,10 @@ class Remote:
             remote.barrier()
 
     The JSON accessors return exactly what :class:`Device` returns, so one parser
-    serves both. What an attached handle cannot do is what needs the collection
-    itself: absolute moves, drags, typing, chords, flashing and the bootloader.
+    serves both. An absolute move is the broker's own operation
+    (:meth:`move_to`), because the pointer it reads is the broker's; what an
+    attached handle still cannot do is what needs a host-side motion worker or the
+    collection itself: drags, typing, chords, flashing and the bootloader.
     """
 
     def __init__(self, name: str | None = None):
@@ -1257,6 +1265,35 @@ class Remote:
 
     def move_raw(self, dx: int, dy: int) -> None:
         _check(_D.gdb_remote_move_raw(self._handle(), dx, dy))
+
+    def caps(self) -> dict:
+        """The ops this broker accepts, and the wire revision it speaks.
+
+        ``{"protocol": 2, "ops": ["caps", "info", ...]}``. A broker that predates
+        the query answers ``UNSUPPORTED`` and this reports the protocol-1 op set
+        instead, because that is what such a broker still accepts.
+        """
+        return _take(_D.gdb_remote_caps(self._handle()))
+
+    def move_to(self, x: int, y: int, duration_ms: int = 0,
+                profile: Profile | None = None,
+                screen: Screen | None = None) -> None:
+        """An absolute move made by the broker, clamped into its monitor.
+
+        The coordinates are the desktop the broker's board drives, not this
+        process's: the broker owns the session and reads its own pointer. Pass
+        ``screen`` to anchor on another monitor or a window of the broker's
+        desktop; the default is its primary monitor. A broker that predates the
+        op raises ``UNSUPPORTED``, so read :meth:`caps` when the version is not
+        known.
+        """
+        if screen is None:
+            _check(_D.gdb_remote_mouse_move_to(
+                self._handle(), x, y, duration_ms, _profile_pointer(profile)))
+        else:
+            _check(_D.gdb_remote_mouse_move_to_on(
+                self._handle(), x, y, screen._raw(), duration_ms,
+                _profile_pointer(profile)))
 
     def mouse_buttons(self, bits: int) -> None:
         """Raw HID mask: left=1, right=2, middle=4, back=8, forward=16."""

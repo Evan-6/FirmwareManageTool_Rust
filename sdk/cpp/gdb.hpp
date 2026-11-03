@@ -392,6 +392,9 @@ struct Api {
     decltype(&gdb_remote_mouse_move) remote_mouse_move = nullptr;
     decltype(&gdb_remote_move_by) remote_move_by = nullptr;
     decltype(&gdb_remote_move_raw) remote_move_raw = nullptr;
+    decltype(&gdb_remote_caps) remote_caps = nullptr;
+    decltype(&gdb_remote_mouse_move_to) remote_mouse_move_to = nullptr;
+    decltype(&gdb_remote_mouse_move_to_on) remote_mouse_move_to_on = nullptr;
     decltype(&gdb_remote_mouse_buttons) remote_mouse_buttons = nullptr;
     decltype(&gdb_remote_wheel) remote_wheel = nullptr;
     decltype(&gdb_remote_barrier) remote_barrier = nullptr;
@@ -541,6 +544,9 @@ inline Api& api() {
         GDB_OPTIONAL(remote_mouse_move, "gdb_remote_mouse_move")
         GDB_OPTIONAL(remote_move_by, "gdb_remote_move_by")
         GDB_OPTIONAL(remote_move_raw, "gdb_remote_move_raw")
+        GDB_OPTIONAL(remote_caps, "gdb_remote_caps")
+        GDB_OPTIONAL(remote_mouse_move_to, "gdb_remote_mouse_move_to")
+        GDB_OPTIONAL(remote_mouse_move_to_on, "gdb_remote_mouse_move_to_on")
         GDB_OPTIONAL(remote_mouse_buttons, "gdb_remote_mouse_buttons")
         GDB_OPTIONAL(remote_wheel, "gdb_remote_wheel")
         GDB_OPTIONAL(remote_barrier, "gdb_remote_barrier")
@@ -746,6 +752,19 @@ inline void require_replay_surface() {
     throw Error(ErrorCode::Unsupported,
                 "this gdb.dll predates the replay surface; use a library that "
                 "exports gdb_replay_open");
+}
+
+// The attached capability query and the broker-side absolute move arrived
+// together; a broker older than them answers Unsupported at run time, which is a
+// different answer from a library that has no symbol for the call at all.
+inline void require_remote_move_surface() {
+    if (api().remote_caps != nullptr && api().remote_mouse_move_to != nullptr &&
+        api().remote_mouse_move_to_on != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the broker-side absolute move; use a library that "
+                "exports gdb_remote_mouse_move_to");
 }
 
 // Frees a packet's payload however the scope is left.
@@ -1051,8 +1070,10 @@ class Scheduler;
 //     remote.barrier();
 //
 // The JSON accessors return exactly what Device's return, so one parser serves
-// both. What an attached handle cannot do is what needs the collection itself:
-// absolute moves, drags, typing, chords, flashing and the bootloader.
+// both. An absolute move is the broker's own operation (move_to), because the
+// pointer it reads is the broker's; what an attached handle still cannot do is
+// what needs a host-side motion worker or the collection itself: drags, typing,
+// chords, flashing and the bootloader.
 class Remote {
 public:
     // NULL and "" both mean the default pipe.
@@ -1100,6 +1121,33 @@ public:
     }
     void move_raw(int32_t dx, int32_t dy) {
         detail::check(api().remote_move_raw(raw(), dx, dy));
+    }
+    // The ops this broker accepts and the wire revision it speaks:
+    // {"protocol":2,"ops":["caps","info",…]}. A broker that predates the query
+    // answers Unsupported, and this then reports the protocol-1 op set, because
+    // that is what such a broker still accepts.
+    std::string caps_json() const {
+        detail::require_remote_move_surface();
+        return detail::take(api().remote_caps(raw()));
+    }
+    // An absolute move made by the broker, clamped into its primary monitor. The
+    // coordinates are the desktop the broker's board drives, not this process's.
+    // A broker that predates the op answers Unsupported.
+    void move_to(int32_t x, int32_t y, uint32_t duration_ms = 0,
+                 const Profile* profile = nullptr) {
+        detail::require_remote_move_surface();
+        auto raw_profile = detail::profile_or_default(profile);
+        detail::check(api().remote_mouse_move_to(raw(), x, y, duration_ms, &raw_profile));
+    }
+    // The same move with the anchor spelled out, exactly as Device's move_to_on
+    // takes it; the rectangle is the broker's desktop.
+    void move_to(int32_t x, int32_t y, Screen screen, uint32_t duration_ms = 0,
+                 const Profile* profile = nullptr) {
+        detail::require_remote_move_surface();
+        auto raw_profile = detail::profile_or_default(profile);
+        const gdb_screen raw_screen = screen.raw();
+        detail::check(api().remote_mouse_move_to_on(raw(), x, y, raw_screen, duration_ms,
+                                                    &raw_profile));
     }
     // Raw HID mask: left=1, right=2, middle=4, back=8, forward=16.
     void mouse_buttons(uint8_t bits) {

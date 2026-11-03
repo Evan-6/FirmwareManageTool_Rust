@@ -29,7 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
-	ABIMinor   = 9
+	ABIMinor   = 10
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -443,6 +443,9 @@ var (
 	procRemoteMouseMove *syscall.LazyProc
 	procRemoteMoveBy    *syscall.LazyProc
 	procRemoteMoveRaw   *syscall.LazyProc
+	procRemoteCaps      *syscall.LazyProc
+	procRemoteMoveTo    *syscall.LazyProc
+	procRemoteMoveToOn  *syscall.LazyProc
 	procRemoteButtons   *syscall.LazyProc
 	procRemoteWheel     *syscall.LazyProc
 	procRemoteBarrier   *syscall.LazyProc
@@ -582,6 +585,9 @@ func library() *syscall.LazyDLL {
 		procRemoteMouseMove = dll.NewProc("gdb_remote_mouse_move")
 		procRemoteMoveBy = dll.NewProc("gdb_remote_move_by")
 		procRemoteMoveRaw = dll.NewProc("gdb_remote_move_raw")
+		procRemoteCaps = dll.NewProc("gdb_remote_caps")
+		procRemoteMoveTo = dll.NewProc("gdb_remote_mouse_move_to")
+		procRemoteMoveToOn = dll.NewProc("gdb_remote_mouse_move_to_on")
 		procRemoteButtons = dll.NewProc("gdb_remote_mouse_buttons")
 		procRemoteWheel = dll.NewProc("gdb_remote_wheel")
 		procRemoteBarrier = dll.NewProc("gdb_remote_barrier")
@@ -1398,8 +1404,10 @@ func (d *Device) Command(opcode uint8, payload []byte) (*Packet, error) {
 //	remote.Barrier()
 //
 // The JSON accessors return exactly what Device's return, so one parser serves
-// both. What an attached handle cannot do is what needs the collection itself:
-// absolute moves, drags, typing, chords, flashing and the bootloader.
+// both. An absolute move is the broker's own operation (MoveTo), because the
+// pointer it reads is the broker's; what an attached handle still cannot do is
+// what needs a host-side motion worker or the collection itself: drags, typing,
+// chords, flashing and the bootloader.
 type Remote struct {
 	handle uintptr
 	name   string
@@ -1509,6 +1517,47 @@ func (r *Remote) MoveBy(dx, dy int32, durationMs uint32, profile *Profile) error
 // sent with no barrier; call Barrier where a completion guarantee matters.
 func (r *Remote) MoveRaw(dx, dy int32) error {
 	code, _, _ := procRemoteMoveRaw.Call(r.handle, uintptr(intArg(dx)), uintptr(intArg(dy)))
+	return check(code)
+}
+
+// Caps is the ops this broker accepts and the wire revision it speaks. A broker
+// that predates the query answers Code Unsupported, and Caps then reports the
+// protocol-1 op set, because that is what such a broker still accepts.
+func (r *Remote) Caps() (string, error) {
+	library()
+	pointer, _, _ := procRemoteCaps.Call(r.handle)
+	return take(pointer)
+}
+
+// MoveTo asks the broker for an absolute move, clamped into its primary monitor.
+// durationMs 0 picks a natural duration and profile may be nil.
+//
+// The coordinates are the desktop the broker's board drives, not this process's:
+// the broker owns the session and reads its own pointer. A broker that predates
+// the op answers Code Unsupported, so read Caps when the version is not known.
+func (r *Remote) MoveTo(x, y int32, durationMs uint32, profile *Profile) error {
+	code, _, _ := procRemoteMoveTo.Call(
+		r.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(profileArg(profile))),
+	)
+	return check(code)
+}
+
+// MoveToOn is MoveTo with the anchor spelled out, exactly as Mouse.MoveToOn takes
+// it; the rectangle is the broker's desktop.
+func (r *Remote) MoveToOn(x, y int32, screen Screen, durationMs uint32, profile *Profile) error {
+	rawScreen := screen.raw()
+	code, _, _ := procRemoteMoveToOn.Call(
+		r.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&rawScreen)),
+		uintptr(durationMs),
+		uintptr(unsafe.Pointer(profileArg(profile))),
+	)
 	return check(code)
 }
 
