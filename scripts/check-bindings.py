@@ -12,9 +12,10 @@ Three checks, none of them need a board:
      header, and every declaration (other than a `static inline` helper) is
      exported;
   2. every exported symbol appears as a literal in all three bindings;
-  3. the layouts that are passed by pointer (`gdb_metrics`, `gdb_clamps`) carry
-     the same field names in each binding, and every capability that is not a
-     symbol (screen constructors, monitor listing, clamp readout) has a name.
+  3. the layouts that are passed by pointer (`gdb_metrics`, `gdb_clamps`,
+     `gdb_move_report`) carry the same field names in each binding, and every
+     capability that is not a symbol (screen constructors, monitor listing, clamp
+     readout) has a name.
 """
 from pathlib import Path
 import re
