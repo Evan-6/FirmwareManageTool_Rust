@@ -11,6 +11,8 @@ for the handle you want and a working call.
 | --- | --- | --- | --- | --- |
 | open by selector | `Manager::open(sel, opts)` | `Device::open(sel)` | `Device.open(sel)` | `Open(sel, …)` |
 | open the mock | `Manager::open_mock` | `Device::open_mock` | `Device.open_mock` | `OpenMock` |
+| open the mock on a desktop you describe | `Manager::open_mock_layout` | `Device::open_mock_layout(layout)` | `Device.open_mock_layout(layout)` | `OpenMockLayout(layout, …)` |
+| the monitors a handle anchors to | `device.monitors()` / `monitors_json()` | `monitors_json()` | `device.monitors()` | `device.MonitorsJSON()` |
 | open for a board others drive too | `Device::open_shared(sel, opts)` | `Device::open_shared(sel)` | `Device.open(sel, shared=True)` | `OpenShared(sel, …)` |
 | open the shared mock | `Device::open_mock_shared(opts)` | `Device::open_mock_shared()` | `Device.open_mock(shared=True)` | `OpenMockShared(…)` |
 | device list | `Manager::list` | `list_json()` | `list_devices()` | `ListJSON()` |
@@ -78,6 +80,13 @@ gdb_device *gdb_open_mock(uint32_t timeout_ms, bool auto_reconnect, bool heartbe
 gdb_device *gdb_open_shared(const char *selector, uint32_t timeout_ms,
                             bool auto_reconnect, bool heartbeat);
 gdb_device *gdb_open_mock_shared(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+
+/* A mock device on a desktop the caller describes; see "The mock desktop". */
+gdb_device *gdb_open_mock_layout(const char *json, uint32_t timeout_ms,
+                                 bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_mock_layout_shared(const char *json, uint32_t timeout_ms,
+                                        bool auto_reconnect, bool heartbeat);
+char   *gdb_device_monitors_json(const gdb_device *device);   /* JSON array */
 
 void    gdb_device_free(gdb_device *device);
 int32_t gdb_close(gdb_device *device);
@@ -330,8 +339,53 @@ monitor index is past the end or the layout changes under a running move;
 `StaleWindow` when the window handle no longer resolves — gone, minimised, empty
 or on no monitor — so the caller knows to re-read the handle or fall back to a
 monitor instead of retrying a call this machine will never support. The mock
-reports one 1920×1080 screen, where `Primary`, `Monitor(0)` and `Containing`
-work. Relative moves ignore the target.
+reports one 1920×1080 screen unless the caller describes the desktop (see below),
+and relative moves ignore the target.
+
+### The mock desktop
+
+A mock device has no display to read, so the layout it clamps into is whatever the
+caller describes:
+
+```c
+gdb_device *gdb_open_mock_layout(const char *json, uint32_t timeout_ms,
+                                 bool auto_reconnect, bool heartbeat);
+gdb_device *gdb_open_mock_layout_shared(const char *json, uint32_t timeout_ms,
+                                        bool auto_reconnect, bool heartbeat);
+char       *gdb_device_monitors_json(const gdb_device *device);
+```
+
+```json
+{"cursor": [100, 100],
+ "monitors": [{"rect": [0, 0, 1920, 1080], "dpi": 96, "primary": true},
+              {"rect": [-1280, 0, 0, 720], "dpi": 144}],
+ "windows": [{"hwnd": 4660, "rect": [-1278, -22, -30, 710],
+              "client": [-1270, 9, -38, 679]}]}
+```
+
+`rect`, `client` and the cursor are virtual-desktop pixels, half-open on
+`right`/`bottom`, exactly like a real monitor: two entries can sit edge to edge.
+`cursor` defaults to the primary monitor's top-left (`[0,0]` when none is marked
+primary), `primary` to false and `dpi` to 96, and `windows` may be left out.
+Every anchor resolves through the same code that resolves the real desktop, so
+`Primary` follows the flag, `Monitor(i)` is the `i`-th entry, `Containing(x, y)`
+finds the entry that holds the point, and `Window`/`WindowClient` use the declared
+rectangles — which is how the negative-coordinate and client-area arithmetic is
+tested with no display attached.
+
+A layout no desktop could have is `Invalid`, and the message names the entry: no
+monitors, an empty rectangle (`right` not greater than `left`), more than one
+`primary`, a window with handle 0, a duplicate handle, a client area outside its
+frame, or an unknown key. The layout is fixed for the life of the handle, and the
+pointer starts where `cursor` says, so a move's starting point is as repeatable as
+its destination.
+
+`gdb_device_monitors_json` is the layout that handle actually uses, in exactly the
+order `Monitor(i)` indexes it: the mock's own list, or the system's for a real
+board. Rust is `device.monitors()` / `device.monitors_json()` and
+`Manager::open_mock_layout` / `Device::open_mock_layout`, with `MockLayout::parse`
+for the JSON on its own.
+
 
 ### Where the pointer ended
 

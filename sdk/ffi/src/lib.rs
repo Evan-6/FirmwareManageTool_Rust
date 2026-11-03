@@ -730,6 +730,85 @@ pub extern "C" fn gdb_open_mock_shared(
     }))
 }
 
+/// The mock device on a desktop the caller describes, so the monitor arithmetic
+/// can be exercised with no display attached:
+/// `{"cursor":[x,y],"monitors":[{"rect":[l,t,r,b],"dpi":144,"primary":true}],"windows":[{"hwnd":…,"rect":[…],"client":[…]}]}`.
+///
+/// `cursor` defaults to the primary monitor's top-left, `primary` and `dpi` to
+/// false and 96, and `windows` may be left out. A layout with no monitor, an
+/// empty rectangle, more than one primary, a window anchor with handle 0 or a
+/// client area outside its frame is `GDB_INVALID` with a message naming the
+/// entry. NULL on failure, with gdb_last_error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_open_mock_layout(
+    json: *const c_char,
+    timeout_ms: u32,
+    auto_reconnect: bool,
+    heartbeat: bool,
+) -> *mut GdbDevice {
+    open_mock_layout(json, timeout_ms, auto_reconnect, heartbeat, false)
+}
+
+/// [`gdb_open_mock_layout`] for a board other programs may drive too: a taken
+/// reply is `GDB_BUSY` and the session is never reopened on its own.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_open_mock_layout_shared(
+    json: *const c_char,
+    timeout_ms: u32,
+    auto_reconnect: bool,
+    heartbeat: bool,
+) -> *mut GdbDevice {
+    open_mock_layout(json, timeout_ms, auto_reconnect, heartbeat, true)
+}
+
+fn open_mock_layout(
+    json: *const c_char,
+    timeout_ms: u32,
+    auto_reconnect: bool,
+    heartbeat: bool,
+    shared: bool,
+) -> *mut GdbDevice {
+    let json = if json.is_null() {
+        None
+    } else {
+        Some(
+            unsafe { CStr::from_ptr(json) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    };
+    pointer(guard(|| {
+        gdb_sdk::platform::enable_dpi_awareness();
+        let json = json
+            .as_deref()
+            .ok_or_else(|| Error::invalid("gdb_open_mock_layout needs the layout JSON"))?;
+        let options = DeviceOptions {
+            auto_reconnect,
+            timeout_ms: timeout_ms.max(100),
+            heartbeat,
+        };
+        let (device, handle) = Manager::open_mock_layout_with_handle(json, options)?;
+        if shared {
+            device.set_ownership(gdb_sdk::Ownership::Shared);
+        }
+        Ok(Box::new(GdbDevice {
+            device,
+            _mock: Some(handle),
+        }))
+    }))
+}
+
+/// The monitors this handle's absolute moves are anchored to, as the array
+/// `gdb_monitors_json` returns: the layout a mock device was opened with, or the
+/// system's own list for a real board. Index `i` is what a monitor anchor takes.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_device_monitors_json(raw: *const GdbDevice) -> *mut c_char {
+    json_string(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        handle.device.monitors_json()
+    }))
+}
+
 /// Frames the reply loop looked past because they answered another session or
 /// another sequence. 0 on a NULL handle, with gdb_last_error set.
 #[unsafe(no_mangle)]
@@ -2262,9 +2341,125 @@ mod tests {
         gdb_device_free(raw);
     }
 
-    /// A caller-timed click and the aim-and-click pair, over the mock: the press
-    /// length is the caller's, the button ends released, and the click lands
-    /// after the move.
+    /// A caller-supplied desktop: the monitors, the negative second screen, the
+    /// window, and the same clamping the real one does, all over the C ABI.
+    #[test]
+    fn a_mock_layout_places_the_screens_and_clamps_like_the_real_one() {
+        const LAYOUT: &str = r#"{
+            "cursor": [100, 100],
+            "monitors": [
+                {"rect": [0, 0, 1920, 1080], "dpi": 96, "primary": true},
+                {"rect": [-1280, 0, 0, 720], "dpi": 144}
+            ],
+            "windows": [
+                {"hwnd": 4660, "rect": [-1278, -22, -30, 710], "client": [-1270, 9, -38, 679]}
+            ]
+        }"#;
+        let json = c_text(LAYOUT);
+        let raw = gdb_open_mock_layout(json.as_ptr(), 1000, false, false);
+        assert!(!raw.is_null(), "{}", message());
+
+        // The layout the caller described is the layout the handle reports.
+        let monitors = json_of(gdb_device_monitors_json(raw));
+        assert_eq!(monitors[0]["primary"], true);
+        assert_eq!(monitors[1]["left"], -1280);
+        assert_eq!(monitors[1]["dpi"], 144);
+
+        // A containing anchor follows the point onto the negative screen.
+        let containing = GdbScreen {
+            kind: 3,
+            arg: (((-500i32) as u32 as u64) << 32 | (300i32 as u32 as u64)) as i64,
+        };
+        let mut report = GdbMoveReport {
+            requested_x: 0,
+            requested_y: 0,
+            applied_x: 0,
+            applied_y: 0,
+            clamped: false,
+            elapsed_us: 0,
+        };
+        assert_eq!(
+            gdb_mouse_move_to_on_report(raw, -500, 300, containing, 60, ptr::null(), &mut report),
+            0,
+            "{}",
+            message()
+        );
+        assert!(!report.clamped, "the left screen holds the point");
+        assert!(
+            (report.applied_x + 500).abs() <= 1 && (report.applied_y - 300).abs() <= 1,
+            "landed at ({}, {})",
+            report.applied_x,
+            report.applied_y
+        );
+
+        // Anchored on the primary monitor the same point is outside the rectangle,
+        // so it is clamped to the edge and the report says so.
+        let primary = GdbScreen { kind: 0, arg: 0 };
+        assert_eq!(
+            gdb_mouse_move_to_on_report(raw, -500, 300, primary, 60, ptr::null(), &mut report),
+            0,
+            "{}",
+            message()
+        );
+        assert!(
+            report.clamped,
+            "the point is on the primary monitor's left edge"
+        );
+        assert!(
+            report.applied_x.abs() <= 1 && (report.applied_y - 300).abs() <= 1,
+            "clamped to (0, 300), not ({}, {})",
+            report.applied_x,
+            report.applied_y
+        );
+
+        // The client area of the declared window, not its frame.
+        let client = GdbScreen { kind: 4, arg: 4660 };
+        assert_eq!(
+            gdb_mouse_move_to_on_report(raw, -1275, 0, client, 60, ptr::null(), &mut report),
+            0,
+            "{}",
+            message()
+        );
+        assert!(report.clamped);
+        assert!(
+            (report.applied_x + 1270).abs() <= 1 && (report.applied_y - 9).abs() <= 1,
+            "the client area's origin, not the frame's: ({}, {})",
+            report.applied_x,
+            report.applied_y
+        );
+
+        // A window the layout does not declare is stale, not a silent zero.
+        let missing = GdbScreen {
+            kind: 4,
+            arg: 0x9999,
+        };
+        assert_eq!(
+            gdb_mouse_move_to_on(raw, -600, 300, missing, 60, ptr::null()),
+            i32::from(ErrorCode::StaleWindow.as_u8())
+        );
+        assert!(
+            message().contains("declares 1 other window"),
+            "{}",
+            message()
+        );
+        gdb_device_free(raw);
+
+        // A layout no desktop could have is refused before a device exists.
+        let broken = c_text(r#"{"monitors":[{"rect":[0,0,0,720]}]}"#);
+        assert!(gdb_open_mock_layout(broken.as_ptr(), 1000, false, false).is_null());
+        assert_eq!(last_code(), i32::from(ErrorCode::Invalid.as_u8()));
+        assert!(message().contains("empty rectangle"), "{}", message());
+        assert!(gdb_open_mock_layout(ptr::null(), 1000, false, false).is_null());
+        assert_eq!(last_code(), i32::from(ErrorCode::Invalid.as_u8()));
+
+        // The shared flavour opens the same layout through the same parser.
+        let shared = gdb_open_mock_layout_shared(json.as_ptr(), 1000, false, false);
+        assert!(!shared.is_null(), "{}", message());
+        assert_eq!(gdb_device_state(shared), 2);
+        assert_eq!(json_of(gdb_device_monitors_json(shared))[1]["left"], -1280);
+        gdb_device_free(shared);
+    }
+
     #[test]
     fn a_timed_click_and_a_click_at_reach_the_mock() {
         let raw = open_mock();

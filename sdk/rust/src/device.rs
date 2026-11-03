@@ -5,6 +5,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::event::{ConnectionState, EventHandler, notify};
 use crate::log::Level;
 use crate::metrics::{Metrics, MetricsSnapshot};
+use crate::mock::MockLayout;
 use crate::session::{Session, Sharing, new_session_id};
 use crate::transport::Transport;
 use gdb_motion::{Rng, SplitMix64};
@@ -126,6 +127,10 @@ pub(crate) struct Inner {
     /// The id of the session in flight, readable without the session lock so a
     /// failure above the session can still name it.
     session_id: AtomicU32,
+    /// The desktop a mock device resolves anchors against. Fixed when the device
+    /// is opened: a layout that changed under a running move would be exactly the
+    /// bug the monitor-count check in the movement loop reports.
+    mock_layout: Option<MockLayout>,
 }
 
 #[derive(Clone)]
@@ -163,7 +168,49 @@ impl Device {
             product,
             options,
             Ownership::Exclusive,
+            None,
         )
+    }
+
+    /// A mock device over a caller's desktop: the seam that makes multi-monitor
+    /// and negative-coordinate clamping testable without a display.
+    pub(crate) fn from_transport_with_layout(
+        transport: Box<dyn Transport>,
+        target: Target,
+        serial: String,
+        product: String,
+        options: DeviceOptions,
+        layout: MockLayout,
+    ) -> Result<Self> {
+        Self::connect(
+            transport,
+            target,
+            serial,
+            product,
+            options,
+            Ownership::Exclusive,
+            Some(layout),
+        )
+    }
+
+    /// A mock device over a caller's desktop instead of the default 1920x1080
+    /// screen. See [`MockLayout`] for the JSON.
+    pub fn open_mock_layout(json: &str, options: DeviceOptions) -> Result<Self> {
+        let (device, _handle) =
+            crate::manager::Manager::open_mock_layout_with_handle(json, options)?;
+        Ok(device)
+    }
+
+    /// [`Device::open_mock_layout`] in the mode that never reopens a session, for
+    /// a host exercising the collision paths on a layout it chose.
+    pub fn open_mock_layout_shared(
+        json: &str,
+        options: DeviceOptions,
+    ) -> Result<(Self, crate::mock::MockHandle)> {
+        let (device, handle) =
+            crate::manager::Manager::open_mock_layout_with_handle(json, options)?;
+        device.set_ownership(Ownership::Shared);
+        Ok((device, handle))
     }
 
     /// A device over a transport the caller supplies: a proxy, a capture, a test
@@ -184,7 +231,7 @@ impl Device {
             Target::Path(path) => (path.clone(), "GDBOX".to_string()),
             Target::Serial(serial) => (serial.clone(), "GDBOX".to_string()),
         };
-        Self::connect(transport, target, serial, product, options, ownership)
+        Self::connect(transport, target, serial, product, options, ownership, None)
     }
 
     /// Opens a board that other programs may be driving too.
@@ -229,6 +276,7 @@ impl Device {
         product: String,
         options: DeviceOptions,
         ownership: Ownership,
+        mock_layout: Option<MockLayout>,
     ) -> Result<Self> {
         let metrics = Metrics::new();
         let sharing = Arc::new(Sharing::new(ownership.is_shared()));
@@ -254,6 +302,20 @@ impl Device {
             device_id: capabilities.device_id,
             build: capabilities.build,
         };
+        // A mock device always has a desktop: the caller's, or the single
+        // 1920x1080 one it has always had. Keeping it here rather than in the
+        // constructors means no path can open a mock without one and then probe
+        // the real screen.
+        let mock_layout = match (&target, mock_layout) {
+            (Target::Mock, None) => Some(MockLayout::default()),
+            (_, layout) => layout,
+        };
+        // The pointer starts where the layout says it is, not in the middle of a
+        // screen the layout may not have.
+        let start = mock_layout
+            .as_ref()
+            .map(|layout| layout.cursor)
+            .unwrap_or((960, 540));
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 session: Some(session),
@@ -265,12 +327,13 @@ impl Device {
             events: RwLock::new(None),
             closed: AtomicBool::new(false),
             buttons: AtomicU8::new(0),
-            virtual_cursor: Mutex::new((960, 540)),
+            virtual_cursor: Mutex::new(start),
             heartbeat: Mutex::new(None),
             metrics,
             sharing,
             diagnostics,
             session_id: AtomicU32::new(session_id),
+            mock_layout,
         });
         if inner.options.heartbeat {
             start_heartbeat(&inner);
@@ -466,6 +529,34 @@ impl Device {
         matches!(self.inner.target, Target::Mock)
     }
 
+    /// The desktop a mock device resolves anchors against, or `None` for a real
+    /// board. Useful to a host that wants to draw the same layout the mock will
+    /// clamp into.
+    pub fn mock_layout(&self) -> Option<&MockLayout> {
+        self.inner.mock_layout.as_ref()
+    }
+
+    /// The monitors absolute moves are anchored to: the mock layout for a mock
+    /// device, the system's own list otherwise.
+    ///
+    /// This is [`platform::monitors`](crate::platform::monitors) for a real
+    /// board, so a host does not have to know which kind of handle it holds
+    /// before it reads the layout.
+    pub fn monitors(&self) -> Result<Vec<crate::platform::Monitor>> {
+        match &self.inner.mock_layout {
+            Some(layout) => Ok(layout.monitors.clone()),
+            None => crate::platform::monitors(),
+        }
+    }
+
+    /// [`Device::monitors`] as the JSON array `gdb_monitors_json` returns.
+    pub fn monitors_json(&self) -> Result<String> {
+        match &self.inner.mock_layout {
+            Some(layout) => layout.monitors_json(),
+            None => crate::platform::monitors_json(),
+        }
+    }
+
     /// The mock's simulated pointer; absolute moves drive this instead of the
     /// real cursor so tests never depend on where the user left the mouse.
     pub(crate) fn cursor(&self) -> (i32, i32) {
@@ -479,13 +570,26 @@ impl Device {
     pub(crate) fn send_mouse_move(&self, dx: i16, dy: i16) -> Result<()> {
         self.send_input(&Command::MouseMove(dx, dy))?;
         if self.is_mock() {
+            // A cursor cannot leave the desktop, and the desktop may start left of
+            // the origin: clamp into the union of the layout, not into 0..1920.
+            let bounds = self
+                .inner
+                .mock_layout
+                .as_ref()
+                .map(MockLayout::bounds)
+                .unwrap_or(crate::platform::Rect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                });
             let mut cursor = self
                 .inner
                 .virtual_cursor
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cursor.0 = (cursor.0 + i32::from(dx)).clamp(0, 1919);
-            cursor.1 = (cursor.1 + i32::from(dy)).clamp(0, 1079);
+            cursor.0 = (cursor.0 + i32::from(dx)).clamp(bounds.left, bounds.right - 1);
+            cursor.1 = (cursor.1 + i32::from(dy)).clamp(bounds.top, bounds.bottom - 1);
         }
         Ok(())
     }

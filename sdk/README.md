@@ -28,7 +28,7 @@ string.
 | controls the board while others may command it too | direct, shared | `gdb_open_shared` | `Device::open_shared` | a taken reply is one `Busy` naming the command, and the SDK never reopens the session on its own |
 | only displays the board's numbers while another program controls it | presence | `gdb_probe`, `gdb_probe_all`, `gdb_observer_start` | `probe::read_selector`, `probe::all`, `Observer::start` | no session and no packet, so no owner slot is taken; every command on an observer answers `Unsupported` |
 | sends input to a board another process owns | attached | `gdb_attach`, `gdb_remote_*` | `broker::Client::connect` | the broker's op set only: no absolute move, drag, typing, chord, scheduler or events |
-| runs with no hardware at all | mock | `gdb_open_mock`, `gdb_open_mock_shared` | `Manager::open_mock`, `Device::open_mock_shared` | one 1920×1080 virtual screen and a virtual cursor |
+| runs with no hardware at all | mock | `gdb_open_mock`, `gdb_open_mock_shared`, `gdb_open_mock_layout` | `Manager::open_mock`, `Device::open_mock_shared`, `Manager::open_mock_layout` | one 1920×1080 virtual screen and a virtual cursor, unless the caller describes the desktop |
 
 The first two rows are one `gdb_device` handle; presence and attachment are their
 own handle types, so a process may hold a direct handle and an attached one at
@@ -158,6 +158,7 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | pointer: relative, raw, absolute, pursuit, path, screen-targeted, containing anchor, async with retarget and cancel | yes | yes |
 | pointer: window-client anchor, window metrics, platform preparation, per-move landing report | yes | yes |
 | monitor layout and per-monitor DPI | yes | yes |
+| mock desktop: monitors, DPI, primary flag, windows, all described by the caller | yes | yes |
 | buttons, wheel, drag, keys, long press, chords, sequences, text | yes | yes |
 | clicks: aim-and-click, caller-timed hold and gap, jitter | yes | yes |
 | scheduler: submit, absolute due, every, pause, resume, cancel, wait_idle, taken errors | yes | yes (C++ has no `submit_at` or `elapsed_ms`) |
@@ -191,6 +192,10 @@ Limits, in the order they bite:
   counts `stolen_frames`; it cannot hand a foreign frame on.
 - **Named pipes are Windows-only.** `Server::new`, `Client::connect` and
   `gdb_attach` answer `Unsupported` elsewhere.
+- **The mock desktop is one 1920×1080 screen unless you say otherwise.** A mock
+  device has no display APIs to read, so a test that wants a second monitor, a
+  negative coordinate or a window anchor passes `gdb_open_mock_layout` /
+  `Manager::open_mock_layout` a layout; it is fixed for the life of the handle.
 - **The Go binding needs Windows and a built DLL**, and has no `StartMovePath`
   where the other three layers do.
 - **One reader per IN endpoint.** A second process polling the vendor collection

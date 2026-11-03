@@ -214,6 +214,12 @@ _D.gdb_open.restype = c_void_p
 _D.gdb_open.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
 _D.gdb_open_mock.restype = c_void_p
 _D.gdb_open_mock.argtypes = [c_uint32, c_bool, c_bool]
+_D.gdb_open_mock_layout.restype = c_void_p
+_D.gdb_open_mock_layout.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
+_D.gdb_open_mock_layout_shared.restype = c_void_p
+_D.gdb_open_mock_layout_shared.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
+_D.gdb_device_monitors_json.argtypes = [c_void_p]
+_D.gdb_device_monitors_json.restype = c_void_p
 _D.gdb_open_shared.restype = c_void_p
 _D.gdb_open_shared.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
 _D.gdb_open_mock_shared.restype = c_void_p
@@ -947,6 +953,43 @@ class Device:
     @staticmethod
     def list_devices() -> list[dict]:
         return _take(_D.gdb_device_list())
+
+    @classmethod
+    def open_mock_layout(
+        cls,
+        layout: str,
+        timeout_ms: int = 1000,
+        auto_reconnect: bool = True,
+        heartbeat: bool = True,
+        shared: bool = False,
+    ) -> "Device":
+        """The mock device on a desktop you describe, so monitor arithmetic can
+        be tested with no display attached.
+
+        ``layout`` is JSON:
+        ``{"cursor":[x,y],"monitors":[{"rect":[l,t,r,b],"dpi":144,"primary":true}],
+        "windows":[{"hwnd":4660,"rect":[…],"client":[…]}]}``. ``cursor`` defaults
+        to the primary monitor's top-left, ``primary`` and ``dpi`` to false and
+        96, and ``windows`` may be left out. A layout no desktop could have
+        raises ``GdbError`` naming the entry.
+        """
+        text = layout.encode("utf-8")
+        if shared:
+            pointer = _D.gdb_open_mock_layout_shared(
+                text, timeout_ms, auto_reconnect, heartbeat
+            )
+        else:
+            pointer = _D.gdb_open_mock_layout(text, timeout_ms, auto_reconnect, heartbeat)
+        if not pointer:
+            code, message = _last_error()
+            raise GdbError(code or ErrorCode.IO, message or "mock layout open failed")
+        return cls(pointer)
+
+    def monitors(self) -> list[dict]:
+        """The monitors this handle's absolute moves are anchored to, in exactly
+        the order ``Screen.monitor(i)`` indexes them: the mock's layout, or the
+        system's own list for a real board."""
+        return _take(_D.gdb_device_monitors_json(self._handle()))
 
     @property
     def info(self) -> dict:

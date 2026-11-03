@@ -346,6 +346,9 @@ var (
 	procDeviceList     *syscall.LazyProc
 	procOpen           *syscall.LazyProc
 	procOpenMock       *syscall.LazyProc
+	procOpenMockLayout *syscall.LazyProc
+	procOpenMockLayoutShared *syscall.LazyProc
+	procDeviceMonitorsJSON *syscall.LazyProc
 	procOpenShared     *syscall.LazyProc
 	procOpenMockShared *syscall.LazyProc
 	procStolenFrames   *syscall.LazyProc
@@ -470,6 +473,9 @@ func library() *syscall.LazyDLL {
 		procDeviceList = dll.NewProc("gdb_device_list")
 		procOpen = dll.NewProc("gdb_open")
 		procOpenMock = dll.NewProc("gdb_open_mock")
+		procOpenMockLayout = dll.NewProc("gdb_open_mock_layout")
+		procOpenMockLayoutShared = dll.NewProc("gdb_open_mock_layout_shared")
+		procDeviceMonitorsJSON = dll.NewProc("gdb_device_monitors_json")
 		procOpenShared = dll.NewProc("gdb_open_shared")
 		procOpenMockShared = dll.NewProc("gdb_open_mock_shared")
 		procStolenFrames = dll.NewProc("gdb_stolen_frames")
@@ -808,6 +814,62 @@ func OpenMockShared(timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, e
 	device.mouse = Mouse{device: device}
 	device.keyboard = Keyboard{device: device}
 	return device, nil
+}
+
+// OpenMockLayout opens the in-memory device on a desktop you describe, so
+// multi-monitor and negative-coordinate arithmetic can be tested with no
+// display attached.
+//
+// layout is JSON:
+//
+//	{"cursor":[x,y],
+//	 "monitors":[{"rect":[l,t,r,b],"dpi":144,"primary":true}],
+//	 "windows":[{"hwnd":4660,"rect":[l,t,r,b],"client":[l,t,r,b]}]}
+//
+// cursor defaults to the primary monitor's top-left, primary and dpi to false
+// and 96, and windows may be left out. A layout no desktop could have returns a
+// Code Invalid error naming the entry.
+func OpenMockLayout(layout string, timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
+	return openMockLayout(procOpenMockLayout, layout, timeoutMs, autoReconnect, heartbeat)
+}
+
+// OpenMockLayoutShared is OpenMockLayout for a board other programs may drive
+// too: a taken reply is Code Busy and the session is never reopened on its own.
+func OpenMockLayoutShared(layout string, timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
+	return openMockLayout(procOpenMockLayoutShared, layout, timeoutMs, autoReconnect, heartbeat)
+}
+
+func openMockLayout(call *syscall.LazyProc, layout string, timeoutMs uint32, autoReconnect, heartbeat bool) (*Device, error) {
+	library()
+	text, cerr := syscall.BytePtrFromString(layout)
+	if cerr != nil {
+		return nil, &Error{Code: Invalid, Message: cerr.Error()}
+	}
+	pointer, _, _ := call.Call(
+		uintptr(unsafe.Pointer(text)),
+		uintptr(timeoutMs),
+		boolArg(autoReconnect),
+		boolArg(heartbeat),
+	)
+	if pointer == 0 {
+		if failure := lastError(); failure != nil {
+			return nil, failure
+		}
+		return nil, &Error{Code: IO, Message: "mock layout open failed"}
+	}
+	device := &Device{handle: pointer, events: map[uintptr]func(int32, int32, string){}}
+	device.mouse = Mouse{device: device}
+	device.keyboard = Keyboard{device: device}
+	return device, nil
+}
+
+// MonitorsJSON is the layout this handle's absolute moves are anchored to, in
+// exactly the order ScreenMonitor indexes it: the mock's own layout, or the
+// system's list for a real board. Same JSON as MonitorsJSON at package level.
+func (d *Device) MonitorsJSON() (string, error) {
+	library()
+	pointer, _, _ := procDeviceMonitorsJSON.Call(d.handle)
+	return take(pointer)
 }
 
 // StolenFrames is the number of replies the reader looked past because they

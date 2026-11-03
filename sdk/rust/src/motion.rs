@@ -316,8 +316,10 @@ pub(crate) type TargetProbe = fn(&Device, platform::Screen) -> Result<platform::
 const STALL: Duration = Duration::from_millis(400);
 
 fn probe(device: &Device, screen: platform::Screen) -> Result<platform::Target> {
-    if device.is_mock() {
-        return platform::Target::mock(screen, device.cursor());
+    // A mock device carries its own desktop, so an anchor resolves against the
+    // layout the caller opened instead of the one screen it used to have.
+    if let Some(layout) = device.mock_layout() {
+        return layout.target(screen, device.cursor());
     }
     platform::screen_and_cursor_for(screen)
 }

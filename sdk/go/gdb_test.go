@@ -885,6 +885,90 @@ func TestWindowClientAnchorAndPlatformPrepare(t *testing.T) {
 	}
 }
 
+// A desktop the test describes: a second screen at negative coordinates, at
+// 150% scaling, with a window on it. The coordinate arithmetic a real desktop
+// makes hardest to get right, with no display attached.
+func TestMockLayoutPlacesTheNegativeScreen(t *testing.T) {
+	const layout = `{
+        "cursor": [100, 100],
+        "monitors": [
+            {"rect": [0, 0, 1920, 1080], "dpi": 96, "primary": true},
+            {"rect": [-1280, 0, 0, 720], "dpi": 144}
+        ],
+        "windows": [
+            {"hwnd": 4660, "rect": [-1278, -22, -30, 710], "client": [-1270, 9, -38, 679]}
+        ]
+    }`
+	device, err := OpenMockLayout(layout, 1000, false, false)
+	if err != nil {
+		t.Fatalf("OpenMockLayout: %v", err)
+	}
+	defer device.Close()
+
+	text, err := device.MonitorsJSON()
+	if err != nil {
+		t.Fatalf("MonitorsJSON: %v", err)
+	}
+	var monitors []Monitor
+	if err := json.Unmarshal([]byte(text), &monitors); err != nil {
+		t.Fatalf("the layout is not a monitor array: %v: %s", err, text)
+	}
+	if len(monitors) != 2 {
+		t.Fatalf("the layout has 2 monitors: %s", text)
+	}
+	if !monitors[0].Primary || monitors[1].Left != -1280 || monitors[1].Dpi != 144 {
+		t.Fatalf("the handle reports a layout it was not opened with: %+v", monitors)
+	}
+
+	// Containing follows the point onto the left-hand screen.
+	landed, err := device.Mouse().MoveToOnReport(-500, 300, ScreenContaining(-500, 300), 80, nil)
+	if err != nil {
+		t.Fatalf("MoveToOnReport(containing): %v", err)
+	}
+	if landed.Clamped {
+		t.Fatalf("the second monitor holds the point: %+v", landed)
+	}
+	if dx := landed.AppliedX + 500; dx > 1 || dx < -1 {
+		t.Fatalf("landed at %d,%d", landed.AppliedX, landed.AppliedY)
+	}
+
+	// The same point anchored on the primary monitor is outside it: clamped, and
+	// the report says so instead of pretending it arrived.
+	clamped, err := device.Mouse().MoveToOnReport(-500, 300, ScreenPrimary(), 80, nil)
+	if err != nil {
+		t.Fatalf("MoveToOnReport(primary): %v", err)
+	}
+	if !clamped.Clamped || clamped.AppliedX != 0 ||
+		clamped.AppliedY > 301 || clamped.AppliedY < 299 {
+		t.Fatalf("the point is on the primary monitor's left edge: %+v", clamped)
+	}
+	if clamped.ErrorPx() != 500 {
+		t.Fatalf("error = %d, want 500", clamped.ErrorPx())
+	}
+
+	// The client area of the declared window, not its frame.
+	client, err := device.Mouse().MoveToOnReport(-1275, 0, ScreenWindowClient(4660), 80, nil)
+	if err != nil {
+		t.Fatalf("MoveToOnReport(window client): %v", err)
+	}
+	if !client.Clamped || client.AppliedX != -1270 ||
+		client.AppliedY > 10 || client.AppliedY < 8 {
+		t.Fatalf("a title-bar point belongs inside the picture: %+v", client)
+	}
+
+	// A layout no desktop could have is refused by name.
+	var failure *Error
+	if _, err := OpenMockLayout(`{"monitors":[]}`, 1000, false, false); !errors.As(err, &failure) ||
+		failure.Code != Invalid || !strings.Contains(failure.Message, "at least one monitor") {
+		t.Fatalf("an empty layout = %v, want Invalid naming the monitors", err)
+	}
+	if _, err := OpenMockLayout(`{"monitors":[{"rect":[0,0,960,720],"primary":true},
+        {"rect":[960,0,1920,720],"primary":true}]}`, 1000, true, true); !errors.As(err, &failure) ||
+		failure.Code != Invalid {
+		t.Fatalf("two primaries = %v, want Invalid", err)
+	}
+}
+
 // The device keeps its own record of the latest failure, so a command that
 // failed on another thread — a heartbeat, a scheduler worker — is readable from
 // the one that asks.

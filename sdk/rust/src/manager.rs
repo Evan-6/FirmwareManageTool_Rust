@@ -87,6 +87,32 @@ impl Manager {
         )?;
         Ok((device, handle))
     }
+
+    /// A mock device whose desktop is the caller's: monitors, their DPI and
+    /// primary flag, the pointer it starts from, and any windows an anchor may
+    /// name. See [`MockLayout`](crate::mock::MockLayout) for the JSON.
+    pub fn open_mock_layout(json: &str, options: DeviceOptions) -> Result<Device> {
+        Ok(Self::open_mock_layout_with_handle(json, options)?.0)
+    }
+
+    /// [`Manager::open_mock_layout`], keeping the handle that records what the
+    /// SDK sent.
+    pub fn open_mock_layout_with_handle(
+        json: &str,
+        options: DeviceOptions,
+    ) -> Result<(Device, crate::mock::MockHandle)> {
+        let layout = crate::mock::MockLayout::parse(json)?;
+        let (transport, handle) = crate::mock::MockTransport::new();
+        let device = Device::from_transport_with_layout(
+            Box::new(transport),
+            Target::Mock,
+            "MOCK".to_string(),
+            "GDBOX mock".to_string(),
+            options,
+            layout,
+        )?;
+        Ok((device, handle))
+    }
 }
 
 pub(crate) fn open_transport(target: &Target) -> Result<Box<dyn Transport>> {

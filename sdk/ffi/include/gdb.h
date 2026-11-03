@@ -153,6 +153,30 @@ char *gdb_device_list(void);
 gdb_device *gdb_open(const char *selector, uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
 gdb_device *gdb_open_mock(uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
 
+/* The mock device on a desktop the caller describes, so multi-monitor and
+   negative-coordinate arithmetic can be exercised with no display attached.
+   json is
+     {"cursor":[x,y],
+      "monitors":[{"rect":[left,top,right,bottom],"dpi":144,"primary":true}, ...],
+      "windows":[{"hwnd":4660,"rect":[l,t,r,b],"client":[l,t,r,b]}, ...]}
+   cursor defaults to the primary monitor's top-left ([0,0] when none is marked
+   primary), primary to false, dpi to 96, and windows may be left out. Every
+   rectangle is half-open on right/bottom, in virtual-desktop pixels. A layout no
+   desktop could have - no monitors, an empty rectangle, more than one primary, a
+   window with handle 0, a duplicate handle, a client area outside its frame, an
+   unknown key - is GDB_INVALID with a message naming the entry. NULL on failure
+   with gdb_last_error set. The layout is fixed for the life of the handle. */
+gdb_device *gdb_open_mock_layout(const char *json, uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+/* The same layout, opened for use alongside other programs (see gdb_open_shared). */
+gdb_device *gdb_open_mock_layout_shared(const char *json, uint32_t timeout_ms, bool auto_reconnect, bool heartbeat);
+
+/* The monitors this handle's absolute moves are anchored to, in exactly the
+   order a monitor index takes: the layout a mock device was opened with, or the
+   system's own list for a real board. Same JSON and same freeing as
+   gdb_monitors_json. NULL on a NULL handle or a system that will not report its
+   displays, with gdb_last_error set. */
+char *gdb_device_monitors_json(const gdb_device *device);
+
 /* The same board in a non-exclusive mode: several programs may drive it, and the
    SDK stops trying to recover from a reply another program took. One difference
    from gdb_open, and only one:

@@ -322,6 +322,9 @@ struct Api {
     decltype(&gdb_open_mock) open_mock = nullptr;
     decltype(&gdb_open_shared) open_shared = nullptr;
     decltype(&gdb_open_mock_shared) open_mock_shared = nullptr;
+    decltype(&gdb_open_mock_layout) open_mock_layout = nullptr;
+    decltype(&gdb_open_mock_layout_shared) open_mock_layout_shared = nullptr;
+    decltype(&gdb_device_monitors_json) device_monitors_json = nullptr;
     decltype(&gdb_stolen_frames) stolen_frames = nullptr;
     decltype(&gdb_device_free) device_free = nullptr;
     decltype(&gdb_close) close = nullptr;
@@ -558,6 +561,9 @@ inline Api& api() {
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
         GDB_OPTIONAL(mouse_click_timed, "gdb_mouse_click_timed")
         GDB_OPTIONAL(mouse_click_at_on, "gdb_mouse_click_at_on")
+        GDB_OPTIONAL(open_mock_layout, "gdb_open_mock_layout")
+        GDB_OPTIONAL(open_mock_layout_shared, "gdb_open_mock_layout_shared")
+        GDB_OPTIONAL(device_monitors_json, "gdb_device_monitors_json")
         GDB_OPTIONAL(watch_start, "gdb_watch_start")
         GDB_OPTIONAL(watch_stop, "gdb_watch_stop")
         GDB_OPTIONAL(watch_free, "gdb_watch_free")
@@ -666,6 +672,18 @@ inline void require_screen_surface() {
     throw Error(ErrorCode::Unsupported,
                 "this gdb.dll predates screen-targeted moves; use a library that "
                 "exports gdb_mouse_move_to_on");
+}
+
+// The mock layout and the per-handle monitor listing are one batch: both are
+// loaded softly, so the rest of the surface still works against an older DLL.
+inline void require_mock_layout_surface() {
+    if (api().open_mock_layout != nullptr && api().open_mock_layout_shared != nullptr &&
+        api().device_monitors_json != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates caller-supplied mock layouts; use a library that "
+                "exports gdb_open_mock_layout");
 }
 
 inline void require_watch_surface() {
@@ -1249,6 +1267,29 @@ public:
                                    bool auto_reconnect = true, bool heartbeat = true) {
         return Device(api().open_mock_shared(timeout_ms, auto_reconnect, heartbeat));
     }
+    /// The mock device on a desktop you describe, so multi-monitor and
+    /// negative-coordinate arithmetic can be tested with no display attached.
+    ///
+    /// `layout` is JSON:
+    /// {"cursor":[x,y],
+    ///  "monitors":[{"rect":[l,t,r,b],"dpi":144,"primary":true}],
+    ///  "windows":[{"hwnd":4660,"rect":[l,t,r,b],"client":[l,t,r,b]}]}
+    /// `cursor` defaults to the primary monitor's top-left, `primary` and `dpi`
+    /// to false and 96, and `windows` may be left out. A layout no desktop could
+    /// have throws Error with code Invalid, naming the entry.
+    static Device open_mock_layout(const std::string& layout, uint32_t timeout_ms = 1000,
+                                   bool auto_reconnect = true, bool heartbeat = true) {
+        detail::require_mock_layout_surface();
+        return Device(api().open_mock_layout(layout.c_str(), timeout_ms, auto_reconnect,
+                                             heartbeat));
+    }
+    static Device open_mock_layout_shared(const std::string& layout,
+                                          uint32_t timeout_ms = 1000,
+                                          bool auto_reconnect = true, bool heartbeat = true) {
+        detail::require_mock_layout_surface();
+        return Device(api().open_mock_layout_shared(layout.c_str(), timeout_ms,
+                                                    auto_reconnect, heartbeat));
+    }
     static std::string list_json() { return detail::take(api().device_list()); }
 
     Device(Device&&) noexcept = default;
@@ -1263,6 +1304,14 @@ public:
     std::string status_json() const { return detail::take(api().status(raw())); }
     std::string status_ext_json() const { return detail::take(api().status_ext(raw())); }
     std::string sessions_json() const { return detail::take(api().sessions(raw())); }
+
+    /// The layout this handle's absolute moves are anchored to, in exactly the
+    /// order Screen::monitor indexes it: the mock's own layout, or the system's
+    /// list for a real board. Same JSON as the free monitors_json().
+    std::string monitors_json() const {
+        detail::require_mock_layout_surface();
+        return detail::take(api().device_monitors_json(raw()));
+    }
 
     /// Replies the reader looked past because they answered another session or
     /// sequence: the counter that tells a collision from a slow board.

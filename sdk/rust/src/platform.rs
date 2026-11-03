@@ -199,33 +199,10 @@ impl Target {
         }
     }
 
-    /// The single 1920x1080 desktop a mock device pretends to have.
+    /// The single 1920x1080 desktop a mock device pretends to have when no
+    /// layout is supplied.
     pub fn mock(screen: Screen, cursor: (i32, i32)) -> Result<Self> {
-        match screen {
-            Screen::Primary | Screen::Monitor(0) | Screen::Containing(..) => {}
-            Screen::Monitor(index) => {
-                return Err(Error::invalid_screen(format!(
-                    "monitor index {index} is out of range: a mock device has one 1920x1080 screen"
-                )));
-            }
-            Screen::Window(hwnd) => {
-                return Err(Error::stale_window(format!(
-                    "window {hwnd:#x} has no rectangle: a mock device has no windows"
-                )));
-            }
-            Screen::WindowClient(hwnd) => {
-                return Err(Error::stale_window(format!(
-                    "window {hwnd:#x} has no client area: a mock device has no windows"
-                )));
-            }
-        }
-        let rect = Rect {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        };
-        Ok(Self::new(rect, cursor, vec![rect]))
+        crate::mock::MockLayout::single(cursor).target(screen, cursor)
     }
 
     /// Union of every monitor: the desktop as one rectangle, for messages.

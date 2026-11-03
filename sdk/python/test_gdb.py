@@ -627,6 +627,90 @@ class ScreenTargetTests(unittest.TestCase):
             self.assertEqual(caught.exception.name, "STALE_WINDOW")
 
 
+class MockLayoutTests(unittest.TestCase):
+    """A desktop the test describes: a second screen at negative coordinates and
+    a window on it, so the coordinate arithmetic is exercised with no display."""
+
+    LAYOUT = """{
+        "cursor": [100, 100],
+        "monitors": [
+            {"rect": [0, 0, 1920, 1080], "dpi": 96, "primary": true},
+            {"rect": [-1280, 0, 0, 720], "dpi": 144}
+        ],
+        "windows": [
+            {"hwnd": 4660, "rect": [-1278, -22, -30, 710], "client": [-1270, 9, -38, 679]}
+        ]
+    }"""
+
+    SYMBOLS = ("gdb_open_mock_layout", "gdb_open_mock_layout_shared", "gdb_device_monitors_json")
+
+    def test_the_library_exports_the_layout_symbols(self):
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_layout_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    def test_the_layout_is_the_monitor_list_the_handle_reports(self):
+        with gdb.Device.open_mock_layout(self.LAYOUT) as device:
+            monitors = device.monitors()
+            self.assertEqual(len(monitors), 2)
+            self.assertEqual(monitors[0]["primary"], True)
+            self.assertEqual(monitors[1]["left"], -1280)
+            self.assertEqual(monitors[1]["dpi"], 144)
+
+        # A plain mock device still reports one 1920x1080 screen.
+        with gdb.Device.open_mock() as device:
+            self.assertEqual(len(device.monitors()), 1)
+            self.assertEqual(device.monitors()[0]["right"], 1920)
+
+    def test_a_containing_anchor_reaches_the_negative_screen(self):
+        with gdb.Device.open_mock_layout(self.LAYOUT) as device:
+            landed = device.mouse.move_to_report(
+                -500, 300, gdb.Screen.containing(-500, 300), 80
+            )
+            self.assertFalse(landed.clamped)
+            self.assertLessEqual(abs(landed.applied_x + 500), 1)
+            self.assertLessEqual(abs(landed.applied_y - 300), 1)
+
+            clamped = device.mouse.move_to_report(-500, 300, gdb.Screen.primary, 80)
+            self.assertTrue(clamped.clamped)
+            self.assertEqual(clamped.applied_x, 0)
+            self.assertLessEqual(abs(clamped.applied_y - 300), 1)
+            self.assertEqual(clamped.error_px, 500)
+            self.assertEqual(device.clamps().clamped_total, 1)
+
+            # The window client area, not the frame: a title-bar point lands on the
+            # picture's top-left corner.
+            client = device.mouse.move_to_report(
+                -1275, 0, gdb.Screen.window_client(4660), 80
+            )
+            self.assertTrue(client.clamped)
+            self.assertEqual(client.applied_x, -1270)
+            self.assertLessEqual(abs(client.applied_y - 9), 1)
+
+    def test_a_layout_no_desktop_could_have_is_refused(self):
+        for layout, message in [
+            ('{"monitors": []}', "at least one monitor"),
+            ('{"monitors": [{"rect": [0, 0, 0, 720]}]}', "empty rectangle"),
+            (
+                '{"monitors": [{"rect": [0, 0, 960, 720], "primary": true},'
+                ' {"rect": [960, 0, 1920, 720], "primary": true}]}',
+                "are: 0, 1",
+            ),
+        ]:
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.Device.open_mock_layout(layout)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+            self.assertIn(message, caught.exception.message)
+
+
 if __name__ == "__main__":
     os.environ.setdefault("GDBOX_LIBRARY", os.path.join("target", "debug", "gdb.dll"))
     unittest.main(verbosity=2)

@@ -201,6 +201,58 @@ int main() {
         assert(listed.find("\"dpi\"") != std::string::npos);
     }
 
+    // A desktop the test describes: a second screen at negative coordinates and
+    // a window on it, so the clamping is exercised without a real monitor.
+    {
+        const std::string layout = R"({
+            "cursor": [100, 100],
+            "monitors": [
+                {"rect": [0, 0, 1920, 1080], "dpi": 96, "primary": true},
+                {"rect": [-1280, 0, 0, 720], "dpi": 144}
+            ],
+            "windows": [
+                {"hwnd": 4660, "rect": [-1278, -22, -30, 710], "client": [-1270, 9, -38, 679]}
+            ]
+        })";
+        auto custom = gdb::Device::open_mock_layout(layout);
+        const std::string listed = custom.monitors_json();
+        std::cout << "layout " << listed << "\n";
+        assert(listed.find("\"left\":-1280") != std::string::npos);
+        assert(listed.find("\"dpi\":144") != std::string::npos);
+
+        // The containing anchor follows the point onto the negative screen.
+        const gdb::MoveReport landed = custom.mouse().move_to_report(
+            -500, 300, gdb::Screen::containing(-500, 300), 80);
+        assert(!landed.clamped);
+        assert(landed.applied_x <= -499 && landed.applied_x >= -501);
+        assert(landed.applied_y >= 299 && landed.applied_y <= 301);
+
+        // Anchored on the primary monitor the same point is outside it, so it is
+        // clamped to the edge and the report says so.
+        const gdb::MoveReport clamped = custom.mouse().move_to_report(
+            -500, 300, gdb::Screen::primary(), 80);
+        assert(clamped.clamped);
+        assert(clamped.applied_x == 0 && clamped.applied_y >= 299 && clamped.applied_y <= 301);
+        assert(clamped.error_px() == 500);
+
+        // The client area of the declared window, not its frame.
+        const gdb::MoveReport client = custom.mouse().move_to_report(
+            -1275, 0, gdb::Screen::window_client(4660), 80);
+        assert(client.clamped);
+        assert(client.applied_x == -1270 && client.applied_y >= 8 && client.applied_y <= 10);
+
+        bool refused = false;
+        try {
+            gdb::Device::open_mock_layout(R"({"monitors": []})");
+        } catch (const gdb::Error& error) {
+            // Every failed open surfaces as the loader's Io code, and the ABI's
+            // own message is what says why.
+            refused = std::string(error.what()).find("at least one monitor") !=
+                      std::string::npos;
+        }
+        assert(refused && "a layout with no monitor must be refused");
+    }
+
     // The watch: the bus right now, and silence once it is stopped. Whether a
     // board is attached decides whether anything arrives, so only the listing is
     // asserted.
