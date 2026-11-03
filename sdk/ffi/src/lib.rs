@@ -552,8 +552,9 @@ pub extern "C" fn gdb_capabilities() -> *mut c_char {
             "event_json": true,
             "scheduler": true,
             "broker": windows,
-            "replay": false,
-            "flash": false,
+            "replay": true,
+            "flash": true,
+            "mock_layout": true,
         });
         Ok(body.to_string())
     }))
@@ -1581,6 +1582,302 @@ pub extern "C" fn gdb_scheduler_take_errors(raw: *mut GdbScheduler) -> *mut c_ch
     }))
 }
 
+// --------------------------------------------------------------------- flash
+//
+// The flashing steps a host can do from any language: find the bootloader
+// volumes, pack an ELF it built itself, copy the image and verify the board that
+// comes back. Building the firmware needs cargo and a checkout of the firmware,
+// which a library cannot assume: `gdb_flash_build` exists so a caller gets a
+// typed refusal instead of a missing symbol.
+
+/// A packed UF2 image, held between the pack and the copy.
+pub struct GdbFlashImage {
+    image: gdb_sdk::flash::Image,
+}
+
+/// The size of a packed image, as gdb_flash_image_stats fills it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GdbFlashStats {
+    /// Bytes of the UF2 file.
+    pub bytes: u64,
+    /// 512-byte UF2 blocks it carries.
+    pub blocks: u64,
+}
+
+fn path_text(value: *const c_char, what: &str) -> gdb_sdk::Result<String> {
+    if value.is_null() {
+        return Err(Error::invalid(format!("{what} is NULL")));
+    }
+    Ok(unsafe { CStr::from_ptr(value) }
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// Every mounted RP2040 bootloader volume, as a JSON array of paths: `["E:\\"]`.
+///
+/// An empty array means none is mounted, which is what a board that has not been
+/// put into BOOTSEL looks like. Freed with gdb_string_free; NULL where the drive
+/// table cannot be read (GDB_UNSUPPORTED off Windows), with gdb_last_error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_drives() -> *mut c_char {
+    json_string(guard(|| {
+        let drives: Vec<String> = gdb_sdk::flash::drives()?
+            .into_iter()
+            .map(|drive| drive.display().to_string())
+            .collect();
+        Ok(
+            serde_json::Value::Array(drives.into_iter().map(serde_json::Value::String).collect())
+                .to_string(),
+        )
+    }))
+}
+
+/// Packs an ELF that is already on disk into the UF2 image a bootloader drive
+/// takes, and hands back a handle for it.
+///
+/// The packing is pure computation: an ELF with no flash segment is `Invalid`,
+/// an unreadable file is `Io`. `out` must not be NULL (GDB_INVALID) and receives
+/// the handle, which the caller frees with gdb_flash_image_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_pack(elf_path: *const c_char, out: *mut *mut GdbFlashImage) -> i32 {
+    code(guard(|| {
+        let slot = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        *slot = ptr::null_mut();
+        let path = path_text(elf_path, "elf_path")?;
+        let image = gdb_sdk::flash::pack_elf(std::path::Path::new(&path))?;
+        *slot = Box::into_raw(Box::new(GdbFlashImage { image }));
+        Ok(())
+    }))
+}
+
+/// Fills `out` with the size of a packed image. GDB_INVALID on a NULL handle or
+/// NULL out, and out is untouched then.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_image_stats(
+    image: *const GdbFlashImage,
+    out: *mut GdbFlashStats,
+) -> i32 {
+    code(guard(|| {
+        let image = unsafe { image.as_ref() }.ok_or_else(|| Error::invalid("image is NULL"))?;
+        let out = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        *out = GdbFlashStats {
+            bytes: image.image.bytes.len() as u64,
+            blocks: image.image.blocks as u64,
+        };
+        Ok(())
+    }))
+}
+
+/// Copies the image to `path`, usually `<drive>\\Firmware.uf2`.
+///
+/// The copy is 16 KiB at a time, on the calling thread, and a failed or partial
+/// write removes the file again: the bootloader flashes whatever UF2 it finds, so
+/// a half-written one must not be left behind. GDB_IO when the file cannot be
+/// created or written, GDB_INVALID on a NULL handle or path.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_write(image: *const GdbFlashImage, path: *const c_char) -> i32 {
+    code(guard(|| {
+        let image = unsafe { image.as_ref() }.ok_or_else(|| Error::invalid("image is NULL"))?;
+        struct Never;
+        impl gdb_sdk::flash::Cancel for Never {
+            fn cancelled(&self) -> bool {
+                false
+            }
+        }
+        let target = path_text(path, "path")?;
+        gdb_sdk::flash::write_image(std::path::Path::new(&target), &image.image.bytes, &Never)
+    }))
+}
+
+/// Releases a packed image. Safe on NULL, and safe after the copy.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_image_free(image: *mut GdbFlashImage) {
+    if !image.is_null() {
+        unsafe { drop(Box::from_raw(image)) };
+    }
+}
+
+/// Waits for a board to enumerate and answers with its Feature 14 identity as
+/// `{"board":2,"firmware":"3.2.0","leaseMs":2000}`.
+///
+/// `selector` is a USB serial or a HID path (`NULL` accepts the first board), and
+/// `timeout_ms` is how long to wait for it — the same 15 s the flashing sequence
+/// uses is a sane value. A board that never answers is GDB_TIMEOUT and a board
+/// that answers with another board id is GDB_INVALID, so a transfer into the
+/// wrong device is never reported as a success. Freed with gdb_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_verify(selector: *const c_char, timeout_ms: u32) -> *mut c_char {
+    json_string(guard(|| {
+        let selector = if selector.is_null() {
+            None
+        } else {
+            Some(
+                unsafe { CStr::from_ptr(selector) }
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let verified = gdb_sdk::flash::verify(
+            selector.as_deref(),
+            Duration::from_millis(u64::from(timeout_ms)),
+        )?;
+        Ok(serde_json::json!({
+            "board": verified.board,
+            "firmware": verified.firmware,
+            "leaseMs": verified.lease_ms,
+        })
+        .to_string())
+    }))
+}
+
+/// Always GDB_UNSUPPORTED, with a message naming what building needs.
+///
+/// `flash::build` runs cargo against a checkout of the firmware, which a C ABI
+/// call cannot assume is on the machine or is the caller's. The symbol is here so
+/// a host that expected to build gets a typed refusal instead of a link error;
+/// building stays `gdb::flash::build` in Rust.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_flash_build() -> i32 {
+    code(Err(Error::unsupported(
+        "building the firmware needs cargo and the firmware checkout; gdb_flash_pack \
+         takes the ELF a build already produced",
+    )))
+}
+
+// -------------------------------------------------------------------- replay
+//
+// A recording is a JSON file of intent, and reading it is data in, data out: the
+// reader hands one entry per call, and playing it is still the SDK's own
+// playback, because only that knows the recorded timing and what to release when
+// it stops. The recorder stays Rust-only: capturing a gesture needs the device
+// handle the process that records already holds.
+
+/// A loaded recording, read one entry at a time.
+pub struct GdbReplay {
+    reader: gdb_sdk::replay::Reader,
+}
+
+/// What a playback did, as gdb_replay_play fills it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GdbReplayOutcome {
+    /// Entries that reached the device, in order.
+    pub played: u64,
+    /// Entries left when it stopped early.
+    pub skipped: u64,
+    /// Wall time the playback took, gaps included.
+    pub elapsed_ms: u64,
+}
+
+/// Loads a recording written by this SDK's format version.
+///
+/// A different `version` — newer or older — is GDB_INVALID before any entry is
+/// looked at, and a file that is not a recording is GDB_INVALID too: a
+/// half-understood macro must never reach the device. `out` must not be NULL and
+/// receives the handle, freed with gdb_replay_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_open(path: *const c_char, out: *mut *mut GdbReplay) -> i32 {
+    code(guard(|| {
+        let slot = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        *slot = ptr::null_mut();
+        let path = path_text(path, "path")?;
+        let reader = gdb_sdk::replay::Reader::open(path)?;
+        *slot = Box::into_raw(Box::new(GdbReplay { reader }));
+        Ok(())
+    }))
+}
+
+/// The header of a recording as JSON:
+/// `{"version":1,"seed":9,"screen":[1280,720],"started_at_ms":…,"entries":3}`.
+/// Freed with gdb_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_info(replay: *const GdbReplay) -> *mut c_char {
+    json_string(guard(|| {
+        let replay = unsafe { replay.as_ref() }.ok_or_else(|| Error::invalid("replay is NULL"))?;
+        serde_json::to_string(&replay.reader.info()).map_err(|error| Error::io(error.to_string()))
+    }))
+}
+
+/// The next entry as one JSON object in the file's own shape, or NULL with
+/// GDB_OK at the end of the recording.
+///
+/// The shape is the recording's: `{"at_ms":12,"op":"key","page":7,"usage":4,
+/// "down":true}`. `out` must not be NULL (GDB_INVALID) and is cleared before the
+/// call can fail, so a caller that ignores the code never frees a stale pointer.
+/// Each returned string is freed with gdb_string_free.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_next(replay: *mut GdbReplay, out: *mut *mut c_char) -> i32 {
+    code(guard(|| {
+        let slot = unsafe { out.as_mut() }.ok_or_else(|| Error::invalid("out is NULL"))?;
+        *slot = ptr::null_mut();
+        let replay = unsafe { replay.as_mut() }.ok_or_else(|| Error::invalid("replay is NULL"))?;
+        let Some(entry) = replay.reader.next() else {
+            return Ok(());
+        };
+        let text = gdb_sdk::replay::Reader::entry_json(&entry)?;
+        let text = CString::new(text).map_err(|_| Error::invalid("entry contained a NUL byte"))?;
+        *slot = text.into_raw();
+        Ok(())
+    }))
+}
+
+/// Plays the whole recording onto `device`, from the first entry.
+///
+/// `speed_milli` divides every recorded gap: 1000 is the recorded speed, 2000
+/// twice as fast, 500 half. It is an integer on purpose — a `double` argument
+/// cannot be passed by a binding that calls the C ABI without floating-point
+/// register arguments — and the accepted range is 1..=1_000_000. `out` may be
+/// NULL when only the result matters, and is untouched when the call fails. A
+/// closed replay is GDB_INVALID; a device failure is the device's code, because
+/// the rest of the recording no longer means anything.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_play(
+    replay: *const GdbReplay,
+    raw: *mut GdbDevice,
+    speed_milli: u32,
+    out: *mut GdbReplayOutcome,
+) -> i32 {
+    code(guard(|| {
+        let replay = unsafe { replay.as_ref() }.ok_or_else(|| Error::invalid("replay is NULL"))?;
+        let handle = unsafe { device(raw) }?;
+        // A clone shares the session and the counters, so playing through it
+        // sends exactly what the handle would; the ABI's handle is not borrowed
+        // mutably while a host may be reading it from another thread.
+        let mut device = handle.device.clone();
+        let outcome = replay
+            .reader
+            .play(&mut device, f64::from(speed_milli) / 1000.0)?;
+        if let Some(out) = unsafe { out.as_mut() } {
+            *out = GdbReplayOutcome {
+                played: outcome.played as u64,
+                skipped: outcome.skipped as u64,
+                elapsed_ms: outcome.elapsed_ms,
+            };
+        }
+        Ok(())
+    }))
+}
+
+/// Stops the reader: `info` still answers, `next` returns NULL and `play` is
+/// GDB_INVALID until a new handle is opened. Idempotent; GDB_INVALID on NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_close(replay: *mut GdbReplay) -> i32 {
+    code(guard(|| {
+        let replay = unsafe { replay.as_mut() }.ok_or_else(|| Error::invalid("replay is NULL"))?;
+        replay.reader.close();
+        Ok(())
+    }))
+}
+
+/// Releases a recording handle. Safe on NULL; the file itself is untouched.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_replay_free(replay: *mut GdbReplay) {
+    if !replay.is_null() {
+        unsafe { drop(Box::from_raw(replay)) };
+    }
+}
+
 // ------------------------------------------------------------------ presence
 //
 // What a program may read while another program owns the board. Feature 14 is a
@@ -2460,6 +2757,230 @@ mod tests {
         gdb_device_free(shared);
     }
 
+    /// A temporary directory that removes itself, so the flash and replay tests
+    /// leave nothing behind.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(stem: &str) -> Self {
+            let path = std::env::temp_dir().join(unique_pipe(stem));
+            std::fs::create_dir_all(&path).expect("temp dir");
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Minimal ELF32 with one loadable flash segment: the input a UF2 pack takes,
+    /// built here so the test needs no toolchain.
+    fn flash_elf(payload: &[u8]) -> Vec<u8> {
+        let phoff = 52usize;
+        let data_at = phoff + 32;
+        let mut out = vec![0u8; data_at];
+        out[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        out[4] = 1;
+        out[5] = 1;
+        out[28..32].copy_from_slice(&(phoff as u32).to_le_bytes());
+        out[42..44].copy_from_slice(&32u16.to_le_bytes());
+        out[44..46].copy_from_slice(&1u16.to_le_bytes());
+        out[phoff..phoff + 4].copy_from_slice(&1u32.to_le_bytes());
+        out[phoff + 4..phoff + 8].copy_from_slice(&(data_at as u32).to_le_bytes());
+        out[phoff + 12..phoff + 16].copy_from_slice(&0x1000_0000u32.to_le_bytes());
+        out[phoff + 16..phoff + 20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// The flashing surface: find the volumes, pack an ELF, copy it somewhere, and
+    /// the two failures a host has to tell apart. No drive and no board.
+    #[test]
+    fn the_flash_surface_packs_copies_and_refuses_what_it_cannot_do() {
+        let root = TempDir::new("flash");
+
+        // An empty drive table is "[]", not an error: it is what a board that is
+        // not in BOOTSEL looks like.
+        let drives = json_of(gdb_flash_drives());
+        assert!(drives.is_array(), "{drives}");
+
+        let elf = root.join("firmware.elf");
+        std::fs::write(&elf, flash_elf(&[0xAA; 256])).unwrap();
+        let elf_text = c_text(&elf.to_string_lossy());
+        let mut image: *mut GdbFlashImage = ptr::null_mut();
+        assert_eq!(
+            gdb_flash_pack(elf_text.as_ptr(), &mut image),
+            0,
+            "{}",
+            message()
+        );
+        assert!(!image.is_null());
+
+        let mut stats = GdbFlashStats::default();
+        assert_eq!(gdb_flash_image_stats(image, &mut stats), 0, "{}", message());
+        assert_eq!(stats.bytes, 512, "one block of 512 bytes");
+        assert_eq!(stats.blocks, 1);
+
+        // The copy is the bytes the bootloader expects, at the path the caller
+        // names.
+        let target = root.join("Firmware.uf2");
+        let target_text = c_text(&target.to_string_lossy());
+        assert_eq!(
+            gdb_flash_write(image, target_text.as_ptr()),
+            0,
+            "{}",
+            message()
+        );
+        let written = std::fs::read(&target).expect("the copy");
+        assert_eq!(written.len(), 512);
+        assert_eq!(
+            u32::from_le_bytes(written[..4].try_into().unwrap()),
+            0x0A32_4655
+        );
+
+        // A directory that does not exist is Io with a message, and a half-written
+        // file is never left behind.
+        let missing = c_text(&root.join("no-such-drive/Firmware.uf2").to_string_lossy());
+        assert_eq!(
+            gdb_flash_write(image, missing.as_ptr()),
+            i32::from(ErrorCode::Io.as_u8())
+        );
+        assert!(message().contains("UF2"), "{}", message());
+        gdb_flash_image_free(image);
+
+        // A file that is not an ELF is the caller's mistake, not an IO fault.
+        std::fs::write(&elf, b"not an elf").unwrap();
+        let mut refused: *mut GdbFlashImage = ptr::null_mut();
+        assert_eq!(
+            gdb_flash_pack(elf_text.as_ptr(), &mut refused),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert!(
+            refused.is_null(),
+            "a failed pack must not hand back a handle"
+        );
+
+        // Building is refused by name, not by a missing symbol.
+        assert_eq!(gdb_flash_build(), i32::from(ErrorCode::Unsupported.as_u8()));
+        assert!(message().contains("cargo"), "{}", message());
+
+        // Verification with a selector nothing matches waits and then says so; no
+        // board is opened on the way.
+        let nobody = c_text("NO-SUCH-BOARD");
+        assert!(gdb_flash_verify(nobody.as_ptr(), 0).is_null());
+        assert_eq!(last_code(), i32::from(ErrorCode::Timeout.as_u8()));
+        assert!(message().contains("runtime hello"), "{}", message());
+    }
+
+    /// The replay surface: a recording read entry by entry, in the file's own
+    /// shape, and played through the SDK's own playback.
+    #[test]
+    fn the_replay_surface_reads_entries_and_plays_them() {
+        let root = TempDir::new("replay");
+        let path = root.join("recording.json");
+        let mut recording = gdb_sdk::Recording::new(9, (1280, 720));
+        recording.push(
+            0,
+            gdb_sdk::replay::Op::Key {
+                page: 7,
+                usage: 4,
+                down: true,
+            },
+        );
+        recording.push(20, gdb_sdk::replay::Op::Buttons { bits: 1 });
+        recording.push(40, gdb_sdk::replay::Op::Barrier);
+        recording.save(&path).unwrap();
+
+        let text = c_text(&path.to_string_lossy());
+        let mut replay: *mut GdbReplay = ptr::null_mut();
+        assert_eq!(
+            gdb_replay_open(text.as_ptr(), &mut replay),
+            0,
+            "{}",
+            message()
+        );
+        assert!(!replay.is_null());
+
+        let info = json_of(gdb_replay_info(replay));
+        assert_eq!(info["version"], 1);
+        assert_eq!(info["seed"], 9);
+        assert_eq!(info["entries"], 3);
+        assert_eq!(info["screen"][1], 720);
+
+        // Three entries in the file's own shape, then the end is NULL with GDB_OK.
+        let mut lines = Vec::new();
+        loop {
+            let mut entry: *mut c_char = ptr::null_mut();
+            assert_eq!(gdb_replay_next(replay, &mut entry), 0, "{}", message());
+            if entry.is_null() {
+                break;
+            }
+            let value = json_of(entry);
+            lines.push(value);
+        }
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0]["op"], "key");
+        assert_eq!(lines[0]["page"], 7);
+        assert_eq!(lines[1]["op"], "buttons");
+        assert_eq!(lines[2]["op"], "barrier");
+
+        // Playback goes through the device the caller passed, and reports what it
+        // did.
+        let raw = open_mock();
+        let mut outcome = GdbReplayOutcome::default();
+        assert_eq!(
+            gdb_replay_play(replay, raw, 1000, &mut outcome),
+            0,
+            "{}",
+            message()
+        );
+        assert_eq!((outcome.played, outcome.skipped), (3, 0));
+        let opcodes: Vec<u8> = writes(raw).iter().map(|packet| packet.opcode).collect();
+        assert!(
+            opcodes.contains(&v3::KEY) && opcodes.contains(&v3::MOUSE_BUTTONS),
+            "{opcodes:?}"
+        );
+
+        // A closed reader stops handing entries out and refuses to play.
+        assert_eq!(gdb_replay_close(replay), 0);
+        assert_eq!(gdb_replay_close(replay), 0, "close is idempotent");
+        let mut entry: *mut c_char = ptr::null_mut();
+        assert_eq!(gdb_replay_next(replay, &mut entry), 0);
+        assert!(entry.is_null());
+        assert_eq!(
+            gdb_replay_play(replay, raw, 1000, ptr::null_mut()),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_replay_free(replay);
+        gdb_device_free(raw);
+
+        // A recording from another format version is refused before an entry is
+        // looked at.
+        let foreign = root.join("foreign.json");
+        std::fs::write(
+            &foreign,
+            br#"{"version":7,"seed":1,"screen":[1,1],"started_at_ms":0,"entries":[]}"#,
+        )
+        .unwrap();
+        let foreign_text = c_text(&foreign.to_string_lossy());
+        let mut refused: *mut GdbReplay = ptr::null_mut();
+        assert_eq!(
+            gdb_replay_open(foreign_text.as_ptr(), &mut refused),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert!(refused.is_null());
+        assert_eq!(
+            gdb_replay_open(ptr::null(), &mut refused),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+    }
+
     #[test]
     fn a_timed_click_and_a_click_at_reach_the_mock() {
         let raw = open_mock();
@@ -3134,6 +3655,7 @@ mod tests {
             "broker",
             "replay",
             "flash",
+            "mock_layout",
         ] {
             assert!(
                 capabilities
@@ -3149,11 +3671,13 @@ mod tests {
             capabilities["window_metrics"],
             serde_json::Value::Bool(cfg!(windows))
         );
-        assert_eq!(
-            capabilities["replay"],
-            serde_json::Value::Bool(false),
-            "replay has no C symbol, so a binding cannot reach it"
-        );
+        for name in ["replay", "flash", "mock_layout"] {
+            assert_eq!(
+                capabilities[name],
+                serde_json::Value::Bool(true),
+                "{name} is reachable through a C symbol in this build"
+            );
+        }
 
         // Pursuit: the same clamping, no trajectory and no barrier per step.
         let raw = open_mock();

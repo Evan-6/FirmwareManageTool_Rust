@@ -67,7 +67,9 @@ for the handle you want and a working call.
 | watch the bus | `Watch::start` | `Watch::start` | `watch(fn)` | `NewWatch(ms, fn)` |
 | attach to a broker | `broker::Client::connect(name)` | `Remote::attach(name)` | `Remote.attach(name)` | `Attach(name)` |
 | start a broker if none is listening | `Client::connect_or_spawn(name, exe)` | `Remote::spawn(name)` | `Remote.spawn(name)` | `Spawn(name)` |
-| record / replay | `replay::Recorder`, `Recording` | — | — | — |
+| record / replay | `replay::Recorder`, `Recording`, `Reader` | `Replay::open(path)` | `Replay.open(path)` | `ReplayOpen(path)` |
+| pack an ELF, copy a UF2 | `flash::pack_elf`, `flash::write_image`, `flash::drives` | `FlashImage::pack`, `image.write`, `flash_drives_json` | `flash_pack`, `image.write`, `flash_drives` | `FlashPack`, `image.Write`, `FlashDrives` |
+| verify the board that came back | `flash::verify` | `flash_verify_json(sel, ms)` | `flash_verify(sel, ms)` | `FlashVerifyJSON(sel, ms)` |
 
 ## Device
 
@@ -971,14 +973,15 @@ loads:
 ```json
 {"click_timed":true,"click_at_on":true,"window_metrics":true,
  "window_client_screen":true,"pursuit":true,"move_report":true,
- "event_json":true,"scheduler":true,"broker":true,"replay":false,"flash":false}
+ "event_json":true,"scheduler":true,"broker":true,"replay":true,
+ "flash":true,"mock_layout":true}
 ```
 A revision number says the symbols may be there; this says whether the ability
-behind them is. `window_metrics` and `window_client_screen` are false off
-Windows, `broker` is false off Windows too (named pipes), and `replay` and
-`flash` are false everywhere: they are Rust-only and a binding over `gdb.dll`
-cannot reach them. A host that finds a `false` it needs links the Rust crate
-instead of waiting for a symbol.
+behind them is. `window_metrics`, `window_client_screen` and `broker` are false off
+Windows (window APIs, named pipes). `mock_layout`, `replay` and `flash` are true
+wherever the library loads, because each is data in and data out; `flash` covers
+packing, copying and verifying, not building — `gdb_flash_build` always answers
+`Unsupported`.
 
 | Handle | Opened by | Carries |
 | --- | --- | --- |
@@ -988,6 +991,8 @@ instead of waiting for a symbol.
 | `gdb_watch` | `gdb_watch_start` | bus enumeration and change callbacks |
 | `gdb_movement` | `gdb_mouse_start_move_*` | one running move |
 | `gdb_scheduler` | `gdb_scheduler_new` | one worker and its task queue |
+| `gdb_flash_image` | `gdb_flash_pack` | one packed UF2 image, until `gdb_flash_image_free` |
+| `gdb_replay` | `gdb_replay_open` | one loaded recording, read entry by entry |
 
 ```c
 typedef void (*gdb_event_fn)(void *user, int32_t kind, int32_t code, const char *message);
@@ -1020,10 +1025,10 @@ a handler installed on a device cannot keep its own host alive.
 
 ## Replay
 
-Rust only, `gdb::replay`. A recording stores intent — "key 7:0x04 down", "move by
-40,-12", "one barrier" — not bytes, so a firmware change that keeps the opcodes
-cannot make it stale; it cannot say what the device did (use `Level::Trace` for
-that).
+`gdb::replay` in Rust, and `gdb_replay_*` over the C ABI. A recording stores
+intent — "key 7:0x04 down", "move by 40,-12", "one barrier" — not bytes, so a
+firmware change that keeps the opcodes cannot make it stale; it cannot say what
+the device did (use `Level::Trace` for that).
 
 ```rust
 pub const VERSION: u32 = 1;
@@ -1038,15 +1043,42 @@ pub enum Op {
 }
 
 pub struct Entry { pub at_ms: u64, pub op: Op }
-pub struct Recording;   // new(seed, (w, h)), push, save, load, play, len, entries()
+pub struct Recording;   // new(seed, (w, h)), push, save, load, play, len, entries(), info()
 pub struct Recorder;    // new(seed, (w, h)), record, record_at, save, load, play, clear
+pub struct Reader;      // open, info, next, rewind, close, entry_json, play
+pub struct Info { version, seed, screen, started_at_ms, entries }
 pub struct Outcome { pub played: usize, pub skipped: usize, pub elapsed_ms: u64 }
 pub struct NoCancel;    // a Cancel that never fires
 ```
 
+```c
+typedef struct gdb_replay gdb_replay;
+typedef struct gdb_replay_outcome {
+    uint64_t played, skipped, elapsed_ms;
+} gdb_replay_outcome;
+
+int32_t gdb_replay_open(const char *path, gdb_replay **out);
+char   *gdb_replay_info(const gdb_replay *replay);
+int32_t gdb_replay_next(gdb_replay *replay, char **out);
+int32_t gdb_replay_play(const gdb_replay *replay, gdb_device *device,
+                        uint32_t speed_milli, gdb_replay_outcome *out);
+int32_t gdb_replay_close(gdb_replay *replay);
+void    gdb_replay_free(gdb_replay *replay);
+```
+
+`info` is `{"version":1,"seed":9,"screen":[1280,720],"started_at_ms":0,
+"entries":3}`, `next` hands over one entry per call in the file's own shape
+(`{"at_ms":12,"op":"key","page":7,"usage":4,"down":true}`) and `NULL` with `Ok` at
+the end, and `play` is the SDK's playback: only that knows the recorded timing and
+what to release when it stops, so a binding never re-sends entries itself.
+`speed_milli` divides every gap — `1000` is the recorded speed, `2000` twice as
+fast — and is an integer because a `double` cannot be passed by every binding that
+calls the C ABI. Recording stays Rust-only: capturing a gesture needs the device
+handle the process that records already owns.
+
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `version` | number | format version; `1` is the only one `load` accepts, anything else (or a missing field) is `Invalid` |
+| `version` | number | format version; `1` is the only one `load`/`open` accepts, anything else (or a missing field) is `Invalid` |
 | `seed` | number | the u64 PRNG seed the gesture was captured with |
 | `screen` | `[width, height]` | the screen the session was recorded on, pixels |
 | `started_at_ms` | number | Unix milliseconds when recording started |
@@ -1060,7 +1092,9 @@ pub struct NoCancel;    // a Cancel that never fires
 
 Keys are snake_case and appear in that order. `save` writes pretty JSON with a
 trailing newline, and two saves of one recording are byte for byte identical —
-no maps, no timestamp added at save time.
+no maps, no timestamp added at save time. `Reader::next` returns the same objects
+and `Reader::entry_json` encodes one, so a host parses one shape whether it reads
+the file or the call.
 
 `play(&mut Device, speed: f64, cancel: &dyn Cancel) -> Result<Outcome>`: `speed` is
 `0.001..=1000` and divides every `at_ms` gap. Playback is deterministic — entries
@@ -1068,16 +1102,22 @@ apply in order from a fixed timeline with no random source of its own — and
 `Outcome::is_complete` is `skipped == 0`. Cancellation is checked between entries
 and inside each wait; a cancelled playback sends RELEASE_ALL when at least one
 entry played, then returns `Ok` with the rest `skipped`, where a device failure is
-an `Err`.
+an `Err`. `Reader::play` is the same call with the reader's own recording and no
+cancel token; a closed reader refuses it, so a host that stopped reading cannot
+send input by accident.
 
 ## Flashing
 
-Rust only, `gdb::flash`; `src/uf2.rs` re-exports its packer.
+`gdb::flash` in Rust, and `gdb_flash_*` over the C ABI — every step except the
+build.
 
 ```rust
 gdb::flash::Config              // cargo, firmware dir, auto_bootloader, boot_drive
 gdb::flash::build(&config, &runner, &cancel, &mut report) -> Result<Image>
+gdb::flash::pack_elf(path) -> Result<Image>             // an ELF already on disk
 gdb::flash::push(&config, Some(&device), &image, &cancel, &mut report) -> Result<Handshake>
+gdb::flash::verify(selector, timeout) -> Result<Verified>   // the handshake alone
+gdb::flash::verify_with(host, selector, timeout) -> Result<Verified>
 gdb::flash::Host                // volumes() + devices() + verify(): what push reads
 gdb::flash::SystemHost          // the real one: drives(), Manager::list(), open and check
 gdb::flash::Waits { drive, handshake }   // 15 s each; push runs on the defaults
@@ -1086,22 +1126,46 @@ gdb::flash::write_image(path, bytes, &cancel) -> Result<()>
 gdb::flash::drives() -> Result<Vec<PathBuf>>            // mounted RPI-RP2 volumes
 ```
 
+```c
+typedef struct gdb_flash_image gdb_flash_image;
+typedef struct gdb_flash_stats { uint64_t bytes, blocks; } gdb_flash_stats;
+
+char    *gdb_flash_drives(void);                     /* ["E:\\"] */
+int32_t  gdb_flash_pack(const char *elf_path, gdb_flash_image **out);
+int32_t  gdb_flash_image_stats(const gdb_flash_image *, gdb_flash_stats *out);
+int32_t  gdb_flash_write(const gdb_flash_image *, const char *path);
+void     gdb_flash_image_free(gdb_flash_image *);
+char    *gdb_flash_verify(const char *selector, uint32_t timeout_ms);
+int32_t  gdb_flash_build(void);                      /* always GDB_UNSUPPORTED */
+```
+
 `Image { bytes, blocks }`. `build` adds the `thumbv6m-none-eabi` target
 (skippable), runs cargo with the `hardware` feature against
 `firmware/app/Cargo.toml`, and packs the ELF: flash segments
 (`0x1000_0000..0x1100_0000`) flattened in address order into one 256-byte aligned
 image, written as 512-byte UF2 blocks with family id `0xE48BFF56`. An ELF with no
-flash segment is rejected.
+flash segment is rejected. `pack_elf` and `gdb_flash_pack` are that last step on a
+file — pure computation, no cargo — which is the half a host in another language
+can do: build with its own toolchain, then pack and copy here.
 
 `push` sends BOOTLOADER (opcode 9), closes the runtime session — the board refuses
 BOOTLOADER while a host keeps polling it — waits for the `RPI-RP2` volume that was
 not mounted before the call (15 s), copies `Firmware.uf2` in 16 KiB chunks, then
 waits for the runtime HID to re-enumerate and reads Feature 14 on it (15 s).
+`verify` is that last wait on its own and answers `{"board":2,"firmware":"3.2.0",
+"leaseMs":2000}`; a board that answers with another board id is `Invalid`, so a
+transfer into the wrong device is never reported as a success.
 
 `Handshake` is `Verified(Verified { board, firmware, lease_ms })` or
 `Unverified(Error)`: `Err` from `push` means the transfer failed, `Unverified` means
 the bytes are on the flash but the board never answered. `Host`, `Waits`, `Runner`,
 `Reporter` and `Cancel` are the seams that let the whole sequence run headless.
+
+`gdb_flash_write` writes 16 KiB at a time on the calling thread and removes the
+file when the copy fails: the bootloader flashes whatever UF2 it finds on the
+drive, so a half-written one must not be left there. Building is not on the C ABI —
+`gdb_flash_build` returns `Unsupported` with a message naming cargo — because it
+needs the firmware checkout and a toolchain, which a library cannot assume.
 
 ## Contract
 

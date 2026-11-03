@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -27,14 +28,13 @@ class DeviceTests(unittest.TestCase):
             set(listed),
             {"click_timed", "click_at_on", "window_metrics", "window_client_screen",
              "pursuit", "move_report", "event_json", "scheduler", "broker", "replay",
-             "flash"},
+             "flash", "mock_layout"},
         )
         for name, value in listed.items():
             self.assertIsInstance(value, bool, name)
-        for name in ("click_timed", "pursuit", "scheduler", "broker"):
+        for name in ("click_timed", "pursuit", "scheduler", "broker", "replay",
+                     "flash", "mock_layout"):
             self.assertTrue(listed[name], name)
-        self.assertFalse(listed["replay"], "replay has no C symbol")
-        self.assertFalse(listed["flash"], "flash has no C symbol")
 
     def test_shared_open_reports_the_stolen_frames(self):
         with gdb.Device.open_mock(shared=True) as device:
@@ -709,6 +709,123 @@ class MockLayoutTests(unittest.TestCase):
                 gdb.Device.open_mock_layout(layout)
             self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
             self.assertIn(message, caught.exception.message)
+
+
+class FlashReplayTests(unittest.TestCase):
+    """The flashing and replay surfaces: pack an ELF, copy it, read a recording
+    entry by entry. No drive, no toolchain and no board."""
+
+    SYMBOLS = (
+        "gdb_flash_drives", "gdb_flash_pack", "gdb_flash_image_stats",
+        "gdb_flash_write", "gdb_flash_image_free", "gdb_flash_verify",
+        "gdb_flash_build", "gdb_replay_open", "gdb_replay_info",
+        "gdb_replay_next", "gdb_replay_play", "gdb_replay_close", "gdb_replay_free",
+    )
+
+    def test_the_library_exports_the_flash_and_replay_symbols(self):
+        for name in self.SYMBOLS:
+            self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
+
+    def test_the_header_declares_the_flash_and_replay_surface(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(here, "..", ".."))
+        path = os.path.join(root, "sdk", "ffi", "include", "gdb.h")
+        with open(path, encoding="utf-8") as handle:
+            header = handle.read()
+        self.assertIn("typedef struct gdb_flash_stats", header)
+        self.assertIn("typedef struct gdb_replay_outcome", header)
+        for name in self.SYMBOLS:
+            self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
+
+    @staticmethod
+    def _elf(payload: bytes) -> bytes:
+        """Minimal ELF32 with one loadable flash segment."""
+        phoff, data_at = 52, 84
+        out = bytearray(data_at)
+        out[0:4] = b"\x7fELF"
+        out[4] = out[5] = 1
+        out[28:32] = phoff.to_bytes(4, "little")
+        out[42:44] = (32).to_bytes(2, "little")
+        out[44:46] = (1).to_bytes(2, "little")
+        out[phoff:phoff + 4] = (1).to_bytes(4, "little")
+        out[phoff + 4:phoff + 8] = data_at.to_bytes(4, "little")
+        out[phoff + 12:phoff + 16] = (0x10000000).to_bytes(4, "little")
+        out[phoff + 16:phoff + 20] = len(payload).to_bytes(4, "little")
+        return bytes(out) + payload
+
+    def test_pack_copy_and_the_failures_a_host_must_tell_apart(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsInstance(gdb.flash_drives(), list)
+
+            elf = os.path.join(root, "firmware.elf")
+            with open(elf, "wb") as handle:
+                handle.write(self._elf(b"\xaa" * 256))
+            with gdb.flash_pack(elf) as image:
+                self.assertEqual(image.stats().as_dict(), {"bytes": 512, "blocks": 1})
+                target = os.path.join(root, "Firmware.uf2")
+                image.write(target)
+                with open(target, "rb") as handle:
+                    self.assertEqual(handle.read(4), (0x0A324655).to_bytes(4, "little"))
+                with self.assertRaises(gdb.GdbError) as caught:
+                    image.write(os.path.join(root, "no-drive", "Firmware.uf2"))
+                self.assertEqual(caught.exception.code, gdb.ErrorCode.IO)
+
+            with open(elf, "wb") as handle:
+                handle.write(b"not an elf")
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.flash_pack(elf)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.flash_build()
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.UNSUPPORTED)
+            self.assertIn("cargo", caught.exception.message)
+
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.flash_verify("NO-SUCH-BOARD", 0)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.TIMEOUT)
+
+    def test_a_recording_reads_entry_by_entry_and_plays(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "recording.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "version": 1, "seed": 9, "screen": [1280, 720],
+                        "started_at_ms": 0,
+                        "entries": [
+                            {"at_ms": 0, "op": "key", "page": 7, "usage": 4, "down": True},
+                            {"at_ms": 20, "op": "buttons", "bits": 1},
+                            {"at_ms": 40, "op": "barrier"},
+                        ],
+                    },
+                    handle,
+                )
+
+            with gdb.Replay.open(path) as replay:
+                info = replay.info
+                self.assertEqual((info["version"], info["entries"]), (1, 3))
+                entries = []
+                while (entry := replay.next()) is not None:
+                    entries.append(entry)
+                self.assertEqual([entry["op"] for entry in entries], ["key", "buttons", "barrier"])
+                self.assertEqual(entries[0]["page"], 7)
+
+                with gdb.Device.open_mock() as device:
+                    outcome = replay.play(device, 1000.0)
+                    self.assertEqual((outcome.played, outcome.skipped), (3, 0))
+
+                replay.close()
+                with self.assertRaises(gdb.GdbError) as caught:
+                    replay.next()
+                self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
+            foreign = os.path.join(root, "foreign.json")
+            with open(foreign, "w", encoding="utf-8") as handle:
+                handle.write('{"version":7,"seed":1,"screen":[1,1],"started_at_ms":0,"entries":[]}')
+            with self.assertRaises(gdb.GdbError) as caught:
+                gdb.Replay.open(foreign)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
 
 
 if __name__ == "__main__":

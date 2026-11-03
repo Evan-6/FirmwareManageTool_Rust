@@ -349,6 +349,19 @@ var (
 	procOpenMockLayout *syscall.LazyProc
 	procOpenMockLayoutShared *syscall.LazyProc
 	procDeviceMonitorsJSON *syscall.LazyProc
+	procFlashDrives *syscall.LazyProc
+	procFlashPack *syscall.LazyProc
+	procFlashStats *syscall.LazyProc
+	procFlashWrite *syscall.LazyProc
+	procFlashImageFree *syscall.LazyProc
+	procFlashVerify *syscall.LazyProc
+	procFlashBuild *syscall.LazyProc
+	procReplayOpen *syscall.LazyProc
+	procReplayInfo *syscall.LazyProc
+	procReplayNext *syscall.LazyProc
+	procReplayPlay *syscall.LazyProc
+	procReplayClose *syscall.LazyProc
+	procReplayFree *syscall.LazyProc
 	procOpenShared     *syscall.LazyProc
 	procOpenMockShared *syscall.LazyProc
 	procStolenFrames   *syscall.LazyProc
@@ -476,6 +489,19 @@ func library() *syscall.LazyDLL {
 		procOpenMockLayout = dll.NewProc("gdb_open_mock_layout")
 		procOpenMockLayoutShared = dll.NewProc("gdb_open_mock_layout_shared")
 		procDeviceMonitorsJSON = dll.NewProc("gdb_device_monitors_json")
+		procFlashDrives = dll.NewProc("gdb_flash_drives")
+		procFlashPack = dll.NewProc("gdb_flash_pack")
+		procFlashStats = dll.NewProc("gdb_flash_image_stats")
+		procFlashWrite = dll.NewProc("gdb_flash_write")
+		procFlashImageFree = dll.NewProc("gdb_flash_image_free")
+		procFlashVerify = dll.NewProc("gdb_flash_verify")
+		procFlashBuild = dll.NewProc("gdb_flash_build")
+		procReplayOpen = dll.NewProc("gdb_replay_open")
+		procReplayInfo = dll.NewProc("gdb_replay_info")
+		procReplayNext = dll.NewProc("gdb_replay_next")
+		procReplayPlay = dll.NewProc("gdb_replay_play")
+		procReplayClose = dll.NewProc("gdb_replay_close")
+		procReplayFree = dll.NewProc("gdb_replay_free")
 		procOpenShared = dll.NewProc("gdb_open_shared")
 		procOpenMockShared = dll.NewProc("gdb_open_mock_shared")
 		procStolenFrames = dll.NewProc("gdb_stolen_frames")
@@ -1005,6 +1031,229 @@ func PreparePlatform() (PlatformState, error) {
 	}
 	return state, nil
 }
+
+// FlashStats is the size of a packed image: the bytes of the UF2 file and the
+// number of 512-byte blocks it carries.
+type FlashStats struct {
+	Bytes  uint64
+	Blocks uint64
+}
+
+type rawFlashStats struct {
+	Bytes  uint64
+	Blocks uint64
+}
+
+// FlashImage is a packed UF2 image: pack an ELF once, look at its size, copy it
+// to the bootloader drive.
+type FlashImage struct {
+	handle uintptr
+}
+
+// FlashDrivesJSON lists the mounted RP2040 bootloader volumes as a JSON array of
+// paths: ["E:\\"]. An empty array is a board that is not in BOOTSEL, not an
+// error.
+func FlashDrivesJSON() (string, error) {
+	library()
+	pointer, _, _ := procFlashDrives.Call()
+	return take(pointer)
+}
+
+// FlashDrives is FlashDrivesJSON decoded.
+func FlashDrives() ([]string, error) {
+	text, err := FlashDrivesJSON()
+	if err != nil {
+		return nil, err
+	}
+	var drives []string
+	if err := json.Unmarshal([]byte(text), &drives); err != nil {
+		return nil, &Error{Code: Invalid, Message: "the drive list is not a JSON array: " + err.Error()}
+	}
+	return drives, nil
+}
+
+// FlashPack packs an ELF that is already built into the UF2 image a bootloader
+// drive takes. Building needs cargo and a firmware checkout, which FlashBuild
+// refuses by design.
+func FlashPack(elfPath string) (*FlashImage, error) {
+	library()
+	path, cerr := syscall.BytePtrFromString(elfPath)
+	if cerr != nil {
+		return nil, &Error{Code: Invalid, Message: cerr.Error()}
+	}
+	var handle uintptr
+	code, _, _ := procFlashPack.Call(
+		uintptr(unsafe.Pointer(path)),
+		uintptr(unsafe.Pointer(&handle)),
+	)
+	if code != 0 {
+		return nil, check(code)
+	}
+	return &FlashImage{handle: handle}, nil
+}
+
+// Stats is the size of the packed image.
+func (f *FlashImage) Stats() (FlashStats, error) {
+	library()
+	var raw rawFlashStats
+	code, _, _ := procFlashStats.Call(f.handle, uintptr(unsafe.Pointer(&raw)))
+	if code != 0 {
+		return FlashStats{}, check(code)
+	}
+	return FlashStats{Bytes: raw.Bytes, Blocks: raw.Blocks}, nil
+}
+
+// Write copies the image to path, usually <drive>:\Firmware.uf2, 16 KiB at a
+// time. A failed copy removes the file again: the bootloader flashes whatever UF2
+// it finds on the drive.
+func (f *FlashImage) Write(path string) error {
+	library()
+	target, cerr := syscall.BytePtrFromString(path)
+	if cerr != nil {
+		return &Error{Code: Invalid, Message: cerr.Error()}
+	}
+	code, _, _ := procFlashWrite.Call(f.handle, uintptr(unsafe.Pointer(target)))
+	if code != 0 {
+		return check(code)
+	}
+	return nil
+}
+
+// Close releases the packed image.
+func (f *FlashImage) Close() {
+	if f.handle != 0 {
+		procFlashImageFree.Call(f.handle)
+		f.handle = 0
+	}
+}
+
+// Handle is the raw gdb_flash_image pointer, for a caller mixing layers.
+func (f *FlashImage) Handle() uintptr { return f.handle }
+
+// FlashVerifyJSON waits for a board to enumerate and answers its Feature 14
+// identity as {"board":2,"firmware":"3.2.0","leaseMs":2000}.
+//
+// selector is a USB serial or a HID path, "" for the first board. A board that
+// answers with another board id is Code Invalid, a board that never answers Code
+// Timeout, so a transfer into the wrong device is never reported as a success.
+func FlashVerifyJSON(selector string, timeoutMs uint32) (string, error) {
+	library()
+	var pointer uintptr
+	if selector == "" {
+		pointer, _, _ = procFlashVerify.Call(0, uintptr(timeoutMs))
+	} else {
+		name, cerr := syscall.BytePtrFromString(selector)
+		if cerr != nil {
+			return "", &Error{Code: Invalid, Message: cerr.Error()}
+		}
+		pointer, _, _ = procFlashVerify.Call(uintptr(unsafe.Pointer(name)), uintptr(timeoutMs))
+	}
+	return take(pointer)
+}
+
+// FlashBuild always fails with Code Unsupported: building needs cargo and the
+// firmware checkout. Pass FlashPack the ELF a build already produced.
+func FlashBuild() error {
+	library()
+	code, _, _ := procFlashBuild.Call()
+	return check(code)
+}
+
+// ReplayOutcome is what a playback did.
+type ReplayOutcome struct {
+	Played    uint64
+	Skipped   uint64
+	ElapsedMs uint64
+}
+
+type rawReplayOutcome struct {
+	Played    uint64
+	Skipped   uint64
+	ElapsedMs uint64
+}
+
+// Replay is a recording read one entry at a time, and played through the SDK.
+type Replay struct {
+	handle uintptr
+}
+
+// ReplayOpen loads a recording written by this SDK's format version. A different
+// version is Code Invalid before any entry is looked at.
+func ReplayOpen(path string) (*Replay, error) {
+	library()
+	name, cerr := syscall.BytePtrFromString(path)
+	if cerr != nil {
+		return nil, &Error{Code: Invalid, Message: cerr.Error()}
+	}
+	var handle uintptr
+	code, _, _ := procReplayOpen.Call(
+		uintptr(unsafe.Pointer(name)),
+		uintptr(unsafe.Pointer(&handle)),
+	)
+	if code != 0 {
+		return nil, check(code)
+	}
+	return &Replay{handle: handle}, nil
+}
+
+// InfoJSON is the header of the recording:
+// {"version":1,"seed":9,"screen":[1280,720],"started_at_ms":0,"entries":3}.
+func (r *Replay) InfoJSON() (string, error) {
+	library()
+	pointer, _, _ := procReplayInfo.Call(r.handle)
+	return take(pointer)
+}
+
+// Next hands over the next entry in the file's own shape and false at the end of
+// the recording: {"at_ms":12,"op":"key","page":7,"usage":4,"down":true}.
+func (r *Replay) Next() (string, bool, error) {
+	library()
+	var pointer uintptr
+	code, _, _ := procReplayNext.Call(r.handle, uintptr(unsafe.Pointer(&pointer)))
+	if code != 0 {
+		return "", false, check(code)
+	}
+	if pointer == 0 {
+		return "", false, nil
+	}
+	text, err := take(pointer)
+	if err != nil {
+		return "", false, err
+	}
+	return text, true, nil
+}
+
+// Play sends the whole recording to device with the SDK's own playback, from the
+// first entry. speed divides every recorded gap: 2.0 runs twice as fast. Only the
+// SDK knows the recorded timing and what to release when a playback stops, which
+// is why the entries are not re-sent here.
+func (r *Replay) Play(device *Device, speed float64) (ReplayOutcome, error) {
+	library()
+	var raw rawReplayOutcome
+	milli := uint32(speed*1000 + 0.5)
+	code, _, _ := procReplayPlay.Call(
+		r.handle,
+		device.Handle(),
+		uintptr(milli),
+		uintptr(unsafe.Pointer(&raw)),
+	)
+	if code != 0 {
+		return ReplayOutcome{}, check(code)
+	}
+	return ReplayOutcome{Played: raw.Played, Skipped: raw.Skipped, ElapsedMs: raw.ElapsedMs}, nil
+}
+
+// Close stops the reader and releases the handle.
+func (r *Replay) Close() {
+	if r.handle != 0 {
+		procReplayClose.Call(r.handle)
+		procReplayFree.Call(r.handle)
+		r.handle = 0
+	}
+}
+
+// Handle is the raw gdb_replay pointer, for a caller mixing layers.
+func (r *Replay) Handle() uintptr { return r.handle }
 
 func boolArg(value bool) uintptr {
 	if value {

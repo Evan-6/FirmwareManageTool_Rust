@@ -46,6 +46,14 @@ __all__ = [
     "monitors",
     "window_metrics",
     "prepare_platform",
+    "FlashStats",
+    "FlashImage",
+    "flash_drives",
+    "flash_pack",
+    "flash_verify",
+    "flash_build",
+    "ReplayOutcome",
+    "Replay",
     "abi_versions",
     "capabilities",
     "LIBRARY",
@@ -220,6 +228,30 @@ _D.gdb_open_mock_layout_shared.restype = c_void_p
 _D.gdb_open_mock_layout_shared.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
 _D.gdb_device_monitors_json.argtypes = [c_void_p]
 _D.gdb_device_monitors_json.restype = c_void_p
+
+_D.gdb_flash_drives.restype = c_void_p
+_D.gdb_flash_pack.argtypes = [c_char_p, POINTER(c_void_p)]
+_D.gdb_flash_pack.restype = c_int32
+_D.gdb_flash_image_stats.argtypes = [c_void_p, c_void_p]
+_D.gdb_flash_image_stats.restype = c_int32
+_D.gdb_flash_write.argtypes = [c_void_p, c_char_p]
+_D.gdb_flash_write.restype = c_int32
+_D.gdb_flash_image_free.argtypes = [c_void_p]
+_D.gdb_flash_verify.argtypes = [c_char_p, c_uint32]
+_D.gdb_flash_verify.restype = c_void_p
+_D.gdb_flash_build.restype = c_int32
+
+_D.gdb_replay_open.argtypes = [c_char_p, POINTER(c_void_p)]
+_D.gdb_replay_open.restype = c_int32
+_D.gdb_replay_info.argtypes = [c_void_p]
+_D.gdb_replay_info.restype = c_void_p
+_D.gdb_replay_next.argtypes = [c_void_p, POINTER(c_void_p)]
+_D.gdb_replay_next.restype = c_int32
+_D.gdb_replay_play.argtypes = [c_void_p, c_void_p, c_uint32, c_void_p]
+_D.gdb_replay_play.restype = c_int32
+_D.gdb_replay_close.argtypes = [c_void_p]
+_D.gdb_replay_close.restype = c_int32
+_D.gdb_replay_free.argtypes = [c_void_p]
 _D.gdb_open_shared.restype = c_void_p
 _D.gdb_open_shared.argtypes = [c_char_p, c_uint32, c_bool, c_bool]
 _D.gdb_open_mock_shared.restype = c_void_p
@@ -1326,6 +1358,169 @@ def prepare_platform() -> dict:
     and safe beside an open device. Every ``Device.open*`` already calls it.
     """
     return _take(_D.gdb_platform_prepare())
+
+
+class FlashStats(ctypes.Structure):
+    """The size of a packed image, as ``gdb_flash_image_stats`` fills it."""
+
+    _fields_ = [("bytes", c_uint64), ("blocks", c_uint64)]
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name, _ in self._fields_}
+
+
+class FlashImage:
+    """A packed UF2 image: pack once, inspect it, copy it where the drive is.
+
+    ``gdb_flash_pack`` reads an ELF that is already built — building needs cargo
+    and a firmware checkout, which ``flash_build()`` refuses by design — and the
+    copy is the same chunked write the SDK does, so an interrupted one removes
+    the file instead of leaving a half-written image the bootloader would flash.
+    """
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer or 0
+
+    @classmethod
+    def pack(cls, elf_path: str) -> "FlashImage":
+        out = c_void_p()
+        _check(_D.gdb_flash_pack(elf_path.encode("utf-8"), ctypes.byref(out)))
+        return cls(out.value or 0)
+
+    def stats(self) -> FlashStats:
+        out = FlashStats()
+        _check(_D.gdb_flash_image_stats(self._handle(), ctypes.byref(out)))
+        return out
+
+    def write(self, path: str) -> None:
+        """Copies the image to ``path``, usually ``<drive>:\\Firmware.uf2``."""
+        _check(_D.gdb_flash_write(self._handle(), path.encode("utf-8")))
+
+    def close(self) -> None:
+        if getattr(self, "_pointer", 0):
+            _D.gdb_flash_image_free(self._pointer)
+            self._pointer = 0
+
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise GdbError(ErrorCode.INVALID, "flash image is closed")
+        return self._pointer
+
+    def __enter__(self) -> "FlashImage":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        if getattr(self, "_pointer", 0):
+            _D.gdb_flash_image_free(self._pointer)
+            self._pointer = 0
+
+
+class ReplayOutcome(ctypes.Structure):
+    """What a playback did, as ``gdb_replay_play`` fills it."""
+
+    _fields_ = [("played", c_uint64), ("skipped", c_uint64), ("elapsed_ms", c_uint64)]
+
+    def as_dict(self) -> dict:
+        return {name: getattr(self, name) for name, _ in self._fields_}
+
+
+class Replay:
+    """A recording read one entry at a time, and played through the SDK.
+
+    ``next()`` hands over one entry per call in the file's own shape
+    (``{"at_ms": 12, "op": "key", "page": 7, ...}``) and returns ``None`` at the
+    end; ``play`` sends the whole recording to a device with the SDK's own
+    playback, because only that knows the recorded timing and what to release when
+    it stops. ``close()`` stops the reader and releases the handle.
+    """
+
+    def __init__(self, pointer: int):
+        self._pointer = pointer or 0
+
+    @classmethod
+    def open(cls, path: str) -> "Replay":
+        out = c_void_p()
+        _check(_D.gdb_replay_open(path.encode("utf-8"), ctypes.byref(out)))
+        return cls(out.value or 0)
+
+    @property
+    def info(self) -> dict:
+        """The header: version, seed, screen, started_at_ms, entries."""
+        return _take(_D.gdb_replay_info(self._handle()))
+
+    def next(self) -> dict | None:
+        """The next entry, or ``None`` at the end of the recording."""
+        out = c_void_p()
+        _check(_D.gdb_replay_next(self._handle(), ctypes.byref(out)))
+        if not out.value:
+            return None
+        try:
+            return json.loads(ctypes.cast(out, c_char_p).value.decode("utf-8"))
+        finally:
+            _D.gdb_string_free(out)
+
+    def play(self, device: "Device", speed: float = 1.0) -> ReplayOutcome:
+        """Plays the recording onto ``device``; ``speed`` divides every gap.
+
+        ``2.0`` runs twice as fast, ``0.5`` half. The ABI carries it as
+        thousandths, because a double cannot cross every binding's call path.
+        """
+        out = ReplayOutcome()
+        milli = int(round(speed * 1000))
+        _check(_D.gdb_replay_play(self._handle(), device._handle(), milli, ctypes.byref(out)))
+        return out
+
+    def close(self) -> None:
+        if getattr(self, "_pointer", 0):
+            _D.gdb_replay_close(self._pointer)
+            _D.gdb_replay_free(self._pointer)
+            self._pointer = 0
+
+    def _handle(self) -> int:
+        if not self._pointer:
+            raise GdbError(ErrorCode.INVALID, "replay is closed")
+        return self._pointer
+
+    def __enter__(self) -> "Replay":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # pragma: no cover - best effort
+        if getattr(self, "_pointer", 0):
+            _D.gdb_replay_free(self._pointer)
+            self._pointer = 0
+
+
+def flash_drives() -> list[str]:
+    """Every mounted RP2040 bootloader volume. An empty list means the board is
+    not in BOOTSEL, which is what the drive table looks like before the reboot."""
+    return _take(_D.gdb_flash_drives())
+
+
+def flash_pack(elf_path: str) -> FlashImage:
+    """Packs an ELF that is already built into a UF2 image."""
+    return FlashImage.pack(elf_path)
+
+
+def flash_verify(selector: str | None = None, timeout_ms: int = 15_000) -> dict:
+    """Waits for a board and answers with its Feature 14 identity.
+
+    ``{"board": 2, "firmware": "3.2.0", "leaseMs": 2000}``. A board that answers
+    with another board id raises ``INVALID``, so a transfer into the wrong device
+    is never reported as a success; one that never answers raises ``TIMEOUT``.
+    """
+    return _take(_D.gdb_flash_verify(selector.encode("utf-8") if selector else None, timeout_ms))
+
+
+def flash_build() -> None:
+    """Always raises ``UNSUPPORTED``: building needs cargo and the firmware
+    checkout. Pass ``flash_pack`` the ELF a build already produced."""
+    _check(_D.gdb_flash_build())
 
 
 def abi_versions() -> tuple[int, int]:

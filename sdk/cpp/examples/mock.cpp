@@ -7,6 +7,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -285,8 +287,100 @@ int main() {
         const std::string listed = gdb::capabilities();
         std::cout << "capabilities " << listed << "\n";
         assert(listed.find("\"click_timed\":true") != std::string::npos);
-        assert(listed.find("\"replay\":false") != std::string::npos);
+        assert(listed.find("\"replay\":true") != std::string::npos);
+        assert(listed.find("\"flash\":true") != std::string::npos);
+        assert(listed.find("\"mock_layout\":true") != std::string::npos);
         assert(listed.find("\"event_json\":true") != std::string::npos);
+    }
+
+    // The flashing and replay surfaces: an ELF packed and copied, a recording read
+    // entry by entry and played. No drive, no toolchain and no board.
+    {
+        const std::string drives = gdb::flash_drives_json();
+        std::cout << "drives " << drives << "\n";
+        assert(drives.size() >= 2 && drives.front() == '[' && drives.back() == ']');
+
+        // A minimal ELF32 with one loadable flash segment.
+        std::vector<uint8_t> elf(84, 0);
+        elf[0] = 0x7f;
+        elf[1] = 'E';
+        elf[2] = 'L';
+        elf[3] = 'F';
+        elf[4] = elf[5] = 1;
+        const auto put32 = [&elf](std::size_t at, uint32_t value) {
+            for (int byte = 0; byte < 4; ++byte) {
+                elf[at + byte] = static_cast<uint8_t>(value >> (8 * byte));
+            }
+        };
+        put32(28, 52);   // e_phoff
+        elf[42] = 32;    // e_phentsize
+        elf[44] = 1;     // e_phnum
+        put32(52, 1);    // PT_LOAD
+        put32(56, 84);   // p_offset
+        put32(64, 0x10000000u);  // p_paddr
+        put32(68, 256);  // p_filesz
+        elf.resize(84 + 256, 0xAA);
+
+        const auto stamp = std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        const std::filesystem::path root = std::filesystem::temp_directory_path();
+        const std::filesystem::path elf_path = root / ("gdb-cpp-" + stamp + ".elf");
+        const std::filesystem::path uf2_path = root / ("gdb-cpp-" + stamp + ".uf2");
+        const std::filesystem::path recording_path =
+            root / ("gdb-cpp-" + stamp + ".json");
+        {
+            std::ofstream elf_file(elf_path, std::ios::binary);
+            elf_file.write(reinterpret_cast<const char*>(elf.data()),
+                           static_cast<std::streamsize>(elf.size()));
+        }
+
+        auto image = gdb::FlashImage::pack(elf_path.string());
+        const gdb::FlashStats stats = image.stats();
+        std::cout << "uf2 " << stats.bytes << " bytes in " << stats.blocks << " blocks\n";
+        assert(stats.bytes == 512 && stats.blocks == 1);
+        image.write(uf2_path.string());
+        {
+            std::ifstream uf2(uf2_path, std::ios::binary);
+            uint8_t magic[4] = {};
+            uf2.read(reinterpret_cast<char*>(magic), 4);
+            assert(magic[0] == 0x55 && magic[1] == 0x46 && magic[2] == 0x32);
+        }
+        image.close();
+
+        // Building is a typed refusal, not a missing symbol.
+        bool refused = false;
+        try {
+            gdb::flash_build();
+        } catch (const gdb::Error& error) {
+            refused = error.code() == gdb::ErrorCode::Unsupported;
+        }
+        assert(refused && "flash_build must refuse by design");
+
+        // A recording read entry by entry, then played on the mock.
+        {
+            std::ofstream recording(recording_path);
+            recording << R"({"version":1,"seed":9,"screen":[1280,720],"started_at_ms":0,)"
+                      << R"("entries":[{"at_ms":0,"op":"key","page":7,"usage":4,"down":true},)"
+                      << R"({"at_ms":20,"op":"barrier"}]})";
+        }
+        auto replay = gdb::Replay::open(recording_path.string());
+        const std::string header = replay.info_json();
+        std::cout << "replay " << header << "\n";
+        assert(header.find("\"entries\":2") != std::string::npos);
+        int entries = 0;
+        while (const auto entry = replay.next()) {
+            assert(entry->find("\"op\"") != std::string::npos);
+            ++entries;
+        }
+        assert(entries == 2);
+        const gdb::ReplayOutcome outcome = replay.play(device, 1.0);
+        assert(outcome.played == 2 && outcome.is_complete());
+        replay.close();
+
+        std::error_code ignored;
+        std::filesystem::remove(elf_path, ignored);
+        std::filesystem::remove(uf2_path, ignored);
+        std::filesystem::remove(recording_path, ignored);
     }
 
     // The caller-timed click, the aim-and-click pair and the pursuit move.

@@ -426,6 +426,20 @@ struct Api {
     decltype(&gdb_watch_stop) watch_stop = nullptr;
     decltype(&gdb_watch_free) watch_free = nullptr;
     decltype(&gdb_watch_listing) watch_listing = nullptr;
+    /* Flash and replay: the same header, loaded softly as well. */
+    decltype(&gdb_flash_drives) flash_drives = nullptr;
+    decltype(&gdb_flash_pack) flash_pack = nullptr;
+    decltype(&gdb_flash_image_stats) flash_image_stats = nullptr;
+    decltype(&gdb_flash_write) flash_write = nullptr;
+    decltype(&gdb_flash_image_free) flash_image_free = nullptr;
+    decltype(&gdb_flash_verify) flash_verify = nullptr;
+    decltype(&gdb_flash_build) flash_build = nullptr;
+    decltype(&gdb_replay_open) replay_open = nullptr;
+    decltype(&gdb_replay_info) replay_info = nullptr;
+    decltype(&gdb_replay_next) replay_next = nullptr;
+    decltype(&gdb_replay_play) replay_play = nullptr;
+    decltype(&gdb_replay_close) replay_close = nullptr;
+    decltype(&gdb_replay_free) replay_free = nullptr;
 };
 
 inline Api& api();
@@ -568,6 +582,19 @@ inline Api& api() {
         GDB_OPTIONAL(watch_stop, "gdb_watch_stop")
         GDB_OPTIONAL(watch_free, "gdb_watch_free")
         GDB_OPTIONAL(watch_listing, "gdb_watch_listing")
+        GDB_OPTIONAL(flash_drives, "gdb_flash_drives")
+        GDB_OPTIONAL(flash_pack, "gdb_flash_pack")
+        GDB_OPTIONAL(flash_image_stats, "gdb_flash_image_stats")
+        GDB_OPTIONAL(flash_write, "gdb_flash_write")
+        GDB_OPTIONAL(flash_image_free, "gdb_flash_image_free")
+        GDB_OPTIONAL(flash_verify, "gdb_flash_verify")
+        GDB_OPTIONAL(flash_build, "gdb_flash_build")
+        GDB_OPTIONAL(replay_open, "gdb_replay_open")
+        GDB_OPTIONAL(replay_info, "gdb_replay_info")
+        GDB_OPTIONAL(replay_next, "gdb_replay_next")
+        GDB_OPTIONAL(replay_play, "gdb_replay_play")
+        GDB_OPTIONAL(replay_close, "gdb_replay_close")
+        GDB_OPTIONAL(replay_free, "gdb_replay_free")
 #undef GDB_OPTIONAL
         return loaded;
     }();
@@ -694,6 +721,31 @@ inline void require_watch_surface() {
     throw Error(ErrorCode::Unsupported,
                 "this gdb.dll predates the arrival watch; use a library that "
                 "exports gdb_watch_start");
+}
+
+// Flashing and replaying arrived together as one batch, and are loaded softly:
+// only the calls that need them report the gap.
+inline void require_flash_surface() {
+    if (api().flash_drives != nullptr && api().flash_pack != nullptr &&
+        api().flash_image_stats != nullptr && api().flash_write != nullptr &&
+        api().flash_image_free != nullptr && api().flash_verify != nullptr &&
+        api().flash_build != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the flashing surface; use a library that "
+                "exports gdb_flash_pack");
+}
+
+inline void require_replay_surface() {
+    if (api().replay_open != nullptr && api().replay_info != nullptr &&
+        api().replay_next != nullptr && api().replay_play != nullptr &&
+        api().replay_close != nullptr && api().replay_free != nullptr) {
+        return;
+    }
+    throw Error(ErrorCode::Unsupported,
+                "this gdb.dll predates the replay surface; use a library that "
+                "exports gdb_replay_open");
 }
 
 // Frees a packet's payload however the scope is left.
@@ -1583,7 +1635,7 @@ inline std::pair<uint32_t, uint32_t> abi_versions() {
     return {major, minor};
 }
 // What the loaded library can do, as the ABI's JSON object of booleans: a false
-// is a capability with no C symbol, or one this platform does not have.
+// is a capability this platform does not have, or one there is no C symbol for.
 inline std::string capabilities() {
     if (api().capabilities == nullptr) {
         throw Error(ErrorCode::Unsupported,
@@ -1592,5 +1644,187 @@ inline std::string capabilities() {
     }
     return detail::take(api().capabilities());
 }
+
+// ----------------------------------------------------------------------- flash
+//
+// The flashing steps a host can do from any language: find the bootloader
+// volumes, pack an ELF it built itself, copy the image, verify the board that
+// comes back. Building the firmware needs cargo and a firmware checkout, which a
+// C ABI call cannot assume: flash_build() refuses by design.
+
+/// The size of a packed image.
+struct FlashStats {
+    uint64_t bytes = 0;
+    uint64_t blocks = 0;
+
+    static FlashStats from_raw(const gdb_flash_stats& raw) {
+        FlashStats stats;
+        stats.bytes = raw.bytes;
+        stats.blocks = raw.blocks;
+        return stats;
+    }
+};
+
+/// A packed UF2 image: pack once, look at its size, copy it to the drive.
+class FlashImage {
+public:
+    FlashImage() = default;
+    explicit FlashImage(gdb_flash_image* raw) : handle_(raw) {}
+
+    /// Packs an ELF that is already on disk. Pure computation: no drive, no cargo.
+    static FlashImage pack(const std::string& elf_path) {
+        detail::require_flash_surface();
+        gdb_flash_image* raw = nullptr;
+        detail::check(api().flash_pack(elf_path.c_str(), &raw));
+        return FlashImage(raw);
+    }
+
+    FlashImage(FlashImage&&) noexcept = default;
+    FlashImage& operator=(FlashImage&&) noexcept = default;
+    FlashImage(const FlashImage&) = delete;
+    FlashImage& operator=(const FlashImage&) = delete;
+    ~FlashImage() {
+        if (handle_ != nullptr) {
+            api().flash_image_free(handle_);
+        }
+    }
+
+    bool valid() const { return handle_ != nullptr; }
+    gdb_flash_image* raw() const { return handle_; }
+
+    FlashStats stats() const {
+        gdb_flash_stats raw{};
+        detail::check(api().flash_image_stats(handle_, &raw));
+        return FlashStats::from_raw(raw);
+    }
+
+    /// Copies the image to `path`, usually `<drive>\\Firmware.uf2`. A failed copy
+    /// removes the file again: the bootloader flashes whatever UF2 it finds.
+    void write(const std::string& path) const {
+        detail::check(api().flash_write(handle_, path.c_str()));
+    }
+
+    void close() {
+        if (handle_ != nullptr) {
+            api().flash_image_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+private:
+    gdb_flash_image* handle_ = nullptr;
+};
+
+/// Every mounted RP2040 bootloader volume as the ABI's JSON array of paths:
+/// ["E:\\"]. An empty array is a board that is not in BOOTSEL, not an error.
+inline std::string flash_drives_json() {
+    detail::require_flash_surface();
+    return detail::take(api().flash_drives());
+}
+
+/// Packs an ELF that is already built; the same call as FlashImage::pack.
+inline FlashImage flash_pack(const std::string& elf_path) {
+    return FlashImage::pack(elf_path);
+}
+
+/// Waits for a board and answers its Feature 14 identity as JSON:
+/// {"board":2,"firmware":"3.2.0","leaseMs":2000}. A board that answers with
+/// another board id throws Invalid, one that never answers Timeout.
+inline std::string flash_verify_json(const std::string& selector = std::string(),
+                                     uint32_t timeout_ms = 15000) {
+    detail::require_flash_surface();
+    return detail::take(api().flash_verify(selector.empty() ? nullptr : selector.c_str(),
+                                           timeout_ms));
+}
+
+/// Always throws Unsupported: building needs cargo and the firmware checkout.
+/// Pass FlashImage::pack the ELF a build already produced.
+inline void flash_build() {
+    detail::require_flash_surface();
+    detail::check(api().flash_build());
+}
+
+// ---------------------------------------------------------------------- replay
+//
+// A recording is a JSON file of intent. next() hands over one entry per call in
+// the file's own shape; play() is the SDK's own playback, because only that knows
+// the recorded timing and what to release when it stops.
+
+/// What a playback did.
+struct ReplayOutcome {
+    uint64_t played = 0;
+    uint64_t skipped = 0;
+    uint64_t elapsed_ms = 0;
+
+    bool is_complete() const { return skipped == 0; }
+};
+
+/// A recording read one entry at a time, and played through the SDK.
+class Replay {
+public:
+    Replay() = default;
+    explicit Replay(gdb_replay* raw) : handle_(raw) {}
+
+    /// Loads a recording written by this SDK's format version; another version is
+    /// Invalid before any entry is looked at.
+    static Replay open(const std::string& path) {
+        detail::require_replay_surface();
+        gdb_replay* raw = nullptr;
+        detail::check(api().replay_open(path.c_str(), &raw));
+        return Replay(raw);
+    }
+
+    Replay(Replay&&) noexcept = default;
+    Replay& operator=(Replay&&) noexcept = default;
+    Replay(const Replay&) = delete;
+    Replay& operator=(const Replay&) = delete;
+    ~Replay() {
+        if (handle_ != nullptr) {
+            api().replay_free(handle_);
+        }
+    }
+
+    bool valid() const { return handle_ != nullptr; }
+    gdb_replay* raw() const { return handle_; }
+
+    /// The header: {"version","seed","screen","started_at_ms","entries"}.
+    std::string info_json() const { return detail::take(api().replay_info(handle_)); }
+
+    /// The next entry in the file's own shape, or std::nullopt at the end.
+    std::optional<std::string> next() {
+        char* json = nullptr;
+        detail::check(api().replay_next(handle_, &json));
+        if (json == nullptr) {
+            return std::nullopt;
+        }
+        std::string text(json);
+        api().string_free(json);
+        return text;
+    }
+
+    /// Plays the whole recording onto `device`, from the first entry. `speed`
+    /// divides every recorded gap: 2.0 runs twice as fast, 0.5 half.
+    ReplayOutcome play(const Device& device, double speed = 1.0) const {
+        gdb_replay_outcome raw{};
+        const auto milli = static_cast<uint32_t>(speed * 1000.0 + 0.5);
+        detail::check(api().replay_play(handle_, device.raw(), milli, &raw));
+        ReplayOutcome outcome;
+        outcome.played = raw.played;
+        outcome.skipped = raw.skipped;
+        outcome.elapsed_ms = raw.elapsed_ms;
+        return outcome;
+    }
+
+    void close() {
+        if (handle_ != nullptr) {
+            api().replay_close(handle_);
+            api().replay_free(handle_);
+            handle_ = nullptr;
+        }
+    }
+
+private:
+    gdb_replay* handle_ = nullptr;
+};
 
 }  // namespace gdb

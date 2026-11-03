@@ -125,6 +125,16 @@ STRUCTS = {
         "go": "MoveReport",
         "cpp": "MoveReport",
     },
+    "gdb_flash_stats": {
+        "python": "FlashStats",
+        "go": "rawFlashStats",
+        "cpp": "FlashStats",
+    },
+    "gdb_replay_outcome": {
+        "python": "ReplayOutcome",
+        "go": "rawReplayOutcome",
+        "cpp": "ReplayOutcome",
+    },
 }
 
 # Capabilities that are not one symbol each: a constructor or a method name has

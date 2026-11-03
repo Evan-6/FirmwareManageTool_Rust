@@ -169,9 +169,9 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | logging: level, sink, `Trace` packet log | yes | yes |
 | events: state changes and errors | yes | yes |
 | events with a structured JSON payload | yes | yes |
-| flash: build, UF2 pack, BOOTSEL copy, verify | yes | — |
+| flash: BOOTSEL volumes, UF2 pack, copy, verify | yes | yes (build is Rust-only) |
 | broker server: `Server`, `Source`, `run_if_requested` | yes | — |
-| replay: `Recorder`, `Recording` | yes | — |
+| replay: `Recorder`, `Recording`, entry reader and playback | yes | yes (recording is Rust-only) |
 | stray hook: `set_stray_hook` | yes | — |
 | custom transports: `over_transport`, `Transport` | yes | — |
 
@@ -181,13 +181,18 @@ binding over `gdb.dll` cannot reach it. Symbol names per layer:
 
 Limits, in the order they bite:
 
-- **Flashing is Rust.** `gdb.h` has no build, pack, copy or verify call, so a
-  binding cannot flash a board: link the Rust crate, or ship a small Rust helper
-  that calls `gdb::flash`.
+- **Building firmware is Rust.** `gdb_flash_build` answers `Unsupported`: it needs
+  cargo and a checkout of `firmware/app`, which a library cannot assume. Build
+  with your own toolchain, then `gdb_flash_pack` the ELF it produced and
+  `gdb_flash_write` it to the drive — packing, copying and verifying are all on
+  the C ABI.
+- **Recording is Rust.** Reading, inspecting and playing a recording are not:
+  `gdb_replay_open` / `_info` / `_next` / `_play` hand the entries over in the
+  file's own shape and play them with the SDK's playback. Capturing a gesture
+  needs the device handle the recording process already owns, which is why that
+  half stays `Recorder`.
 - **The broker's server is Rust.** A client attaches from any language, but the
   process that owns the board embeds `gdb::broker`.
-- **Replay is Rust.** A recording is a plain JSON file, so another language can
-  read one only by re-implementing the format.
 - **`set_stray_hook` is Rust.** A shared handle in every other language still
   counts `stolen_frames`; it cannot hand a foreign frame on.
 - **Named pipes are Windows-only.** `Server::new`, `Client::connect` and

@@ -272,6 +272,118 @@ impl Recording {
     }
 }
 
+/// What a recording says about itself, in one object a host can log or display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Info {
+    pub version: u32,
+    pub seed: u64,
+    /// The screen the session was recorded on, as `[width, height]`.
+    pub screen: (i32, i32),
+    pub started_at_ms: u64,
+    pub entries: usize,
+}
+
+impl Recording {
+    /// The header of a recording: format version, seed, screen, entry count.
+    pub fn info(&self) -> Info {
+        Info {
+            version: self.version,
+            seed: self.seed,
+            screen: self.screen,
+            started_at_ms: self.started_at_ms,
+            entries: self.entries.len(),
+        }
+    }
+}
+
+/// A recording read one entry at a time, for a host that draws or forwards the
+/// entries instead of replaying the file itself.
+///
+/// Reading is not playing: an entry is data, and only [`Recording::play`] knows
+/// how to send it with the recorded timing and how to release what a cancelled
+/// playback still held. [`Reader::play`] is that call, for a host that wants both.
+#[derive(Clone, Debug)]
+pub struct Reader {
+    recording: Recording,
+    index: usize,
+    closed: bool,
+}
+
+impl Reader {
+    /// Loads a recording; the same version check [`Recording::load`] does.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            recording: Recording::load(path)?,
+            index: 0,
+            closed: false,
+        })
+    }
+
+    pub fn info(&self) -> Info {
+        self.recording.info()
+    }
+
+    pub fn recording(&self) -> &Recording {
+        &self.recording
+    }
+
+    /// Back to the first entry, so a second pass reads the same file again.
+    pub fn rewind(&mut self) {
+        self.index = 0;
+        self.closed = false;
+    }
+
+    /// Stops reading. The recording stays loaded, so `info` still answers; `next`
+    /// returns `None` and `play` is refused.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// One entry as the file writes it: `{"at_ms":12,"op":"key","page":7,…}`.
+    ///
+    /// The shape is the recording's own, so a host that reads a file and a host
+    /// that reads this call parse the same keys.
+    pub fn entry_json(entry: &Entry) -> Result<String> {
+        serde_json::to_string(entry)
+            .map_err(|error| Error::invalid(format!("cannot encode entry: {error}")))
+    }
+
+    /// Plays the whole recording onto `device`, from the first entry.
+    ///
+    /// The same call [`Recording::play`] makes, including the release on
+    /// cancellation; `closed` is refused with `Invalid` so a host that stopped
+    /// reading does not also send input by accident.
+    pub fn play(&self, device: &mut Device, speed: f64) -> Result<Outcome> {
+        if self.closed {
+            return Err(Error::invalid(
+                "the replay reader is closed; rewind it before playing",
+            ));
+        }
+        self.recording.play(device, speed, &NoCancel)
+    }
+}
+
+/// The entries in order, so `for entry in &mut reader` reads a recording and a
+/// closed reader simply ends. An entry is `Copy`: it is a timestamp and an op.
+impl Iterator for Reader {
+    type Item = Entry;
+
+    fn next(&mut self) -> Option<Entry> {
+        if self.closed {
+            return None;
+        }
+        let entry = self.recording.entries.get(self.index).copied();
+        if entry.is_some() {
+            self.index += 1;
+        }
+        entry
+    }
+}
+
 /// What a playback did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outcome {
@@ -477,5 +589,98 @@ mod tests {
                 .expect_err("speed must be refused");
             assert_eq!(error.code(), crate::ErrorCode::Invalid);
         }
+    }
+
+    /// A reader hands the entries out in order and in the file's own JSON, so a
+    /// host in another language parses one shape whether it reads the file or
+    /// this call.
+    #[test]
+    fn a_reader_hands_entries_out_one_at_a_time() {
+        let root = std::env::temp_dir().join(format!(
+            "gdb-replay-reader-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("recording.json");
+        let mut recording = Recording::new(9, (1280, 720));
+        recording.push(
+            0,
+            Op::Key {
+                page: 7,
+                usage: 4,
+                down: true,
+            },
+        );
+        recording.push(40, Op::MoveBy { dx: 12, dy: -6 });
+        recording.push(80, Op::Barrier);
+        recording.save(&path).unwrap();
+
+        let mut reader = Reader::open(&path).expect("reader");
+        let info = reader.info();
+        assert_eq!(info.version, VERSION);
+        assert_eq!(info.seed, 9);
+        assert_eq!(info.screen, (1280, 720));
+        assert_eq!(info.entries, 3);
+        assert!(
+            serde_json::to_string(&info)
+                .unwrap()
+                .contains("\"started_at_ms\"")
+        );
+
+        let mut lines = Vec::new();
+        for entry in &mut reader {
+            lines.push(Reader::entry_json(&entry).unwrap());
+        }
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(lines[0].contains("\"op\":\"key\""), "{}", lines[0]);
+        assert!(lines[1].contains("\"op\":\"move_by\""), "{}", lines[1]);
+        assert!(reader.next().is_none(), "the end is None, not a repeat");
+
+        // The same recording still plays, and the play call is the SDK's own.
+        let (mut device, _handle) =
+            crate::Manager::open_mock_with_handle(Default::default()).unwrap();
+        let outcome = reader.play(&mut device, 1000.0).expect("playback");
+        assert!(outcome.is_complete());
+        assert_eq!(outcome.played, 3);
+
+        // A closed reader stops reading and refuses to send input.
+        reader.close();
+        assert!(reader.is_closed());
+        assert!(reader.next().is_none());
+        assert_eq!(
+            reader.play(&mut device, 1.0).unwrap_err().code(),
+            crate::ErrorCode::Invalid
+        );
+        reader.rewind();
+        assert!(!reader.is_closed());
+        assert!(reader.next().is_some(), "a rewind reads the file again");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file that is not this format is refused before any entry is looked at:
+    /// a half-understood macro must never reach the device.
+    #[test]
+    fn a_reader_refuses_a_missing_or_foreign_file() {
+        let root = std::env::temp_dir().join(format!(
+            "gdb-replay-bad-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = Reader::open(root.join("nothing.json")).expect_err("missing file");
+        assert_eq!(missing.code(), crate::ErrorCode::Io);
+
+        let path = root.join("other.json");
+        std::fs::write(
+            &path,
+            "{\"version\":7,\"seed\":1,\"screen\":[1,1],\"started_at_ms\":0,\"entries\":[]}",
+        )
+        .unwrap();
+        let wrong = Reader::open(&path).expect_err("version 7");
+        assert_eq!(wrong.code(), crate::ErrorCode::Invalid);
+        assert!(wrong.message.contains("version 7"), "{wrong}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

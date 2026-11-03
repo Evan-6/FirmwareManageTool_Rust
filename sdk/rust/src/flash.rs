@@ -600,6 +600,59 @@ fn write_chunks<W: Write>(
         .map_err(|error| Error::io(format!("UF2 重新整理失敗：{}：{error}", target.display())))
 }
 
+/// Packs an ELF that is already on disk into the image the bootloader drive
+/// takes, without building anything: the half of flashing a host can do itself.
+///
+/// `build` needs cargo and a checkout of `firmware/app`, which a library cannot
+/// assume; this takes the ELF that build produced.
+pub fn pack_elf(path: &Path) -> Result<Image> {
+    let elf = std::fs::read(path)
+        .map_err(|error| Error::io(format!("無法讀取 {}：{error}", path.display())))?;
+    let bytes = uf2::pack(&elf)?;
+    let blocks = uf2::blocks(&bytes);
+    Ok(Image { bytes, blocks })
+}
+
+/// Waits for the board to come back and reads its Feature 14 identity: the
+/// verification half of [`push`], on its own.
+///
+/// `selector` is a USB serial to insist on (`None` accepts whatever enumerates),
+/// and `timeout` is how long to wait for it. A board that never answers is
+/// `Timeout`; a board that answers with another board id is `Invalid`, so a
+/// transfer into the wrong device is never reported as a success.
+pub fn verify(selector: Option<&str>, timeout: Duration) -> Result<Verified> {
+    verify_with(&SystemHost, selector, timeout)
+}
+
+/// [`verify`] with the enumeration supplied, so the wait can be tested without a
+/// board appearing.
+pub fn verify_with(host: &dyn Host, selector: Option<&str>, timeout: Duration) -> Result<Verified> {
+    struct Never;
+    impl Cancel for Never {
+        fn cancelled(&self) -> bool {
+            false
+        }
+    }
+    // The selector is a serial or a HID path, the same pair `Manager::open`
+    // accepts, and it is resolved at every poll so a renumbered path survives.
+    wait_for_board(
+        &Never,
+        timeout,
+        None,
+        || {
+            let devices = host.devices()?;
+            Ok(match selector {
+                Some(wanted) => devices
+                    .into_iter()
+                    .filter(|entry| entry.serial == wanted || entry.path == wanted)
+                    .collect(),
+                None => devices,
+            })
+        },
+        |entry| host.verify(entry),
+    )
+}
+
 /// Every mounted RP2040 bootloader drive.
 pub fn drives() -> Result<Vec<PathBuf>> {
     #[cfg(windows)]
@@ -1540,5 +1593,65 @@ mod tests {
             !target.exists(),
             "a cancelled copy left a file that looks finished"
         );
+    }
+
+    /// Minimal ELF32 with one loadable flash segment, so a pack can be tested
+    /// without a toolchain.
+    fn elf(bytes: &[u8]) -> Vec<u8> {
+        let phoff = 52usize;
+        let data_at = phoff + 32;
+        let mut out = vec![0u8; data_at];
+        out[..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+        out[4] = 1;
+        out[5] = 1;
+        out[28..32].copy_from_slice(&(phoff as u32).to_le_bytes());
+        out[42..44].copy_from_slice(&32u16.to_le_bytes());
+        out[44..46].copy_from_slice(&1u16.to_le_bytes());
+        out[phoff..phoff + 4].copy_from_slice(&1u32.to_le_bytes());
+        out[phoff + 4..phoff + 8].copy_from_slice(&(data_at as u32).to_le_bytes());
+        out[phoff + 12..phoff + 16].copy_from_slice(&uf2::XIP_BASE.to_le_bytes());
+        out[phoff + 16..phoff + 20].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// The packer a host can reach from another language: a file in, the image
+    /// bytes and their block count out, no cargo involved.
+    #[test]
+    fn pack_elf_packs_a_file_that_is_already_built() {
+        let root = Temp::new();
+        let path = root.0.join("firmware.elf");
+        std::fs::write(&path, elf(&[0xAA; 256])).unwrap();
+        let image = pack_elf(&path).expect("pack");
+        assert_eq!(image.blocks, 1);
+        assert_eq!(image.bytes.len(), 512);
+
+        // A missing file and a file that is not an ELF are both told apart by
+        // code, so a caller can report which one it hit.
+        let missing = pack_elf(&root.0.join("nothing.elf")).expect_err("missing file");
+        assert_eq!(missing.code(), ErrorCode::Io);
+        assert!(missing.message.contains("無法讀取"), "{missing}");
+        std::fs::write(&path, b"not an elf").unwrap();
+        assert_eq!(
+            pack_elf(&path).expect_err("not an ELF").code(),
+            ErrorCode::Invalid
+        );
+    }
+
+    /// Verification on its own: a board that comes back is verified, one that
+    /// never does is a timeout, and a selector that matches nothing waits rather
+    /// than verifying somebody else's board.
+    #[test]
+    fn verify_waits_for_the_board_and_refuses_a_selector_it_cannot_match() {
+        let host = FakeHost::new(vec![Vec::new()]);
+        let verified = verify_with(&host, None, Duration::from_secs(3)).expect("verified");
+        assert_eq!(verified.board, BOARD_ID);
+        assert_eq!(verified.firmware, "3.2.0");
+
+        let host = FakeHost::new(vec![Vec::new()]);
+        let error = verify_with(&host, Some("NOT-THIS-BOARD"), Duration::from_secs(2))
+            .expect_err("a selector that matches nothing");
+        assert_eq!(error.code(), ErrorCode::Timeout);
+        assert!(error.message.contains("runtime hello 驗證逾時"), "{error}");
     }
 }

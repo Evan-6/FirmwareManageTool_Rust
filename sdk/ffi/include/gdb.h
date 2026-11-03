@@ -120,12 +120,12 @@ const char *gdb_version(void);
 /* What this build can do, as a JSON object of booleans:
      {"click_timed":true,"click_at_on":true,"window_metrics":true,
       "window_client_screen":true,"pursuit":true,"move_report":true,
-      "event_json":true,"scheduler":true,"broker":true,"replay":false,
-      "flash":false}
+      "event_json":true,"scheduler":true,"broker":true,"replay":true,
+      "flash":true,"mock_layout":true}
    A host reads it once, after loading the library, to learn which of the
    abilities behind GDB_ABI_VERSION_MINOR are present here: a false is a
-   capability with no C symbol (the Rust-only rows of the README) or one the
-   platform does not have. Freed with gdb_string_free. */
+   capability the platform does not have (window metrics and named pipes need
+   Windows) or one there is no C symbol for. Freed with gdb_string_free. */
 char *gdb_capabilities(void);
 
 /* Fills buffer with the last error message and returns its code (0 = none).
@@ -438,6 +438,110 @@ int32_t gdb_scheduler_resume(gdb_scheduler *scheduler);
 int32_t gdb_scheduler_wait_idle(gdb_scheduler *scheduler, uint32_t timeout_ms);
 /* JSON array of {taskId, code, message} for jobs that failed. */
 char *gdb_scheduler_take_errors(gdb_scheduler *scheduler);
+
+/* --------------------------------------------------------------------- flash
+ *
+ * The flashing steps a host can do from any language: find the bootloader
+ * volumes, pack an ELF it built itself, copy the image, verify the board that
+ * comes back. Building the firmware needs cargo and a firmware checkout, which a
+ * C ABI call cannot assume: gdb_flash_build exists so a caller gets a typed
+ * refusal (GDB_UNSUPPORTED) instead of a missing symbol.
+ */
+
+/* Every mounted RP2040 bootloader volume, as a JSON array of paths: ["E:\\"].
+   An empty array means none is mounted - a board that is not in BOOTSEL looks
+   exactly like that. Freed with gdb_string_free; NULL where the drive table
+   cannot be read (GDB_UNSUPPORTED off Windows), with gdb_last_error set. */
+char *gdb_flash_drives(void);
+
+typedef struct gdb_flash_image gdb_flash_image;
+
+/* The size of a packed image. */
+typedef struct gdb_flash_stats {
+    uint64_t bytes;   /* bytes of the UF2 file */
+    uint64_t blocks;  /* 512-byte UF2 blocks it carries */
+} gdb_flash_stats;
+
+/* Packs an ELF that is already on disk into the UF2 image a bootloader drive
+   takes. Pure computation: an ELF with no flash segment is GDB_INVALID, an
+   unreadable file GDB_IO. out must not be NULL (GDB_INVALID) and receives the
+   handle. */
+int32_t gdb_flash_pack(const char *elf_path, gdb_flash_image **out);
+/* Fills *out. GDB_INVALID on a NULL handle or NULL out, and out is untouched. */
+int32_t gdb_flash_image_stats(const gdb_flash_image *image, gdb_flash_stats *out);
+/* Copies the image to `path`, usually <drive>\\Firmware.uf2, 16 KiB at a time on
+   the calling thread. A failed or interrupted copy removes the file again: the
+   bootloader flashes whatever UF2 it finds on the drive. */
+int32_t gdb_flash_write(const gdb_flash_image *image, const char *path);
+/* Releases a packed image; safe on NULL and safe after the copy. */
+void gdb_flash_image_free(gdb_flash_image *image);
+
+/* Waits for a board to enumerate and answers with its Feature 14 identity:
+     {"board":2,"firmware":"3.2.0","leaseMs":2000}
+   selector is a USB serial or a HID path, NULL for the first board; timeout_ms is
+   how long to wait (the flashing sequence uses 15 s). A board that never answers
+   is GDB_TIMEOUT, one that answers with another board id is GDB_INVALID, so a
+   transfer into the wrong device is never reported as a success. Freed with
+   gdb_string_free. */
+char *gdb_flash_verify(const char *selector, uint32_t timeout_ms);
+
+/* Always GDB_UNSUPPORTED, with a message naming what a build needs. The symbol
+   is here so a host that expected to build gets a typed refusal; building stays
+   gdb::flash::build in Rust. */
+int32_t gdb_flash_build(void);
+
+/* -------------------------------------------------------------------- replay
+ *
+ * A recording is a JSON file of intent - "key 7:0x04 down", "move by 40,-12" -
+ * and reading one is data in, data out. gdb_replay_next hands over one entry per
+ * call in the file's own shape; gdb_replay_play is the SDK's playback, because
+ * only that knows the recorded timing and what to release when it stops. The
+ * recorder stays Rust-only: capturing a gesture needs the device handle the
+ * process that records already owns.
+ */
+
+typedef struct gdb_replay gdb_replay;
+
+/* What a playback did. */
+typedef struct gdb_replay_outcome {
+    uint64_t played;      /* entries that reached the device, in order */
+    uint64_t skipped;     /* entries left when it stopped early */
+    uint64_t elapsed_ms;  /* wall time, gaps included */
+} gdb_replay_outcome;
+
+/* Loads a recording written by this SDK's format version. A different version -
+   newer or older - is GDB_INVALID before any entry is looked at, and a file that
+   is not a recording is GDB_INVALID too. out must not be NULL (GDB_INVALID) and
+   is cleared before the call can fail. */
+int32_t gdb_replay_open(const char *path, gdb_replay **out);
+
+/* The header of a recording:
+     {"version":1,"seed":9,"screen":[1280,720],"started_at_ms":…,"entries":3}
+   Freed with gdb_string_free. */
+char *gdb_replay_info(const gdb_replay *replay);
+
+/* The next entry as one JSON object in the file's own shape, or NULL with GDB_OK
+   at the end of the recording. The shape is the recording's:
+     {"at_ms":12,"op":"key","page":7,"usage":4,"down":true}
+   out must not be NULL (GDB_INVALID) and is cleared before the call can fail, so
+   a caller that ignores the code never frees a stale pointer. Freed with
+   gdb_string_free. */
+int32_t gdb_replay_next(gdb_replay *replay, char **out);
+
+/* Plays the whole recording onto device, from the first entry. speed_milli
+   divides every recorded gap: 1000 is the recorded speed, 2000 twice as fast,
+   500 half. It is an integer because a double argument cannot be passed by a
+   binding that calls the C ABI without floating-point register arguments; the
+   accepted range is 1..=1000000. out may be NULL when only the result matters,
+   and is untouched when the call fails. A closed replay is GDB_INVALID; a device
+   failure is the device's code. */
+int32_t gdb_replay_play(const gdb_replay *replay, gdb_device *device, uint32_t speed_milli, gdb_replay_outcome *out);
+
+/* Stops the reader: gdb_replay_info still answers, gdb_replay_next returns NULL
+   and gdb_replay_play is GDB_INVALID. Idempotent; GDB_INVALID on NULL. */
+int32_t gdb_replay_close(gdb_replay *replay);
+/* Releases a recording handle. Safe on NULL; the file itself is untouched. */
+void gdb_replay_free(gdb_replay *replay);
 
 /* ------------------------------------------------------------------- presence
  *

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -969,6 +970,160 @@ func TestMockLayoutPlacesTheNegativeScreen(t *testing.T) {
 	}
 }
 
+// The flashing and replay surfaces: an ELF packed and copied, a recording read
+// entry by entry and played. No drive, no toolchain and no board.
+
+// flashELF is a minimal ELF32 with one loadable flash segment.
+func flashELF(payload []byte) []byte {
+	const phoff, dataAt = 52, 84
+	out := make([]byte, dataAt)
+	copy(out, []byte{0x7f, 'E', 'L', 'F'})
+	out[4], out[5] = 1, 1
+	put := func(at int, value uint32) {
+		out[at] = byte(value)
+		out[at+1] = byte(value >> 8)
+		out[at+2] = byte(value >> 16)
+		out[at+3] = byte(value >> 24)
+	}
+	put(28, phoff)
+	out[42], out[43] = 32, 0
+	out[44], out[45] = 1, 0
+	put(phoff, 1)
+	put(phoff+4, dataAt)
+	put(phoff+12, 0x10000000)
+	put(phoff+16, uint32(len(payload)))
+	return append(out, payload...)
+}
+
+func TestFlashPacksAndCopiesAndRefusesWhatItCannotDo(t *testing.T) {
+	dir := t.TempDir()
+	elf := filepath.Join(dir, "firmware.elf")
+	if err := os.WriteFile(elf, flashELF(make([]byte, 256)), 0o644); err != nil {
+		t.Fatalf("write ELF: %v", err)
+	}
+
+	// An empty drive table is a board that is not in BOOTSEL, not an error.
+	if _, err := FlashDrives(); err != nil {
+		t.Fatalf("FlashDrives: %v", err)
+	}
+
+	image, err := FlashPack(elf)
+	if err != nil {
+		t.Fatalf("FlashPack: %v", err)
+	}
+	stats, err := image.Stats()
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats != (FlashStats{Bytes: 512, Blocks: 1}) {
+		t.Fatalf("stats = %+v, want 512 bytes in 1 block", stats)
+	}
+
+	target := filepath.Join(dir, "Firmware.uf2")
+	if err := image.Write(target); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	written, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(written) != 512 || written[0] != 0x55 || written[1] != 0x46 || written[2] != 0x32 {
+		t.Fatalf("the copy is not a UF2 block: %d bytes, % x", len(written), written[:4])
+	}
+
+	// A drive that does not exist is Io with a message.
+	var failure *Error
+	err = image.Write(filepath.Join(dir, "no-drive", "Firmware.uf2"))
+	if !errors.As(err, &failure) || failure.Code != IO {
+		t.Fatalf("Write to a missing drive = %v, want Io", err)
+	}
+	image.Close()
+
+	if err := os.WriteFile(elf, []byte("not an elf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FlashPack(elf); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("packing a non-ELF = %v, want Invalid", err)
+	}
+
+	if err := FlashBuild(); !errors.As(err, &failure) || failure.Code != Unsupported ||
+		!strings.Contains(failure.Message, "cargo") {
+		t.Fatalf("FlashBuild = %v, want Unsupported naming cargo", err)
+	}
+
+	// A selector nothing matches waits and then says so.
+	if _, err := FlashVerifyJSON("NO-SUCH-BOARD", 0); !errors.As(err, &failure) ||
+		failure.Code != Timeout {
+		t.Fatalf("FlashVerifyJSON = %v, want Timeout", err)
+	}
+}
+
+func TestReplayReadsEntriesAndPlaysThem(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recording.json")
+	document := `{"version":1,"seed":9,"screen":[1280,720],"started_at_ms":0,
+        "entries":[{"at_ms":0,"op":"key","page":7,"usage":4,"down":true},
+                   {"at_ms":20,"op":"buttons","bits":1},
+                   {"at_ms":40,"op":"barrier"}]}`
+	if err := os.WriteFile(path, []byte(document), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	replay, err := ReplayOpen(path)
+	if err != nil {
+		t.Fatalf("ReplayOpen: %v", err)
+	}
+	info, err := replay.InfoJSON()
+	if err != nil {
+		t.Fatalf("InfoJSON: %v", err)
+	}
+	var header map[string]any
+	if err := json.Unmarshal([]byte(info), &header); err != nil {
+		t.Fatalf("info is not JSON: %v: %s", err, info)
+	}
+	if header["version"].(float64) != 1 || header["entries"].(float64) != 3 {
+		t.Fatalf("header = %s", info)
+	}
+
+	var ops []string
+	for {
+		entry, ok, err := replay.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if !ok {
+			break
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(entry), &decoded); err != nil {
+			t.Fatalf("entry is not JSON: %v: %s", err, entry)
+		}
+		ops = append(ops, decoded["op"].(string))
+	}
+	if strings.Join(ops, ",") != "key,buttons,barrier" {
+		t.Fatalf("entries = %v", ops)
+	}
+
+	device := openMock(t)
+	outcome, err := replay.Play(device, 1000)
+	if err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+	if outcome != (ReplayOutcome{Played: 3, Skipped: 0}) && outcome.Played != 3 {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	replay.Close()
+
+	foreign := filepath.Join(dir, "foreign.json")
+	if err := os.WriteFile(foreign, []byte(`{"version":7,"seed":1,"screen":[1,1],"started_at_ms":0,"entries":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var failure *Error
+	if _, err := ReplayOpen(foreign); !errors.As(err, &failure) || failure.Code != Invalid {
+		t.Fatalf("ReplayOpen(version 7) = %v, want Invalid", err)
+	}
+}
+
 // The device keeps its own record of the latest failure, so a command that
 // failed on another thread — a heartbeat, a scheduler worker — is readable from
 // the one that asks.
@@ -1023,19 +1178,17 @@ func TestRuntimeABIAndCapabilities(t *testing.T) {
 	keys := []string{
 		"click_timed", "click_at_on", "window_metrics", "window_client_screen",
 		"pursuit", "move_report", "event_json", "scheduler", "broker", "replay", "flash",
+		"mock_layout",
 	}
 	for _, name := range keys {
 		if _, ok := listed[name]; !ok {
 			t.Fatalf("the capability list has no %q: %s", name, text)
 		}
 	}
-	for _, name := range []string{"click_timed", "pursuit", "scheduler", "broker"} {
+	for _, name := range []string{"click_timed", "pursuit", "scheduler", "broker", "replay", "flash", "mock_layout"} {
 		if !listed[name] {
 			t.Fatalf("%q is false in this build: %s", name, text)
 		}
-	}
-	if listed["replay"] || listed["flash"] {
-		t.Fatalf("replay and flash have no C symbol: %s", text)
 	}
 }
 
