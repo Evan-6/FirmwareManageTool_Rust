@@ -959,6 +959,53 @@ pub extern "C" fn gdb_mouse_click(raw: *mut GdbDevice, button: u8, count: u8) ->
     }))
 }
 
+/// A click with the press length and the gap the caller asked for. A zero
+/// `hold_ms` or `gap_ms` draws that half the way `gdb_mouse_click` does;
+/// `jitter_ms` spreads each half by up to that much and 0 is exact.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_click_timed(
+    raw: *mut GdbDevice,
+    button: u8,
+    count: u8,
+    hold_ms: u32,
+    gap_ms: u32,
+    jitter_ms: u32,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let button = Button::from_u8(button)?;
+        handle
+            .device
+            .mouse()
+            .click_timed(button, count, hold_ms, gap_ms, jitter_ms)
+    }))
+}
+
+/// Aim and click in one call: an absolute move clamped into `screen`, then a
+/// click with the caller's timing.
+#[unsafe(no_mangle)]
+pub extern "C" fn gdb_mouse_click_at_on(
+    raw: *mut GdbDevice,
+    x: i32,
+    y: i32,
+    screen: GdbScreen,
+    button: u8,
+    count: u8,
+    hold_ms: u32,
+    gap_ms: u32,
+    jitter_ms: u32,
+) -> i32 {
+    code(guard(|| {
+        let handle = unsafe { device(raw) }?;
+        let button = Button::from_u8(button)?;
+        let target = screen_from(screen.kind, screen.arg)?;
+        handle
+            .device
+            .mouse()
+            .click_at(x, y, target, button, count, hold_ms, gap_ms, jitter_ms)
+    }))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gdb_mouse_double_click(raw: *mut GdbDevice, button: u8) -> i32 {
     code(guard(|| {
@@ -1899,6 +1946,79 @@ mod tests {
         assert_eq!(gdb_stolen_frames(ptr::null()), 0);
         assert_eq!(
             gdb_last_error(ptr::null_mut(), 0),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        gdb_device_free(raw);
+    }
+
+    /// A caller-timed click and the aim-and-click pair, over the mock: the press
+    /// length is the caller's, the button ends released, and the click lands
+    /// after the move.
+    #[test]
+    fn a_timed_click_and_a_click_at_reach_the_mock() {
+        let raw = open_mock();
+        let started = Instant::now();
+        assert_eq!(
+            gdb_mouse_click_timed(raw, 1, 2, 30, 0, 0),
+            0,
+            "{}",
+            message()
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(30),
+            "a 30 ms hold returned early"
+        );
+        let states: Vec<u8> = writes(raw)
+            .iter()
+            .filter(|packet| packet.opcode == v3::MOUSE_BUTTONS)
+            .map(|packet| packet.payload[0])
+            .collect();
+        assert_eq!(states, vec![1, 0, 1, 0], "two press/release pairs");
+        assert_eq!(unsafe { &*raw }._mock.as_ref().unwrap().held().buttons, 0);
+
+        // Aim-and-click: the move goes out before either click packet.
+        let before = writes(raw).len();
+        let screen = GdbScreen { kind: 0, arg: 0 };
+        assert_eq!(
+            gdb_mouse_click_at_on(raw, 300, 200, screen, 2, 1, 1, 0, 0),
+            0,
+            "{}",
+            message()
+        );
+        let sent = writes(raw);
+        let tail: Vec<u8> = sent[before..].iter().map(|packet| packet.opcode).collect();
+        assert!(
+            tail.iter().position(|opcode| *opcode == v3::MOUSE_MOVE)
+                < tail.iter().position(|opcode| *opcode == v3::MOUSE_BUTTONS),
+            "the click must come after the move: {tail:?}"
+        );
+        let cursor = sent[before..]
+            .iter()
+            .filter(|packet| packet.opcode == v3::MOUSE_MOVE)
+            .fold((0i32, 0i32), |sum, packet| {
+                (
+                    sum.0 + i32::from(i16::from_le_bytes([packet.payload[0], packet.payload[1]])),
+                    sum.1 + i32::from(i16::from_le_bytes([packet.payload[2], packet.payload[3]])),
+                )
+            });
+        let landed = (960 + cursor.0, 540 + cursor.1);
+        assert!(
+            (landed.0 - 300).abs() <= 1 && (landed.1 - 200).abs() <= 1,
+            "the click landed at {landed:?}"
+        );
+
+        // Caller mistakes are typed, and a bad screen kind is refused before
+        // either half runs.
+        assert_eq!(
+            gdb_mouse_click_timed(raw, 1, 0, 10, 10, 0),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert_eq!(
+            gdb_mouse_click_at_on(raw, 10, 10, GdbScreen { kind: 9, arg: 0 }, 1, 1, 1, 0, 0),
+            i32::from(ErrorCode::Invalid.as_u8())
+        );
+        assert_eq!(
+            gdb_mouse_click_timed(raw, 9, 1, 10, 10, 0),
             i32::from(ErrorCode::Invalid.as_u8())
         );
         gdb_device_free(raw);

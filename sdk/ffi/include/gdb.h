@@ -215,6 +215,12 @@ int32_t gdb_mouse_move_to(gdb_device *device, int32_t x, int32_t y, uint32_t dur
 int32_t gdb_mouse_move_path(gdb_device *device, const gdb_point *points, size_t count, uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_button(gdb_device *device, uint8_t button, bool down);
 int32_t gdb_mouse_click(gdb_device *device, uint8_t button, uint8_t count);
+/* A click with the press length the caller asked for: hold_ms is how long the
+   button stays down, gap_ms how long to wait after the release, and jitter_ms
+   spreads each by up to that much in either direction. A zero hold_ms or gap_ms
+   means "draw that half the way gdb_mouse_click does"; jitter_ms == 0 is an
+   exact press. A press is never left down, even when the call fails. */
+int32_t gdb_mouse_click_timed(gdb_device *device, uint8_t button, uint8_t count, uint32_t hold_ms, uint32_t gap_ms, uint32_t jitter_ms);
 int32_t gdb_mouse_double_click(gdb_device *device, uint8_t button);
 int32_t gdb_mouse_wheel(gdb_device *device, int32_t vertical, int32_t horizontal);
 int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y, uint32_t duration_ms, const gdb_profile *profile);
@@ -257,6 +263,11 @@ static inline gdb_screen gdb_screen_containing(int32_t x, int32_t y) {
 int32_t gdb_mouse_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_move_path_on(gdb_device *device, const gdb_point *points, size_t count, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
 gdb_movement *gdb_mouse_start_move_to_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint32_t duration_ms, const gdb_profile *profile);
+
+/* Aim and click as one call: the absolute move clamped into `screen`, then a
+   click with the caller's timing. Same clamping and error codes as
+   gdb_mouse_move_to_on; the click half is gdb_mouse_click_timed. */
+int32_t gdb_mouse_click_at_on(gdb_device *device, int32_t x, int32_t y, gdb_screen screen, uint8_t button, uint8_t count, uint32_t hold_ms, uint32_t gap_ms, uint32_t jitter_ms);
 
 /* Every monitor, in exactly the order kind 1 indexes them:
  *   [{"left":0,"top":0,"right":1920,"bottom":1080,"primary":true,"dpi":96}, ...]
@@ -434,14 +445,14 @@ char *gdb_watch_listing(const gdb_watch *watch);
  * broker's side of the pipe.
  */
 
-/* Minor additions, each one additive: 1 added the attached surface, 2 the
-   presence probe and the observer handle, 3 the shared-ownership opens and
-   gdb_stolen_frames, 4 gdb_scheduler_submit_at and gdb_scheduler_elapsed_ms,
-   5 the metrics snapshot, 6 the screen-targeted absolute moves, 7 the arrival
-   watch, 8 the monitor listing, the containing anchor, the clamp counters and
-   the separate anchor error codes. Major stays 1: no existing symbol changed
-   shape. */
-#define GDB_ABI_VERSION_MINOR 8u
+    /// The minor revision documents each additive batch: 1 the attached surface,
+    /// 2 the presence probe and the observer handle, 3 the shared-ownership opens
+    /// and gdb_stolen_frames, 4 gdb_scheduler_submit_at and
+    /// gdb_scheduler_elapsed_ms, 5 the metrics snapshot, 6 the screen-targeted
+    /// absolute moves, 7 the arrival watch, 8 the monitor listing, the containing
+    /// anchor, the clamp counters and the separate anchor error codes, 9 the
+    /// caller-timed clicks and gdb_mouse_click_at_on.
+#define GDB_ABI_VERSION_MINOR 9u
 
 typedef struct gdb_remote gdb_remote;
 

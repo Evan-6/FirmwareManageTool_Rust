@@ -274,6 +274,91 @@ fn clicks_drags_and_release_all() {
 }
 
 #[test]
+fn a_timed_click_holds_for_the_requested_length_and_ends_released() {
+    let (device, handle) = open();
+    let mouse = device.mouse();
+
+    let started = Instant::now();
+    mouse
+        .click_timed(Button::Left, 1, 60, 0, 0)
+        .expect("timed click");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(60),
+        "a 60 ms hold returned after {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "a 60 ms hold took {elapsed:?}: the timing is not the caller's"
+    );
+
+    // Exactly one press and one release, in that order, and nothing held.
+    let buttons: Vec<u8> = handle
+        .writes()
+        .iter()
+        .filter(|packet| packet.opcode == input_protocol::v3::MOUSE_BUTTONS)
+        .map(|packet| packet.payload[0])
+        .collect();
+    assert_eq!(buttons, vec![1, 0]);
+    assert_eq!(handle.held().buttons, 0);
+    assert_eq!(device.metrics().clamped_total, 0);
+
+    // Three clicks are three pairs, and the gap is the caller's as well.
+    let before = handle.writes().len();
+    let started = Instant::now();
+    mouse
+        .click_timed(Button::Left, 3, 5, 12, 0)
+        .expect("timed triple click");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(3 * (5 + 12)),
+        "three 5/12 ms clicks took {elapsed:?}"
+    );
+    let buttons: Vec<u8> = handle
+        .writes()
+        .iter()
+        .skip(before)
+        .filter(|packet| packet.opcode == input_protocol::v3::MOUSE_BUTTONS)
+        .map(|packet| packet.payload[0])
+        .collect();
+    assert_eq!(buttons, vec![1, 0, 1, 0, 1, 0]);
+    assert_eq!(handle.held().buttons, 0);
+
+    assert_eq!(
+        mouse
+            .click_timed(Button::Left, 0, 5, 5, 0)
+            .unwrap_err()
+            .code(),
+        gdb::ErrorCode::Invalid,
+        "a zero count is the caller's mistake"
+    );
+}
+
+/// A press the caller opened by hand is still released when the guard that owns
+/// it is dropped: that is the path `drag` and `click_timed` rely on when a move
+/// or a report fails while the button is down.
+#[test]
+fn a_left_button_is_never_left_down_by_a_failed_gesture() {
+    let (device, handle) = open();
+    let mouse = device.mouse();
+    mouse.button(Button::Left, true).expect("press");
+    assert_eq!(handle.held().buttons, 1);
+
+    // A drag whose destination is on no screen fails before it moves, and the
+    // release still goes out.
+    let failure = mouse
+        .drag(Button::Right, 5000, 5000, MotionOptions::linear(0))
+        .expect_err("a point off every screen");
+    assert_eq!(failure.code(), gdb::ErrorCode::Unsupported);
+    assert_eq!(
+        handle.held().buttons,
+        0,
+        "the gesture left a button down: {failure}"
+    );
+    assert!(mouse.button(Button::Left, false).is_ok());
+}
+
+#[test]
 fn a_failed_operation_reconnects_once_and_keeps_working() {
     let (device, handle) = open();
     let writes = handle.writes().len();

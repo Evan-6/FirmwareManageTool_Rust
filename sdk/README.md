@@ -15,7 +15,7 @@ name translation only, so they cannot drift from the SDK — only lag it. A
 language without a binding (C#, JNI, Node, Godot) calls the same `gdb_*`
 functions directly, which is all the three bindings do.
 
-The ABI is major 1, minor 8 (`GDB_ABI_VERSION_MINOR`); `gdb_abi_version()`
+The ABI is major 1, minor 9 (`GDB_ABI_VERSION_MINOR`); `gdb_abi_version()`
 answers the major at run time, `gdb_version()` the SDK string.
 
 ## Choose your handle
@@ -152,8 +152,10 @@ next to the DLL. A C program links it once; the bindings load the DLL instead.
 | shared ownership and its `stolen_frames` counter | yes | yes |
 | presence: probe, probe-all, observer on a timer | yes | yes |
 | pointer: relative, raw, absolute, pursuit, path, screen-targeted, containing anchor, async with retarget and cancel | yes | yes |
+| pointer: window-client anchor, window metrics, per-move landing report | yes | yes |
 | monitor layout and per-monitor DPI | yes | yes |
 | buttons, wheel, drag, keys, long press, chords, sequences, text | yes | yes |
+| clicks: aim-and-click, caller-timed hold and gap, jitter | yes | yes |
 | scheduler: submit, absolute due, every, pause, resume, cancel, wait_idle, taken errors | yes | yes (C++ has no `submit_at` or `elapsed_ms`) |
 | metrics: frame counters, latency percentiles, clamped moves | yes | yes |
 | watch: arrivals, removals, bootloader volumes | yes | yes |

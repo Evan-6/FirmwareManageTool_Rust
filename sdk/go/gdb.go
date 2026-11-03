@@ -29,7 +29,7 @@ import (
 // ABI versions must match gdb.h.
 const (
 	ABIVersion = 1
-	ABIMinor   = 8
+	ABIMinor   = 9
 	VendorID   = 0x03F0
 	ProductID  = 0x0024
 	UsagePage  = 0xFF60
@@ -294,6 +294,8 @@ var (
 	procMonitorsJSON   *syscall.LazyProc
 	procButton         *syscall.LazyProc
 	procClick          *syscall.LazyProc
+	procClickTimed     *syscall.LazyProc
+	procClickAtOn      *syscall.LazyProc
 	procDoubleClick    *syscall.LazyProc
 	procWheel          *syscall.LazyProc
 	procDrag           *syscall.LazyProc
@@ -408,6 +410,8 @@ func library() *syscall.LazyDLL {
 		procMonitorsJSON = dll.NewProc("gdb_monitors_json")
 		procButton = dll.NewProc("gdb_mouse_button")
 		procClick = dll.NewProc("gdb_mouse_click")
+		procClickTimed = dll.NewProc("gdb_mouse_click_timed")
+		procClickAtOn = dll.NewProc("gdb_mouse_click_at_on")
 		procDoubleClick = dll.NewProc("gdb_mouse_double_click")
 		procWheel = dll.NewProc("gdb_mouse_wheel")
 		procDrag = dll.NewProc("gdb_mouse_drag")
@@ -1503,6 +1507,40 @@ func (m *Mouse) Button(button Button, down bool) error {
 // Click clicks count times.
 func (m *Mouse) Click(button Button, count uint8) error {
 	code, _, _ := procClick.Call(m.device.handle, uintptr(button), uintptr(count))
+	return check(code)
+}
+
+// ClickTimed clicks count times with the press length the caller asked for.
+//
+// holdMs is how long the button stays down and gapMs how long to wait after the
+// release; 0 for either draws that half the way Click does. jitterMs spreads
+// each half by up to that much in either direction, so 0 is an exact press.
+func (m *Mouse) ClickTimed(button Button, count uint8, holdMs, gapMs, jitterMs uint32) error {
+	code, _, _ := procClickTimed.Call(
+		m.device.handle,
+		uintptr(button),
+		uintptr(count),
+		uintptr(holdMs),
+		uintptr(gapMs),
+		uintptr(jitterMs),
+	)
+	return check(code)
+}
+
+// ClickAtOn moves to x, y on `screen` and clicks there, in one call.
+func (m *Mouse) ClickAtOn(x, y int32, screen Screen, button Button, count uint8, holdMs, gapMs, jitterMs uint32) error {
+	raw := screen.raw()
+	code, _, _ := procClickAtOn.Call(
+		m.device.handle,
+		uintptr(intArg(x)),
+		uintptr(intArg(y)),
+		uintptr(unsafe.Pointer(&raw)),
+		uintptr(button),
+		uintptr(count),
+		uintptr(holdMs),
+		uintptr(gapMs),
+		uintptr(jitterMs),
+	)
 	return check(code)
 }
 

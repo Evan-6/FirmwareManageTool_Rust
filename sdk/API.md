@@ -198,6 +198,8 @@ int32_t gdb_mouse_move_path(gdb_device *device, const gdb_point *points, size_t 
                             uint32_t duration_ms, const gdb_profile *profile);
 int32_t gdb_mouse_button(gdb_device *device, uint8_t button, bool down);
 int32_t gdb_mouse_click(gdb_device *device, uint8_t button, uint8_t count);
+int32_t gdb_mouse_click_timed(gdb_device *device, uint8_t button, uint8_t count,
+                              uint32_t hold_ms, uint32_t gap_ms, uint32_t jitter_ms);
 int32_t gdb_mouse_double_click(gdb_device *device, uint8_t button);
 int32_t gdb_mouse_wheel(gdb_device *device, int32_t vertical, int32_t horizontal);
 int32_t gdb_mouse_drag(gdb_device *device, uint8_t button, int32_t x, int32_t y,
@@ -364,7 +366,29 @@ Every call has a version that does not sleep, so the caller decides the timing:
 
 `click()` draws its hold and gap from log-normal distributions and takes no
 parameters: a constant press length is the easiest thing to detect. When an exact
-value matters, send `button(true)`, wait, `button(false)`.
+value matters, `click_timed(button, count, hold_ms, gap_ms, jitter_ms)` is the
+same call with the numbers spelled out: `hold_ms` is how long the button stays
+down, `gap_ms` how long to wait after the release, `jitter_ms` spreads each by up
+to that much and `0` is exact. A zero `hold_ms` or `gap_ms` means "draw that half
+the way `click()` does", so one parameter can be fixed while the other stays
+human. A press is never left down: if the call fails while the button is down,
+the release still goes out.
+
+| | Call |
+| --- | --- |
+| Rust | `mouse.click_timed(Button, count, hold_ms, gap_ms, jitter_ms)` |
+| C ABI | `gdb_mouse_click_timed(device, button, count, hold_ms, gap_ms, jitter_ms)` |
+| C++ | `mouse.click_timed(button, count, hold_ms, gap_ms, jitter_ms)` |
+| Python | `mouse.click_timed(button, count, hold_ms=…, gap_ms=…, jitter_ms=…)` |
+| Go | `mouse.ClickTimed(button, count, holdMs, gapMs, jitterMs)` |
+
+`click_at` is the pair a task repeats — aim, then press and release — as one
+call, so a caller crosses the language boundary once: it moves to `(x, y)`
+clamped into the screen target and then clicks there. Rust
+`mouse.click_at(x, y, Screen, Button, count, …)`, C
+`gdb_mouse_click_at_on(device, x, y, screen, button, count, hold_ms, gap_ms,
+jitter_ms)`, C++ `mouse.click_at`, Python `mouse.click_at`, Go
+`mouse.ClickAtOn`. A click count of zero is `Invalid` in every layer.
 
 `MotionOptions.duration_ms` is the caller's number whenever it is non-zero; only
 `0` asks the SDK to pick a natural (Fitts-shaped) duration. `gdb_profile` has no
@@ -765,7 +789,6 @@ void        gdb_string_free(char *text);
 The header is the authority on the minor revision, `GDB_ABI_VERSION_MINOR`;
 `gdb::abi_minor_version()` and `gdb.ABIMinor` read the same number. Every revision
 is additive — no existing symbol changes shape.
-
 | Handle | Opened by | Carries |
 | --- | --- | --- |
 | `gdb_device` | `gdb_open`, `gdb_open_mock`, `gdb_open_shared`, `gdb_open_mock_shared` | session, typed input, queries, errors, logging, `gdb_command`, `gdb_move_raw`, scheduler, metrics |

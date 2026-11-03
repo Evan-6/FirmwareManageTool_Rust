@@ -301,6 +301,8 @@ struct Api {
     decltype(&gdb_mouse_move_path) mouse_move_path = nullptr;
     decltype(&gdb_mouse_button) mouse_button = nullptr;
     decltype(&gdb_mouse_click) mouse_click = nullptr;
+    decltype(&gdb_mouse_click_timed) mouse_click_timed = nullptr;
+    decltype(&gdb_mouse_click_at_on) mouse_click_at_on = nullptr;
     decltype(&gdb_mouse_double_click) mouse_double_click = nullptr;
     decltype(&gdb_mouse_wheel) mouse_wheel = nullptr;
     decltype(&gdb_mouse_drag) mouse_drag = nullptr;
@@ -497,6 +499,8 @@ inline Api& api() {
         GDB_OPTIONAL(mouse_move_to_on, "gdb_mouse_move_to_on")
         GDB_OPTIONAL(mouse_move_path_on, "gdb_mouse_move_path_on")
         GDB_OPTIONAL(mouse_start_move_to_on, "gdb_mouse_start_move_to_on")
+        GDB_OPTIONAL(mouse_click_timed, "gdb_mouse_click_timed")
+        GDB_OPTIONAL(mouse_click_at_on, "gdb_mouse_click_at_on")
         GDB_OPTIONAL(watch_start, "gdb_watch_start")
         GDB_OPTIONAL(watch_stop, "gdb_watch_stop")
         GDB_OPTIONAL(watch_free, "gdb_watch_free")
@@ -769,6 +773,24 @@ public:
     }
     void click(Button button = Button::Left, uint8_t count = 1) {
         detail::check(api().mouse_click(device_, static_cast<uint8_t>(button), count));
+    }
+    // A click with the press length the caller asked for: hold_ms down, gap_ms
+    // after the release, jitter_ms of spread on each (0 = exact). A zero
+    // hold_ms or gap_ms draws that half the way click() does.
+    void click_timed(Button button = Button::Left, uint8_t count = 1,
+                     uint32_t hold_ms = 0, uint32_t gap_ms = 0,
+                     uint32_t jitter_ms = 0) {
+        detail::check(api().mouse_click_timed(device_, static_cast<uint8_t>(button),
+                                              count, hold_ms, gap_ms, jitter_ms));
+    }
+    // Aim and click as one call: the move clamped into `screen`, then the click.
+    void click_at(int32_t x, int32_t y, const Screen& screen,
+                  Button button = Button::Left, uint8_t count = 1,
+                  uint32_t hold_ms = 0, uint32_t gap_ms = 0,
+                  uint32_t jitter_ms = 0) {
+        detail::check(api().mouse_click_at_on(device_, x, y, screen.raw(),
+                                              static_cast<uint8_t>(button), count,
+                                              hold_ms, gap_ms, jitter_ms));
     }
     void double_click(Button button = Button::Left) {
         detail::check(api().mouse_double_click(device_, static_cast<uint8_t>(button)));

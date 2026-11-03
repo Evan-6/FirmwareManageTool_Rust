@@ -118,6 +118,12 @@ func TestMouseAndMovement(t *testing.T) {
 	if err := mouse.Click(Left, 2); err != nil {
 		t.Fatal(err)
 	}
+	if err := mouse.ClickTimed(Left, 1, 25, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := mouse.ClickAtOn(300, 200, ScreenMonitor(0), Left, 1, 5, 0, 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := mouse.Wheel(120, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -595,6 +601,8 @@ func TestMetricsScreenAndWatchSurfaceIsNamed(t *testing.T) {
 	var _ func(*Device) (Metrics, error) = (*Device).Metrics
 	var _ func(*Device) error = (*Device).ResetMetrics
 	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) error = (*Mouse).MoveToOn
+	var _ func(*Mouse, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickTimed
+	var _ func(*Mouse, int32, int32, Screen, Button, uint8, uint32, uint32, uint32) error = (*Mouse).ClickAtOn
 	var _ func(*Mouse, [][2]int32, Screen, uint32, *Profile) error = (*Mouse).MovePathOn
 	var _ func(*Mouse, int32, int32, Screen, uint32, *Profile) (*Movement, error) = (*Mouse).StartMoveToOn
 	var _ func() Screen = ScreenPrimary

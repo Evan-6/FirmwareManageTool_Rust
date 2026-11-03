@@ -69,6 +69,18 @@ class DeviceTests(unittest.TestCase):
             device.keyboard.type_text("hello", interval_ms=1, hold_ms=1, jitter_ms=0)
             device.release_all()
 
+    def test_timed_and_positioned_clicks(self):
+        with gdb.Device.open_mock() as device:
+            started = time.monotonic()
+            device.mouse.click_timed(gdb.Button.LEFT, 1, hold_ms=40, gap_ms=0)
+            self.assertGreaterEqual(time.monotonic() - started, 0.04)
+
+            device.mouse.click_at(300, 200, gdb.Screen.primary, gdb.Button.RIGHT, 1,
+                                  hold_ms=1, gap_ms=0)
+            with self.assertRaises(gdb.GdbError) as caught:
+                device.mouse.click_timed(gdb.Button.LEFT, 0, hold_ms=1)
+            self.assertEqual(caught.exception.code, gdb.ErrorCode.INVALID)
+
     def test_invalid_usage_is_a_typed_error(self):
         with gdb.Device.open_mock() as device:
             with self.assertRaises(gdb.GdbError) as caught:
@@ -240,7 +252,7 @@ class RemoteTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_attached_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 9)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -296,7 +308,7 @@ class ProbeTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_presence_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 9)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -307,13 +319,13 @@ class ProbeTests(unittest.TestCase):
         with open(path, encoding="utf-8") as handle:
             header = handle.read()
         self.assertIn("typedef struct gdb_observer gdb_observer;", header)
-        self.assertIn("#define GDB_ABI_VERSION_MINOR 8u", header)
+        self.assertIn("#define GDB_ABI_VERSION_MINOR 9u", header)
         for name in self.SYMBOLS:
             self.assertIn(f"{name}(", header, f"gdb.h does not declare {name}")
 
     def test_the_library_exports_every_shared_symbol(self):
         symbols = ("gdb_open_shared", "gdb_open_mock_shared", "gdb_stolen_frames")
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 9)
         for name in symbols:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
         here = os.path.dirname(os.path.abspath(__file__))
@@ -375,7 +387,7 @@ class WatchTests(unittest.TestCase):
     )
 
     def test_the_library_exports_every_watch_symbol(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 9)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 
@@ -437,7 +449,7 @@ class ScreenTargetTests(unittest.TestCase):
     SYMBOLS = ("gdb_metrics_clamps", "gdb_monitors_json")
 
     def test_the_library_exports_the_clamp_and_monitor_symbols(self):
-        self.assertEqual(gdb.ABI_VERSION_MINOR, 8)
+        self.assertEqual(gdb.ABI_VERSION_MINOR, 9)
         for name in self.SYMBOLS:
             self.assertTrue(hasattr(gdb.LIBRARY, name), f"gdb.dll has no {name}")
 

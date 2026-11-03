@@ -47,7 +47,7 @@ __all__ = [
 ]
 
 ABI_VERSION = 1
-ABI_VERSION_MINOR = 8
+ABI_VERSION_MINOR = 9
 
 
 class ErrorCode:
@@ -330,6 +330,10 @@ _D.gdb_mouse_button.argtypes = [c_void_p, c_uint8, c_bool]
 _D.gdb_mouse_button.restype = c_int32
 _D.gdb_mouse_click.argtypes = [c_void_p, c_uint8, c_uint8]
 _D.gdb_mouse_click.restype = c_int32
+_D.gdb_mouse_click_timed.argtypes = [c_void_p, c_uint8, c_uint8, c_uint32, c_uint32, c_uint32]
+_D.gdb_mouse_click_timed.restype = c_int32
+_D.gdb_mouse_click_at_on.argtypes = [c_void_p, c_int32, c_int32, _Screen, c_uint8, c_uint8, c_uint32, c_uint32, c_uint32]
+_D.gdb_mouse_click_at_on.restype = c_int32
 _D.gdb_mouse_double_click.argtypes = [c_void_p, c_uint8]
 _D.gdb_mouse_double_click.restype = c_int32
 _D.gdb_mouse_wheel.argtypes = [c_void_p, c_int32, c_int32]
@@ -617,6 +621,24 @@ class Mouse:
 
     def click(self, button: int = Button.LEFT, count: int = 1) -> None:
         _check(_D.gdb_mouse_click(self._handle(), button, count))
+
+    def click_timed(self, button: int = Button.LEFT, count: int = 1, hold_ms: int = 0,
+                    gap_ms: int = 0, jitter_ms: int = 0) -> None:
+        """Clicks with the press length the caller asked for.
+
+        ``hold_ms`` is how long the button stays down and ``gap_ms`` how long to
+        wait after the release; 0 for either draws that half the way ``click``
+        does. ``jitter_ms`` spreads each half by up to that much in either
+        direction, so 0 is an exact press.
+        """
+        _check(_D.gdb_mouse_click_timed(self._handle(), button, count, hold_ms, gap_ms, jitter_ms))
+
+    def click_at(self, x: int, y: int, screen: Screen, button: int = Button.LEFT, count: int = 1,
+                 hold_ms: int = 0, gap_ms: int = 0, jitter_ms: int = 0) -> None:
+        """Moves to ``(x, y)`` on ``screen`` and clicks there, in one call."""
+        _check(_D.gdb_mouse_click_at_on(
+            self._handle(), x, y, screen._raw(), button, count, hold_ms, gap_ms, jitter_ms
+        ))
 
     def double_click(self, button: int = Button.LEFT) -> None:
         _check(_D.gdb_mouse_double_click(self._handle(), button))
